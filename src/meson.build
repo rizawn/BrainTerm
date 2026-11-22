@@ -1,3 +1,5 @@
+subdir('math')
+
 platform_src = is_windows ? files('platform_win.c', 'pty_win.c') : files('platform_unix.c', 'pty_unix.c')
 
 core_sources = files(
@@ -24,14 +26,14 @@ core_sources = files(
 bt_core_lib = static_library(
   'bt_core',
   core_sources,
-  dependencies: [glib_dep, gio_dep, vterm_dep, git2_dep, cjson_dep, yaml_dep, sqlite_dep, md4c_dep, m_dep] + util_dep,
+  dependencies: [glib_dep, gio_dep, vterm_dep, git2_dep, cjson_dep, yaml_dep, sqlite_dep, md4c_dep, m_dep, bt_math_dep] + util_dep,
   include_directories: include_directories('.'),
 )
 
 bt_core_dep = declare_dependency(
   link_with: bt_core_lib,
   include_directories: include_directories('.'),
-  dependencies: [glib_dep, gio_dep, vterm_dep, git2_dep, cjson_dep, yaml_dep, sqlite_dep, md4c_dep, m_dep] + util_dep,
+  dependencies: [glib_dep, gio_dep, vterm_dep, git2_dep, cjson_dep, yaml_dep, sqlite_dep, md4c_dep, m_dep, bt_math_dep] + util_dep,
 )
 
 app_sources = files(

@@ -182,6 +182,14 @@ t_graph_v2 = executable(
 )
 test('graph_v2', t_graph_v2, suite: 'unit')
 
+t_math_tok = executable(
+  'test_math_tok',
+  'unit/test_math_tok.c',
+  include_directories: [test_inc, include_directories('../src')],
+  dependencies: [bt_math_dep, glib_dep, cmocka_dep],
+)
+test('math_tok', t_math_tok, suite: 'unit')
+
 bench_graph = executable(
   'bench_graph',
   ['bench/bench_graph.c', '../src/graphview.c', '../src/ui/graphgl.c', '../src/ui/graphcapture.c', bt_resources],

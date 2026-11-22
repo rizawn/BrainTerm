@@ -37,6 +37,7 @@ cjson_dep = dependency('libcjson', include_type: 'system')
 yaml_dep = dependency('yaml-0.1', include_type: 'system')
 sqlite_dep = dependency('sqlite3', include_type: 'system')
 md4c_dep = dependency('md4c', include_type: 'system')
+harfbuzz_dep = dependency('harfbuzz', version: '>= 4.0', include_type: 'system')
 m_dep = cc.find_library('m', required: false)
 util_dep = is_windows ? [] : [cc.find_library('util', required: false)]
 cmocka_dep = dependency('cmocka', required: get_option('tests'), include_type: 'system')
