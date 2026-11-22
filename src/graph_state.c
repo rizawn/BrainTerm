@@ -212,6 +212,25 @@ static gboolean aabb_hits_core(const BtGraphLabelCand *c, const BtGraphCoreObsta
   return (dx * dx + dy * dy) < (rr * rr);
 }
 
+static gboolean placement_collides(const BtGraphLabelCand *c,
+                                   const BtGraphLabelCand *placed, guint placed_count,
+                                   const BtGraphCoreObstacle *obstacles, guint obstacle_count)
+{
+  for (guint j = 0; j < placed_count; j++) {
+    if (aabb_overlaps(c, &placed[j], 2.0f, 1.0f))
+      return TRUE;
+  }
+  if (obstacles != NULL && obstacle_count > 0) {
+    for (guint k = 0; k < obstacle_count; k++) {
+      if (obstacles[k].node_idx == c->node_idx)
+        continue;
+      if (aabb_hits_core(c, &obstacles[k]))
+        return TRUE;
+    }
+  }
+  return FALSE;
+}
+
 guint bt_graph_place_labels(BtGraphLabelCand *cands, guint cand_count,
                             const BtGraphCoreObstacle *obstacles, guint obstacle_count,
                             guint max_labels, guint max_neighbors,
@@ -261,28 +280,27 @@ guint bt_graph_place_labels(BtGraphLabelCand *cands, guint cand_count,
     if (c.is_neighbor && placed_neighbors >= max_neighbors)
       continue;
 
-    gboolean collides = FALSE;
-    for (guint j = 0; j < placed; j++) {
-      if (aabb_overlaps(&c, &out[j], 2.0f, 1.0f)) {
-        collides = TRUE;
-        break;
-      }
-    }
-    if (collides)
-      continue;
-
-    if (obstacles != NULL && obstacle_count > 0) {
-      for (guint k = 0; k < obstacle_count; k++) {
-        if (obstacles[k].node_idx == c.node_idx)
-          continue;
-        if (aabb_hits_core(&c, &obstacles[k])) {
-          collides = TRUE;
+    /* Try default position first; if anchor provided, also try above / right / left. */
+    gboolean fit = !placement_collides(&c, out, placed, obstacles, obstacle_count);
+    if (!fit && c.anchor_r > 0.0f) {
+      float alts[3][2] = {
+        {floorf(c.anchor_x - c.w * 0.5f), floorf(c.anchor_y - c.anchor_r - c.h - 5.0f)},
+        {floorf(c.anchor_x + c.anchor_r + 6.0f), floorf(c.anchor_y - c.h * 0.5f)},
+        {floorf(c.anchor_x - c.anchor_r - c.w - 6.0f), floorf(c.anchor_y - c.h * 0.5f)},
+      };
+      for (int a = 0; a < 3; a++) {
+        BtGraphLabelCand trial = c;
+        trial.x = alts[a][0];
+        trial.y = alts[a][1];
+        if (!placement_collides(&trial, out, placed, obstacles, obstacle_count)) {
+          c = trial;
+          fit = TRUE;
           break;
         }
       }
-      if (collides)
-        continue;
     }
+    if (!fit)
+      continue;
 
     out[placed++] = c;
     if (c.is_neighbor)

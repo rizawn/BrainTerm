@@ -913,7 +913,17 @@ void bt_graph_gl_render_state(BtGraphGL *gl, const BtGraphRenderState *st)
         core_px = (float)bt_graph_screen_core_radius(nd->radius, st->zoom);
       }
 
-      if (sx + core_px >= -20.0f && sx - core_px <= vp_w + 20.0f &&
+      guint8 nbr = (st->nbr_mask != NULL && i < st->nbr_mask_len) ? st->nbr_mask[i] : BT_NBR_NONE;
+      gboolean is_sel = ((gint)i == st->selected_idx);
+      gboolean is_kbd = ((gint)i == st->focus_idx);
+      gboolean is_hov = ((gint)i == st->hover_idx) || (nbr == BT_NBR_FOCUS);
+      gboolean is_active_node =
+          has_focus ? (nbr != BT_NBR_NONE || is_sel || is_kbd)
+                    : ((st->hub_thresh > 0u && nd->degree >= st->hub_thresh) ||
+                       gl->node_count <= 32u || is_sel || is_kbd);
+
+      if (is_active_node &&
+          sx + core_px >= -20.0f && sx - core_px <= vp_w + 20.0f &&
           sy + core_px >= -20.0f && sy - core_px <= vp_h + 20.0f) {
         gl->obs_scratch[obs_n].cx = sx;
         gl->obs_scratch[obs_n].cy = sy;
@@ -924,10 +934,6 @@ void bt_graph_gl_render_state(BtGraphGL *gl, const BtGraphRenderState *st)
 
       if (!gl->atlas_slots[i].valid)
         continue;
-      guint8 nbr = (st->nbr_mask != NULL && i < st->nbr_mask_len) ? st->nbr_mask[i] : BT_NBR_NONE;
-      gboolean is_sel = ((gint)i == st->selected_idx);
-      gboolean is_kbd = ((gint)i == st->focus_idx);
-      gboolean is_hov = ((gint)i == st->hover_idx) || (nbr == BT_NBR_FOCUS);
       gdouble la = bt_graph_label_alpha(nd, nbr, is_sel, is_kbd, st->hub_thresh, eff_zoom,
                                         has_focus, (gdouble)hf, gl->node_count);
       if (la < 0.06)
@@ -955,6 +961,9 @@ void bt_graph_gl_render_state(BtGraphGL *gl, const BtGraphRenderState *st)
       c->y = floorf(sy + core_px + 5.0f);
       c->w = sl->w_log;
       c->h = sl->h_log;
+      c->anchor_x = sx;
+      c->anchor_y = sy;
+      c->anchor_r = core_px;
       c->alpha = (float)la;
       c->degree = nd->degree;
       c->priority = prio;

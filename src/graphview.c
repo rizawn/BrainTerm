@@ -531,7 +531,17 @@ static void cairo_backend_render(BtGraphRenderer *r, cairo_t *cr, const BtGraphR
       float sx = (float)(width * 0.5 + st->pan_x + nx * zoom);
       float sy = (float)(height * 0.5 + st->pan_y + ny * zoom);
       float core_px = (float)bt_graph_screen_core_radius(nd->radius, zoom);
-      if (sx + core_px >= -20.0f && sx - core_px <= (float)width + 20.0f &&
+      guint8 nbr = (st->nbr_mask != NULL && i < st->nbr_mask_len) ? st->nbr_mask[i] : BT_NBR_NONE;
+      gboolean is_sel = ((gint)i == st->selected_idx);
+      gboolean is_kbd = ((gint)i == st->focus_idx);
+      gboolean is_hov = ((gint)i == st->hover_idx) || (nbr == BT_NBR_FOCUS);
+      gboolean is_active_node =
+          has_focus ? (nbr != BT_NBR_NONE || is_sel || is_kbd)
+                    : ((st->hub_thresh > 0u && nd->degree >= st->hub_thresh) ||
+                       g->nodes->len <= 32u || is_sel || is_kbd);
+
+      if (is_active_node &&
+          sx + core_px >= -20.0f && sx - core_px <= (float)width + 20.0f &&
           sy + core_px >= -20.0f && sy - core_px <= (float)height + 20.0f) {
         p->obs_scratch[obs_n].cx = sx;
         p->obs_scratch[obs_n].cy = sy;
@@ -540,10 +550,6 @@ static void cairo_backend_render(BtGraphRenderer *r, cairo_t *cr, const BtGraphR
         obs_n++;
       }
 
-      guint8 nbr = (st->nbr_mask != NULL && i < st->nbr_mask_len) ? st->nbr_mask[i] : BT_NBR_NONE;
-      gboolean is_sel = ((gint)i == st->selected_idx);
-      gboolean is_kbd = ((gint)i == st->focus_idx);
-      gboolean is_hov = ((gint)i == st->hover_idx) || (nbr == BT_NBR_FOCUS);
       gdouble la = bt_graph_label_alpha(nd, nbr, is_sel, is_kbd, st->hub_thresh, zoom,
                                         has_focus, hf, g->nodes->len);
       if (la < 0.06)
@@ -572,6 +578,9 @@ static void cairo_backend_render(BtGraphRenderer *r, cairo_t *cr, const BtGraphR
       c->y = floorf(sy + core_px + 5.0f);
       c->w = bw;
       c->h = bh;
+      c->anchor_x = sx;
+      c->anchor_y = sy;
+      c->anchor_r = core_px;
       c->alpha = (float)la;
       c->degree = nd->degree;
       c->priority = prio;

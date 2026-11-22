@@ -74,6 +74,7 @@ gdouble bt_graph_label_alpha(const BtGraphNode *nd, guint8 nbr_state, gboolean i
 typedef struct {
   guint node_idx;
   float x, y, w, h;
+  float anchor_x, anchor_y, anchor_r; /* optional node center/radius for 4-way fallback placement */
   float alpha;
   guint degree;
   guint8 priority;       /* 5=kbd focus, 4=selected, 3=hovered, 2=neighbor, 1=hub */
