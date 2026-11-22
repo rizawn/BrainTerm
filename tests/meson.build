@@ -242,6 +242,7 @@ t_fix_ui = executable(
     '../src/ui/askbar.c',
     '../src/ui/themeload.c',
     bt_resources,
+    bt_build_stamp_h,
   ],
   include_directories: [test_inc, include_directories('../src')],
   dependencies: [bt_core_dep, gtk4_dep, adw_dep, gtksource_dep, cmocka_dep, m_dep],

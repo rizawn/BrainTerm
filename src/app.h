@@ -14,6 +14,7 @@ typedef struct BtApp BtApp;
 BtApp *bt_app_new(void);
 void bt_app_free(BtApp *app);
 int bt_app_run(BtApp *app, int argc, char **argv);
+const gchar *bt_app_build_stamp(void);
 
 /* State persistence (§6.A1, §7.5): lives in user config dir, never in vault. */
 gchar *bt_app_state_file_path(void);

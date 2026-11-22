@@ -58,6 +58,19 @@ bt_resources = gnome.compile_resources(
   source_dir: 'data',
 )
 
+py3 = find_program('python3', 'python')
+bt_build_stamp_h = custom_target(
+  'bt_build_stamp_h',
+  output: 'bt_build_stamp.h',
+  command: [
+    py3,
+    meson.project_source_root() / 'scripts' / 'gen_build_stamp.py',
+    meson.project_source_root(),
+    '@OUTPUT@',
+  ],
+  build_always_stale: true,
+)
+
 subdir('src')
 if get_option('tests')
   subdir('tests')

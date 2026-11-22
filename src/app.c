@@ -2,6 +2,7 @@
  * Presentation-layer reskin only; all M1–M8 actions & core contracts intact. */
 #include "app.h"
 #include "agents.h"
+#include "bt_build_stamp.h"
 #include "checkpoint.h"
 #include "frontmatter.h"
 #include "graph.h"
@@ -1168,7 +1169,7 @@ static void act_about(GSimpleAction *a, GVariant *p, gpointer ud)
   BtApp *app = ud;
   bt_app_show_error(app, "BrainTerm 0.1.0",
                     "Local-first Markdown second-brain with embedded ConPTY/libvterm terminal and 2D Brain Graph.\n"
-                    "Theme: Ink (monochrome).");
+                    "Build: " BT_BUILD_STAMP);
 }
 
 static void act_quit(GSimpleAction *a, GVariant *p, gpointer ud)
@@ -1546,12 +1547,18 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
   gtk_box_append(GTK_BOX(app->status_git_box), sg_ico);
   gtk_box_append(GTK_BOX(app->status_git_box), app->status_git_lbl);
 
+  GtkWidget *s_sep2 = gtk_label_new("·");
+  GtkWidget *sb_build = gtk_label_new("build " BT_BUILD_STAMP);
+  gtk_widget_set_name(sb_build, "bt-status-build");
+
   gtk_box_append(GTK_BOX(sbar), sv_ico);
   gtk_box_append(GTK_BOX(sbar), app->status_vault_lbl);
   gtk_box_append(GTK_BOX(sbar), s_sep);
   gtk_box_append(GTK_BOX(sbar), app->status_notes_lbl);
   gtk_box_append(GTK_BOX(sbar), spacer);
   gtk_box_append(GTK_BOX(sbar), app->status_git_box);
+  gtk_box_append(GTK_BOX(sbar), s_sep2);
+  gtk_box_append(GTK_BOX(sbar), sb_build);
 
   GtkWidget *tview = adw_toolbar_view_new();
   adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(tview), header);
@@ -1593,6 +1600,12 @@ static gint on_handle_local_options(GApplication *gapp, GVariantDict *opts, gpoi
 {
   (void)gapp;
   BtApp *app = ud;
+  if (g_variant_dict_contains(opts, "version")) {
+    printf("BrainTerm 0.1.0 (build %s)\n", BT_BUILD_STAMP);
+    fflush(stdout);
+    return 0;
+  }
+  g_printerr("BrainTerm build %s\n", BT_BUILD_STAMP);
   gchar *vault = NULL;
   if (g_variant_dict_lookup(opts, "vault", "s", &vault)) {
     g_free(app->cli_vault);
@@ -1639,6 +1652,7 @@ BtApp *bt_app_new(void)
   static const GOptionEntry opts[] = {
     {"vault", 'v', 0, G_OPTION_ARG_STRING, NULL, "Open vault directory", "DIR"},
     {"smoke-test", 0, 0, G_OPTION_ARG_NONE, NULL, "Open UI, verify startup, and exit", NULL},
+    {"version", 'V', 0, G_OPTION_ARG_NONE, NULL, "Print version and build stamp and exit", NULL},
     {NULL, 0, 0, 0, NULL, NULL, NULL},
   };
   g_application_add_main_option_entries(G_APPLICATION(app->adw_app), opts);
@@ -1676,5 +1690,6 @@ int bt_app_run(BtApp *app, int argc, char **argv)
   return g_application_run(G_APPLICATION(app->adw_app), argc, argv);
 }
 
+const gchar *bt_app_build_stamp(void) { return BT_BUILD_STAMP; }
 BtVault *bt_app_vault(const BtApp *app) { return app ? app->vault : NULL; }
 GtkWindow *bt_app_window(const BtApp *app) { return app ? app->window : NULL; }

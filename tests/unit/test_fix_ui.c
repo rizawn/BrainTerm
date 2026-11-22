@@ -383,9 +383,24 @@ static void test_dual_pane_editor_and_graph(void **state)
   bt_editorpane_free(ed);
 }
 
+static void test_build_stamp(void **state)
+{
+  (void)state;
+  const gchar *stamp = bt_app_build_stamp();
+  assert_non_null(stamp);
+  assert_true(stamp[0] != '\0');
+  /* Expected: "<short-hash>[-dirty] · YYYY-MM-DD HH:MM" (or "nogit · ..."). */
+  gboolean matched = g_regex_match_simple(
+      "^([0-9a-f]{7,12}(-dirty)?|nogit) \\x{00B7} [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}$",
+      stamp, G_REGEX_DEFAULT, G_REGEX_MATCH_DEFAULT);
+  if (!matched)
+    fail_msg("Build stamp '%s' did not match expected format", stamp);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
+    cmocka_unit_test(test_build_stamp),
     cmocka_unit_test(test_state_restore),
     cmocka_unit_test(test_view_pages),
     cmocka_unit_test(test_editor_mapped),

@@ -60,7 +60,7 @@ styles_abs = get_option('prefix') / styles_install_dir
 
 bt_exe = executable(
   'bt',
-  app_sources + [bt_resources],
+  app_sources + [bt_resources, bt_build_stamp_h],
   dependencies: [bt_core_dep, gtk4_dep, adw_dep, gtksource_dep, m_dep] + font_deps,
   c_args: font_args + [
     '-DBT_LANGSPEC_DIR="@0@"'.format(langspec_abs),
