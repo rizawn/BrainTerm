@@ -12,8 +12,8 @@
 #include <string.h>
 
 #define BT_AUTOSAVE_MS     1000u
-#define BT_COLUMN_MAX_PX   680
-#define BT_COLUMN_MIN_PAD  24
+#define BT_COLUMN_MAX_PX   760
+#define BT_COLUMN_MIN_PAD  16
 
 struct BtEditorPane {
   GtkWidget *box;
@@ -122,13 +122,13 @@ static void init_markdown_tags(BtEditorPane *p)
   const gchar *mono = pick_mono_family();
   p->t_h1 = gtk_text_buffer_create_tag(b, "bt-h1",
       "scale", 1.65, "weight", PANGO_WEIGHT_BOLD, "foreground", "#E6E8EC",
-      "pixels-above-lines", 14, "pixels-below-lines", 6, NULL);
+      "pixels-above-lines", 8, "pixels-below-lines", 3, NULL);
   p->t_h2 = gtk_text_buffer_create_tag(b, "bt-h2",
       "scale", 1.35, "weight", PANGO_WEIGHT_BOLD, "foreground", "#E6E8EC",
-      "pixels-above-lines", 12, "pixels-below-lines", 5, NULL);
+      "pixels-above-lines", 6, "pixels-below-lines", 2, NULL);
   p->t_h3 = gtk_text_buffer_create_tag(b, "bt-h3",
       "scale", 1.15, "weight", PANGO_WEIGHT_SEMIBOLD, "foreground", "#E6E8EC",
-      "pixels-above-lines", 9, "pixels-below-lines", 4, NULL);
+      "pixels-above-lines", 4, "pixels-below-lines", 2, NULL);
   p->t_syntax = gtk_text_buffer_create_tag(b, "bt-syntax",
       "foreground", "#666D79", NULL);
   p->t_bold = gtk_text_buffer_create_tag(b, "bt-bold",
@@ -156,7 +156,7 @@ static void init_markdown_tags(BtEditorPane *p)
   p->t_ai_heading = gtk_text_buffer_create_tag(b, "bt-ai-heading",
       "scale", 1.25, "weight", PANGO_WEIGHT_BOLD, "foreground", "#8B7CF6",
       "paragraph-background", "#1C1A29",
-      "pixels-above-lines", 12, "pixels-below-lines", 5, NULL);
+      "pixels-above-lines", 6, "pixels-below-lines", 2, NULL);
   p->t_ai_body = gtk_text_buffer_create_tag(b, "bt-ai-body",
       "foreground", "#C4BFFA", "paragraph-background", "#181724", NULL);
 }
@@ -468,13 +468,15 @@ static void update_column_margins(BtEditorPane *p)
 {
   if (p->scrolled == NULL || p->view == NULL)
     return;
-  GtkAdjustment *hadj = gtk_scrolled_window_get_hadjustment(GTK_SCROLLED_WINDOW(p->scrolled));
-  gint vw = hadj ? (gint)gtk_adjustment_get_page_size(hadj) : gtk_widget_get_width(p->scrolled);
-  if (vw <= 0)
-    vw = gtk_widget_get_width(p->scrolled);
   gint m = BT_COLUMN_MIN_PAD;
-  if (vw > BT_COLUMN_MAX_PX + BT_COLUMN_MIN_PAD * 2)
-    m = (vw - BT_COLUMN_MAX_PX) / 2;
+  if (!gtk_source_view_get_show_line_numbers(p->view)) {
+    GtkAdjustment *hadj = gtk_scrolled_window_get_hadjustment(GTK_SCROLLED_WINDOW(p->scrolled));
+    gint vw = hadj ? (gint)gtk_adjustment_get_page_size(hadj) : gtk_widget_get_width(p->scrolled);
+    if (vw <= 0)
+      vw = gtk_widget_get_width(p->scrolled);
+    if (vw > BT_COLUMN_MAX_PX + BT_COLUMN_MIN_PAD * 2)
+      m = (vw - BT_COLUMN_MAX_PX) / 2;
+  }
   if (m != p->cur_margin) {
     p->cur_margin = m;
     gtk_text_view_set_left_margin(GTK_TEXT_VIEW(p->view), m);
@@ -808,11 +810,11 @@ BtEditorPane *bt_editorpane_new(BtEditorSaveFn on_save, BtEditorLinkFn on_link,
   gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(pane->view), GTK_WRAP_WORD_CHAR);
   gtk_text_view_set_left_margin(GTK_TEXT_VIEW(pane->view), BT_COLUMN_MIN_PAD);
   gtk_text_view_set_right_margin(GTK_TEXT_VIEW(pane->view), BT_COLUMN_MIN_PAD);
-  gtk_text_view_set_top_margin(GTK_TEXT_VIEW(pane->view), 24);
-  gtk_text_view_set_bottom_margin(GTK_TEXT_VIEW(pane->view), 24);
-  gtk_text_view_set_pixels_above_lines(GTK_TEXT_VIEW(pane->view), 5);
-  gtk_text_view_set_pixels_below_lines(GTK_TEXT_VIEW(pane->view), 5);
-  gtk_text_view_set_pixels_inside_wrap(GTK_TEXT_VIEW(pane->view), 4);
+  gtk_text_view_set_top_margin(GTK_TEXT_VIEW(pane->view), 14);
+  gtk_text_view_set_bottom_margin(GTK_TEXT_VIEW(pane->view), 16);
+  gtk_text_view_set_pixels_above_lines(GTK_TEXT_VIEW(pane->view), 1);
+  gtk_text_view_set_pixels_below_lines(GTK_TEXT_VIEW(pane->view), 1);
+  gtk_text_view_set_pixels_inside_wrap(GTK_TEXT_VIEW(pane->view), 2);
   gtk_source_view_set_show_line_numbers(pane->view, TRUE);
   gtk_source_view_set_highlight_current_line(pane->view, TRUE);
   gtk_source_view_set_tab_width(pane->view, 2);
@@ -934,8 +936,10 @@ void bt_editorpane_set_dark(BtEditorPane *pane, gboolean dark)
 
 void bt_editorpane_set_line_numbers(BtEditorPane *pane, gboolean show)
 {
-  if (pane != NULL && pane->view != NULL)
+  if (pane != NULL && pane->view != NULL) {
     gtk_source_view_set_show_line_numbers(pane->view, show);
+    update_column_margins(pane);
+  }
 }
 
 gchar *bt_editorpane_buffer_hash(const BtEditorPane *pane)
