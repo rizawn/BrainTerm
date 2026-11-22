@@ -51,18 +51,18 @@ void main()
     center_px = vec2((ndc2.x * 0.5 + 0.5) * u_viewport.x,
                      (0.5 - ndc2.y * 0.5) * u_viewport.y);
     float persp = clamp(2.4 / max(clip.w, 0.35), 0.35, 2.4);
-    core_px = max(a_geom.z * persp * 0.85, 2.0) * u_scale;
+    core_px = clamp(a_geom.z * persp * 0.85, 2.0, 14.0) * u_scale;
     depth_fade = clamp(1.42 - clip.w * 0.22, 0.28, 1.0);
   } else {
     vec2 wpos = a_geom.xy * bt;
     center_px = u_viewport * 0.5 + u_pan + wpos * u_zoom;
-    core_px = max(a_geom.z * u_zoom, 2.2) * u_scale;
+    core_px = clamp(a_geom.z * pow(max(u_zoom, 0.05), 0.35), 2.2, 14.0) * u_scale;
   }
 
-  float halo_mult = (u_high_quality != 0) ? 3.8 : 2.2;
+  float halo_mult = (u_high_quality != 0) ? 2.4 : 1.8;
   if (a_state >= 1.5)
-    halo_mult = 4.5;
-  float quad_px = core_px * halo_mult + 4.0 * u_scale;
+    halo_mult = 2.8;
+  float quad_px = min(core_px * halo_mult + 2.0 * u_scale, 30.0 * u_scale);
 
   vec2 px = center_px + corner * quad_px;
   vec2 ndc = (px / u_viewport) * 2.0 - 1.0;

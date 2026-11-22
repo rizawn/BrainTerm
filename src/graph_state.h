@@ -87,6 +87,9 @@ typedef struct {
   guint node_idx;
 } BtGraphCoreObstacle;
 
+/* Sub-linear screen-space core radius matching graph_node.vert.glsl (max 14 px). */
+gdouble bt_graph_screen_core_radius(gdouble base_radius, gdouble zoom);
+
 /* Default visible label cap at a given zoom (20 at zoom 1.0). */
 guint bt_graph_label_cap_for_zoom(gdouble zoom);
 

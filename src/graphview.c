@@ -428,9 +428,10 @@ static void cairo_backend_render(BtGraphRenderer *r, cairo_t *cr, const BtGraphR
         continue;
 
       gdouble alpha = (has_focus && nbr == BT_NBR_NONE && !is_sel) ? dim_factor : 1.0;
-      gdouble halo_r = nd->radius * (is_foc ? (3.2 + 0.9 * hf) : (is_sel ? 3.0 : 2.5));
-      gdouble halo_a = is_foc ? (0.45 + 0.45 * hf)
-                              : ((nbr == BT_NBR_NEIGHBOR || is_sel) ? 0.55 : (0.34 * alpha));
+      gdouble core_w = bt_graph_screen_core_radius(nd->radius, zoom) / zoom;
+      gdouble halo_r = MIN(core_w * (is_foc ? 2.8 : (is_sel ? 2.6 : 2.4)), 30.0 / zoom);
+      gdouble halo_a = is_foc ? (0.40 + 0.38 * hf)
+                              : ((nbr == BT_NBR_NEIGHBOR || is_sel) ? 0.45 : (0.28 * alpha));
       cairo_surface_t *sp =
           (is_foc || is_sel) ? p->glow[BT_SPRITE_ACCENT] : p->glow[sprite_slot_for_kind(nd->kind)];
       stamp_glow(cr, sp, nx, ny, halo_r, halo_a, heavy);
@@ -458,7 +459,7 @@ static void cairo_backend_render(BtGraphRenderer *r, cairo_t *cr, const BtGraphR
     gboolean is_sel = ((gint)i == st->selected_idx);
     gdouble alpha = (has_focus && nbr == BT_NBR_NONE && !is_sel) ? dim_factor : 1.0;
     guint32 col = node_color(nd->kind);
-    gdouble rad = nd->radius;
+    gdouble rad = bt_graph_screen_core_radius(nd->radius, zoom) / zoom;
 
     if (nd->kind == BT_NODE_SESSION || nd->kind == BT_NODE_IMPORT_ROOT) {
       gdouble s = rad * 1.9;
@@ -527,7 +528,7 @@ static void cairo_backend_render(BtGraphRenderer *r, cairo_t *cr, const BtGraphR
       node_pos(nd, &nx, &ny);
       float sx = (float)(width * 0.5 + st->pan_x + nx * zoom);
       float sy = (float)(height * 0.5 + st->pan_y + ny * zoom);
-      float core_px = MAX((float)(nd->radius * zoom), 2.2f);
+      float core_px = (float)bt_graph_screen_core_radius(nd->radius, zoom);
       if (sx + core_px >= -20.0f && sx - core_px <= (float)width + 20.0f &&
           sy + core_px >= -20.0f && sy - core_px <= (float)height + 20.0f) {
         p->obs_scratch[obs_n].cx = sx;

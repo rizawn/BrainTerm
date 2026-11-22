@@ -867,7 +867,7 @@ void bt_graph_gl_render_state(BtGraphGL *gl, const BtGraphRenderState *st)
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, gl->bloom_tex[0]);
     glUniform1i(gl->u_comp_bloom, 1);
-    glUniform1f(gl->u_comp_str, 0.68f);
+    glUniform1f(gl->u_comp_str, 0.35f);
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
     glActiveTexture(GL_TEXTURE1);
@@ -904,11 +904,11 @@ void bt_graph_gl_render_state(BtGraphGL *gl, const BtGraphRenderState *st)
         sy = (float)psy;
         depth_w = pw;
         float persp = CLAMP(2.4f / MAX((float)pw, 0.35f), 0.35f, 2.4f);
-        core_px = MAX((float)nd->radius * persp * 0.85f, 2.0f);
+        core_px = CLAMP((float)nd->radius * persp * 0.85f, 2.0f, 14.0f);
       } else {
         sx = vp_w * 0.5f + (float)st->pan_x + (float)nd->x * bt_eased * (float)st->zoom;
         sy = vp_h * 0.5f + (float)st->pan_y + (float)nd->y * bt_eased * (float)st->zoom;
-        core_px = MAX((float)nd->radius * (float)st->zoom, 2.2f);
+        core_px = (float)bt_graph_screen_core_radius(nd->radius, st->zoom);
       }
 
       if (sx + core_px >= -20.0f && sx - core_px <= vp_w + 20.0f &&

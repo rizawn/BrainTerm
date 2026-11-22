@@ -146,6 +146,11 @@ gdouble bt_graph_label_alpha(const BtGraphNode *nd, guint8 nbr_state, gboolean i
   return 0.0;
 }
 
+gdouble bt_graph_screen_core_radius(gdouble base_radius, gdouble zoom)
+{
+  return CLAMP(base_radius * pow(MAX(zoom, 0.05), 0.35), 2.2, 14.0);
+}
+
 guint bt_graph_label_cap_for_zoom(gdouble zoom)
 {
   int cap = (int)llround(20.0 * CLAMP(zoom, 0.5, 2.5));
