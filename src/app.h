@@ -4,6 +4,7 @@
 
 #include <gtk/gtk.h>
 
+#include "linkresolve.h"
 #include "vault.h"
 
 G_BEGIN_DECLS
@@ -31,6 +32,7 @@ GtkWindow *bt_app_window(const BtApp *app);
 /* Vault & note actions (all funnel through GActions where user-triggered). */
 gboolean bt_app_open_vault(BtApp *app, const gchar *path, GError **error);
 gboolean bt_app_open_note(BtApp *app, const gchar *relpath, GError **error);
+gboolean bt_app_activate_link(BtApp *app, const gchar *raw_target);
 gboolean bt_app_open_or_create_wikilink(BtApp *app, const gchar *target, GError **error);
 gboolean bt_app_save_active(BtApp *app, GError **error);
 
@@ -39,6 +41,10 @@ void bt_app_set_status(BtApp *app, const gchar *message);
 void bt_app_set_statusbar_notice(BtApp *app, const gchar *message);
 const gchar *bt_app_last_statusbar_notice(const BtApp *app);
 void bt_app_set_fail_next_save_for_test(BtApp *app, gboolean fail);
+void bt_app_set_launcher_for_test(BtApp *app, BtLinkLauncherFn launcher, gpointer user_data);
+GtkPopover *bt_app_active_confirm_popover_for_test(const BtApp *app);
+const gchar *bt_app_active_confirm_detail_for_test(const BtApp *app);
+gboolean bt_app_confirm_active_popover_for_test(BtApp *app, gboolean dont_ask_again);
 const gchar *bt_app_active_note(const BtApp *app);
 gpointer bt_app_editor(const BtApp *app);
 void bt_app_set_test_mode(BtApp *app, gboolean enabled);

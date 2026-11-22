@@ -29,6 +29,9 @@ void bt_editorpane_set_links_open_on_click(BtEditorPane *pane, gboolean open_on_
 gboolean bt_editorpane_get_links_open_on_click(const BtEditorPane *pane);
 void bt_editorpane_set_index_snapshot(BtEditorPane *pane, BtIndexSnapshot *snap, const BtVault *vault);
 void bt_editorpane_refresh_link_styles(BtEditorPane *pane);
+gboolean bt_editorpane_scroll_to_anchor(BtEditorPane *pane, const gchar *anchor, gdouble *out_target_y);
+gboolean bt_editorpane_has_anchor_flash(const BtEditorPane *pane);
+void bt_editorpane_link_popover_rect(const BtEditorPane *pane, GdkRectangle *out_rect);
 gchar *bt_editorpane_buffer_hash(const BtEditorPane *pane);
 void bt_editorpane_free(BtEditorPane *pane);
 

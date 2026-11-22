@@ -53,6 +53,8 @@ struct BtEditorPane {
   GtkTextTag *t_ai_heading;
   GtkTextTag *t_ai_body;
   GtkTextTag *t_math;
+  GtkTextTag *t_anchor_flash;
+  guint anchor_flash_id;
 
   BtEditorSaveFn on_save;
   BtEditorLinkFn on_link;
@@ -94,6 +96,9 @@ struct BtEditorPane {
   guint32 hover_base_rgb;
   gint64 hover_start_us;
   guint hover_anim_id;
+  gdouble last_click_x;
+  gdouble last_click_y;
+  gboolean has_last_click;
 };
 
 /* ----------------------------------------------------- autosave & dirty -- */
@@ -208,6 +213,8 @@ static void init_markdown_tags(BtEditorPane *p)
       "foreground", "#C4BFFA", "paragraph-background", "#181724", NULL);
   p->t_math = gtk_text_buffer_create_tag(b, "bt-math",
       "family", mono, "foreground", "#E6E8EC", "style", PANGO_STYLE_NORMAL, NULL);
+  p->t_anchor_flash = gtk_text_buffer_create_tag(b, "bt-anchor-flash",
+      "paragraph-background", "#2A2447", NULL);
   gtk_text_tag_set_priority(p->t_link_hover,
                             gtk_text_tag_table_get_size(gtk_text_buffer_get_tag_table(b)) - 1);
 }
@@ -1220,6 +1227,9 @@ static gboolean evaluate_and_fire_link_click(BtEditorPane *pane, guint button, g
   }
 
   /* Consume click without moving the caret in the source note (ADR-016). */
+  pane->last_click_x = rel_x;
+  pane->last_click_y = rel_y;
+  pane->has_last_click = TRUE;
   place_caret_byte_in_buffer(pane, pre_caret_byte);
   if (pane->on_link != NULL && span->raw_target != NULL)
     pane->on_link(span->raw_target, pane->user_data);
@@ -1914,6 +1924,168 @@ gboolean bt_editorpane_get_links_open_on_click(const BtEditorPane *pane)
   return pane ? pane->links_open_on_click : TRUE;
 }
 
+static void clear_anchor_flash(BtEditorPane *pane)
+{
+  if (pane == NULL)
+    return;
+  if (pane->anchor_flash_id != 0) {
+    g_source_remove(pane->anchor_flash_id);
+    pane->anchor_flash_id = 0;
+  }
+  if (pane->buffer != NULL && pane->t_anchor_flash != NULL) {
+    GtkTextIter s, e;
+    gtk_text_buffer_get_bounds(GTK_TEXT_BUFFER(pane->buffer), &s, &e);
+    gtk_text_buffer_remove_tag(GTK_TEXT_BUFFER(pane->buffer), pane->t_anchor_flash, &s, &e);
+  }
+}
+
+static gboolean on_anchor_flash_done(gpointer ud)
+{
+  BtEditorPane *pane = ud;
+  pane->anchor_flash_id = 0;
+  clear_anchor_flash(pane);
+  return G_SOURCE_REMOVE;
+}
+
+static gchar *normalize_heading_slug(const gchar *raw)
+{
+  if (raw == NULL)
+    return g_strdup("");
+  GString *out = g_string_new(NULL);
+  gboolean last_dash = TRUE;
+  for (const gchar *p = raw; *p != '\0'; p = g_utf8_next_char(p)) {
+    gunichar uc = g_utf8_get_char(p);
+    if (g_unichar_isalnum(uc)) {
+      g_string_append_unichar(out, g_unichar_tolower(uc));
+      last_dash = FALSE;
+    } else if (uc == ' ' || uc == '-' || uc == '_') {
+      if (!last_dash) {
+        g_string_append_c(out, '-');
+        last_dash = TRUE;
+      }
+    }
+  }
+  while (out->len > 0 && out->str[out->len - 1] == '-')
+    g_string_truncate(out, out->len - 1);
+  return g_string_free(out, FALSE);
+}
+
+gboolean bt_editorpane_scroll_to_anchor(BtEditorPane *pane, const gchar *anchor, gdouble *out_target_y)
+{
+  if (pane == NULL || pane->buffer == NULL || anchor == NULL || anchor[0] == '\0')
+    return FALSE;
+  GtkTextBuffer *buf = GTK_TEXT_BUFFER(pane->buffer);
+  g_autofree gchar *want_cf = g_utf8_casefold(anchor, -1);
+  g_autofree gchar *want_slug = normalize_heading_slug(anchor);
+
+  gint nlines = gtk_text_buffer_get_line_count(buf);
+  gint match_line = -1;
+  for (gint ln = 0; ln < nlines; ln++) {
+    GtkTextIter s, e;
+    gtk_text_buffer_get_iter_at_line(buf, &s, ln);
+    e = s;
+    if (!gtk_text_iter_ends_line(&e))
+      gtk_text_iter_forward_to_line_end(&e);
+    g_autofree gchar *txt = gtk_text_buffer_get_text(buf, &s, &e, FALSE);
+    const gchar *p = txt;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != '#')
+      continue;
+    while (*p == '#') p++;
+    if (*p != ' ' && *p != '\t')
+      continue;
+    g_autofree gchar *hdr = g_strstrip(g_strdup(p));
+    gsize hl = strlen(hdr);
+    while (hl > 0 && (hdr[hl - 1] == '#' || hdr[hl - 1] == ' ' || hdr[hl - 1] == '\t'))
+      hdr[--hl] = '\0';
+    g_autofree gchar *hdr_cf = g_utf8_casefold(hdr, -1);
+    g_autofree gchar *hdr_slug = normalize_heading_slug(hdr);
+    if (strcmp(hdr_cf, want_cf) == 0 ||
+        (want_slug[0] != '\0' && strcmp(hdr_slug, want_slug) == 0)) {
+      match_line = ln;
+      break;
+    }
+  }
+  if (match_line < 0)
+    return FALSE;
+
+  GtkTextIter hs, he;
+  gtk_text_buffer_get_iter_at_line(buf, &hs, match_line);
+  he = hs;
+  if (!gtk_text_iter_ends_line(&he))
+    gtk_text_iter_forward_to_line_end(&he);
+  gtk_text_buffer_place_cursor(buf, &hs);
+
+  gdouble ty = 0.0;
+  if (pane->view != NULL) {
+    GdkRectangle hrect = {0}, vis = {0};
+    gtk_text_view_get_iter_location(GTK_TEXT_VIEW(pane->view), &hs, &hrect);
+    gtk_text_view_get_visible_rect(GTK_TEXT_VIEW(pane->view), &vis);
+    if (vis.height > 0)
+      ty = MAX(0.0, (gdouble)hrect.y - (gdouble)vis.height / 3.0);
+    else
+      ty = MAX(0.0, (gdouble)hrect.y);
+    if (pane->scrolled != NULL) {
+      GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(pane->scrolled));
+      if (vadj != NULL) {
+        gdouble upper = gtk_adjustment_get_upper(vadj);
+        gdouble page = gtk_adjustment_get_page_size(vadj);
+        if (upper > page)
+          ty = CLAMP(ty, 0.0, upper - page);
+        gtk_adjustment_set_value(vadj, ty);
+      }
+    }
+    gtk_text_view_scroll_to_iter(GTK_TEXT_VIEW(pane->view), &hs, 0.0, TRUE, 0.0, 0.33);
+  }
+  if (out_target_y != NULL)
+    *out_target_y = ty;
+
+  clear_anchor_flash(pane);
+  if (!editor_reduce_motion(pane) && pane->t_anchor_flash != NULL) {
+    GtkTextIter flash_end = he;
+    gtk_text_iter_forward_line(&flash_end);
+    gtk_text_buffer_apply_tag(buf, pane->t_anchor_flash, &hs, &flash_end);
+    pane->anchor_flash_id = g_timeout_add(600, on_anchor_flash_done, pane);
+  }
+  return TRUE;
+}
+
+gboolean bt_editorpane_has_anchor_flash(const BtEditorPane *pane)
+{
+  return pane != NULL && pane->anchor_flash_id != 0;
+}
+
+void bt_editorpane_link_popover_rect(const BtEditorPane *pane, GdkRectangle *out_rect)
+{
+  if (out_rect == NULL)
+    return;
+  out_rect->x = 40;
+  out_rect->y = 40;
+  out_rect->width = 4;
+  out_rect->height = 18;
+  if (pane == NULL || pane->view == NULL)
+    return;
+  if (pane->has_last_click) {
+    out_rect->x = (int)pane->last_click_x;
+    out_rect->y = (int)pane->last_click_y;
+    out_rect->width = 4;
+    out_rect->height = 18;
+    return;
+  }
+  GtkTextIter it;
+  gtk_text_buffer_get_iter_at_mark(GTK_TEXT_BUFFER(pane->buffer), &it,
+                                   gtk_text_buffer_get_insert(GTK_TEXT_BUFFER(pane->buffer)));
+  GdkRectangle brect = {0};
+  gtk_text_view_get_iter_location(GTK_TEXT_VIEW(pane->view), &it, &brect);
+  gint wx = 0, wy = 0;
+  gtk_text_view_buffer_to_window_coords(GTK_TEXT_VIEW(pane->view), GTK_TEXT_WINDOW_WIDGET,
+                                        brect.x, brect.y, &wx, &wy);
+  out_rect->x = MAX(wx, 8);
+  out_rect->y = MAX(wy, 8);
+  out_rect->width = MAX(brect.width, 4);
+  out_rect->height = MAX(brect.height, 16);
+}
+
 void bt_editorpane_set_index_snapshot(BtEditorPane *pane, BtIndexSnapshot *snap, const BtVault *vault)
 {
   if (pane == NULL)
@@ -1948,6 +2120,7 @@ void bt_editorpane_free(BtEditorPane *pane)
     return;
   if (pane->view != NULL)
     g_object_remove_weak_pointer(G_OBJECT(pane->view), (gpointer *)&pane->view);
+  clear_anchor_flash(pane);
   clear_hover_state(pane);
   cancel_autosave(pane);
   g_clear_pointer(&pane->link_spans, g_array_unref);
@@ -1969,8 +2142,10 @@ GtkWidget *bt_editorpane_view_widget(BtEditorPane *pane)
 void bt_editorpane_load(BtEditorPane *pane, const gchar *relpath, const gchar *text, gsize length)
 {
   g_return_if_fail(pane != NULL && relpath != NULL);
+  clear_anchor_flash(pane);
   clear_hover_state(pane);
   cancel_autosave(pane);
+  pane->has_last_click = FALSE;
   g_free(pane->relpath);
   pane->relpath = g_strdup(relpath);
 
@@ -2003,8 +2178,10 @@ void bt_editorpane_load(BtEditorPane *pane, const gchar *relpath, const gchar *t
 void bt_editorpane_clear(BtEditorPane *pane)
 {
   g_return_if_fail(pane != NULL);
+  clear_anchor_flash(pane);
   clear_hover_state(pane);
   cancel_autosave(pane);
+  pane->has_last_click = FALSE;
   g_clear_pointer(&pane->relpath, g_free);
   pane->loading = TRUE;
   gtk_text_buffer_set_text(GTK_TEXT_BUFFER(pane->buffer), "", 0);

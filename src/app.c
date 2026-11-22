@@ -58,6 +58,7 @@ struct BtApp {
 
   BtVault *vault;
   BtIndex *index;
+  BtIndexSnapshot *link_snap;
   BtWatcher *watcher;
   BtFileTree *tree;
   BtEditorPane *editor;
@@ -86,6 +87,14 @@ struct BtApp {
   gboolean capture_applied;
   gboolean capture_failed;
   gboolean fail_next_save_for_test;
+  gboolean confirm_external_urls;
+  gboolean session_external_confirmed;
+  BtLinkLauncherFn test_launcher;
+  gpointer test_launcher_ud;
+  GtkPopover *active_confirm_popover;
+  gchar *active_confirm_detail;
+  BtLinkResolution *pending_confirm_res;
+  gboolean pending_confirm_dont_ask;
 };
 
 /* ----------------------------------------------------- state.ini (§7.5) -- */
@@ -379,6 +388,374 @@ gpointer bt_app_editor(const BtApp *app)
   return app ? app->editor : NULL;
 }
 
+static void reveal_in_file_manager(BtApp *app, const gchar *relpath, gboolean is_dir);
+static void on_startup(GApplication *gapp, gpointer ud);
+static void on_activate(GtkApplication *gtk_app, gpointer ud);
+
+static void rebuild_link_snapshot(BtApp *app)
+{
+  if (app == NULL)
+    return;
+  if (app->editor != NULL)
+    bt_editorpane_set_index_snapshot(app->editor, NULL, NULL);
+  g_clear_pointer(&app->link_snap, bt_index_snapshot_free);
+  if (app->vault != NULL)
+    app->link_snap = bt_index_snapshot_from_vault(app->vault);
+  if (app->editor != NULL)
+    bt_editorpane_set_index_snapshot(app->editor, app->link_snap, app->vault);
+}
+
+static void clear_active_confirm(BtApp *app)
+{
+  if (app == NULL)
+    return;
+  if (app->active_confirm_popover != NULL) {
+    GtkPopover *pop = app->active_confirm_popover;
+    app->active_confirm_popover = NULL;
+    gtk_popover_popdown(pop);
+    if (gtk_widget_get_parent(GTK_WIDGET(pop)) != NULL)
+      gtk_widget_unparent(GTK_WIDGET(pop));
+  }
+  g_clear_pointer(&app->active_confirm_detail, g_free);
+  g_clear_pointer(&app->pending_confirm_res, bt_link_resolution_free);
+}
+
+typedef struct {
+  BtApp *app;
+  gchar *target;
+} AsyncOpenCtx;
+
+static void async_open_ctx_free(AsyncOpenCtx *c)
+{
+  if (!c) return;
+  g_free(c->target);
+  g_free(c);
+}
+
+static void on_file_launcher_done(GObject *src, GAsyncResult *res, gpointer ud)
+{
+  AsyncOpenCtx *c = ud;
+  g_autoptr(GError) err = NULL;
+  if (!gtk_file_launcher_launch_finish(GTK_FILE_LAUNCHER(src), res, &err)) {
+    g_autofree gchar *msg = g_strdup_printf("Cannot open '%s': %s",
+                                            c->target ? c->target : "",
+                                            err ? err->message : "error");
+    bt_app_set_statusbar_notice(c->app, msg);
+  } else {
+    bt_app_set_statusbar_notice(c->app, "");
+  }
+  async_open_ctx_free(c);
+}
+
+static void on_uri_launcher_done(GObject *src, GAsyncResult *res, gpointer ud)
+{
+  AsyncOpenCtx *c = ud;
+  g_autoptr(GError) err = NULL;
+  if (!gtk_uri_launcher_launch_finish(GTK_URI_LAUNCHER(src), res, &err)) {
+    g_autofree gchar *msg = g_strdup_printf("Cannot open URL: %s",
+                                            err ? err->message : "error");
+    bt_app_set_statusbar_notice(c->app, msg);
+  } else {
+    bt_app_set_statusbar_notice(c->app, "");
+  }
+  async_open_ctx_free(c);
+}
+
+static void execute_permitted_open(BtApp *app, const BtLinkResolution *res)
+{
+  if (app == NULL || res == NULL)
+    return;
+
+  if (res->kind == BT_LINK_KIND_URL) {
+    if (res->url == NULL)
+      return;
+    bt_app_set_statusbar_notice(app, "Opening URL...");
+    if (app->test_launcher != NULL) {
+      app->test_launcher(res->url, TRUE, app->test_launcher_ud);
+      bt_app_set_statusbar_notice(app, "");
+      return;
+    }
+    GtkUriLauncher *ul = gtk_uri_launcher_new(res->url);
+    AsyncOpenCtx *ctx = g_new0(AsyncOpenCtx, 1);
+    ctx->app = app;
+    ctx->target = g_strdup(res->url);
+    gtk_uri_launcher_launch(ul, app->window, NULL, on_uri_launcher_done, ctx);
+    g_object_unref(ul);
+    return;
+  }
+
+  if (res->path == NULL || app->vault == NULL)
+    return;
+
+  if (res->kind == BT_LINK_KIND_DIR) {
+    bt_app_set_statusbar_notice(app, "Opening folder in file manager...");
+    if (app->test_launcher != NULL) {
+      app->test_launcher(res->path, FALSE, app->test_launcher_ud);
+      bt_app_set_statusbar_notice(app, "");
+      return;
+    }
+    reveal_in_file_manager(app, res->path, TRUE);
+    bt_app_set_statusbar_notice(app, "");
+    return;
+  }
+
+  g_autofree gchar *smsg = g_strdup_printf("Opening %s...", res->path);
+  bt_app_set_statusbar_notice(app, smsg);
+  if (app->test_launcher != NULL) {
+    app->test_launcher(res->path, FALSE, app->test_launcher_ud);
+    bt_app_set_statusbar_notice(app, "");
+    return;
+  }
+
+  g_autoptr(GError) rerr = NULL;
+  g_autofree gchar *abs = vault_resolve(app->vault, res->path, &rerr);
+  if (abs == NULL) {
+    bt_app_set_statusbar_notice(app, rerr ? rerr->message : "Blocked: path rejected");
+    return;
+  }
+  GFile *gf = g_file_new_for_path(abs);
+  GtkFileLauncher *fl = gtk_file_launcher_new(gf);
+  g_object_unref(gf);
+  AsyncOpenCtx *ctx = g_new0(AsyncOpenCtx, 1);
+  ctx->app = app;
+  ctx->target = g_strdup(res->path);
+  gtk_file_launcher_launch(fl, app->window, NULL, on_file_launcher_done, ctx);
+  g_object_unref(fl);
+}
+
+static void on_confirm_open_cancel(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  clear_active_confirm(ud);
+}
+
+static void on_confirm_dont_ask_toggled(GtkCheckButton *cb, gpointer ud)
+{
+  BtApp *app = ud;
+  if (app != NULL)
+    app->pending_confirm_dont_ask = gtk_check_button_get_active(cb);
+}
+
+static BtLinkResolution *dup_resolution(const BtLinkResolution *src)
+{
+  if (src == NULL) return NULL;
+  BtLinkResolution *d = g_new0(BtLinkResolution, 1);
+  d->status = src->status;
+  d->kind = src->kind;
+  d->block_reason = src->block_reason;
+  d->path = g_strdup(src->path);
+  d->anchor = g_strdup(src->anchor);
+  d->block_id = g_strdup(src->block_id);
+  d->display = g_strdup(src->display);
+  d->url = g_strdup(src->url);
+  if (src->candidates != NULL)
+    d->candidates = g_strdupv(src->candidates);
+  return d;
+}
+
+static void on_confirm_open_accept(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  bt_app_confirm_active_popover_for_test(ud, ((BtApp *)ud)->pending_confirm_dont_ask);
+}
+
+static void on_confirm_popover_closed(GtkPopover *pop, gpointer ud)
+{
+  BtApp *app = ud;
+  if (app != NULL && app->active_confirm_popover == pop) {
+    app->active_confirm_popover = NULL;
+    if (gtk_widget_get_parent(GTK_WIDGET(pop)) != NULL)
+      gtk_widget_unparent(GTK_WIDGET(pop));
+    g_clear_pointer(&app->active_confirm_detail, g_free);
+    g_clear_pointer(&app->pending_confirm_res, bt_link_resolution_free);
+  }
+}
+
+static void show_confirm_open_popover(BtApp *app, const BtLinkResolution *res,
+                                      const BtLinkOpenPolicy *pol)
+{
+  clear_active_confirm(app);
+  app->pending_confirm_res = dup_resolution(res);
+  app->pending_confirm_dont_ask = FALSE;
+
+  const gchar *title = "Confirm open";
+  const gchar *btn_lbl = "Open anyway";
+  g_autofree gchar *detail = NULL;
+
+  if (pol->action == BT_LINK_OPEN_CONFIRM_URL) {
+    title = "Open external URL?";
+    btn_lbl = "Open URL";
+    if (pol->has_userinfo) {
+      detail = g_strdup_printf("%s\nWarning: embedded credentials were stripped.",
+                               pol->safe_display_url ? pol->safe_display_url : res->url);
+    } else {
+      detail = g_strdup(pol->safe_display_url ? pol->safe_display_url : res->url);
+    }
+  } else if (pol->action == BT_LINK_OPEN_CONFIRM_DIR) {
+    title = "Reveal folder in Explorer?";
+    btn_lbl = "Reveal";
+    detail = g_strdup(res->path ? res->path : "");
+  } else {
+    title = "Open unrecognized file type?";
+    btn_lbl = "Open anyway";
+    detail = g_strdup(res->path ? res->path : "");
+  }
+  app->active_confirm_detail = g_strdup(detail ? detail : "");
+
+  GtkWidget *parent_w = app->editor ? bt_editorpane_view_widget(app->editor) : GTK_WIDGET(app->window);
+  if (parent_w == NULL)
+    return;
+
+  GtkWidget *pop = gtk_popover_new();
+  gtk_widget_set_parent(pop, parent_w);
+  GdkRectangle rect = {40, 40, 4, 18};
+  if (app->editor != NULL)
+    bt_editorpane_link_popover_rect(app->editor, &rect);
+  gtk_popover_set_pointing_to(GTK_POPOVER(pop), &rect);
+  gtk_popover_set_autohide(GTK_POPOVER(pop), TRUE);
+
+  GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+  gtk_widget_set_margin_top(box, 10);
+  gtk_widget_set_margin_bottom(box, 10);
+  gtk_widget_set_margin_start(box, 12);
+  gtk_widget_set_margin_end(box, 12);
+
+  GtkWidget *tl = gtk_label_new(title);
+  gtk_widget_add_css_class(tl, "heading");
+  gtk_label_set_xalign(GTK_LABEL(tl), 0.0f);
+  gtk_box_append(GTK_BOX(box), tl);
+
+  GtkWidget *dl = gtk_label_new(detail);
+  gtk_label_set_xalign(GTK_LABEL(dl), 0.0f);
+  gtk_label_set_wrap(GTK_LABEL(dl), TRUE);
+  gtk_label_set_max_width_chars(GTK_LABEL(dl), 52);
+  gtk_widget_add_css_class(dl, "bt-mono");
+  gtk_box_append(GTK_BOX(box), dl);
+
+  if (pol->action == BT_LINK_OPEN_CONFIRM_URL) {
+    GtkWidget *cb = gtk_check_button_new_with_label("Don't ask again this session");
+    g_signal_connect(cb, "toggled", G_CALLBACK(on_confirm_dont_ask_toggled), app);
+    gtk_box_append(GTK_BOX(box), cb);
+  }
+
+  GtkWidget *btns = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+  gtk_widget_set_halign(btns, GTK_ALIGN_END);
+  GtkWidget *b_cancel = gtk_button_new_with_label("Cancel");
+  GtkWidget *b_ok = gtk_button_new_with_label(btn_lbl);
+  gtk_widget_add_css_class(b_ok, "suggested-action");
+  g_signal_connect(b_cancel, "clicked", G_CALLBACK(on_confirm_open_cancel), app);
+  g_signal_connect(b_ok, "clicked", G_CALLBACK(on_confirm_open_accept), app);
+  gtk_box_append(GTK_BOX(btns), b_cancel);
+  gtk_box_append(GTK_BOX(btns), b_ok);
+  gtk_box_append(GTK_BOX(box), btns);
+
+  gtk_popover_set_child(GTK_POPOVER(pop), box);
+  app->active_confirm_popover = GTK_POPOVER(pop);
+  g_signal_connect(pop, "closed", G_CALLBACK(on_confirm_popover_closed), app);
+  if (!app->smoke_test && gtk_widget_get_mapped(parent_w))
+    gtk_popover_popup(GTK_POPOVER(pop));
+}
+
+void bt_app_set_launcher_for_test(BtApp *app, BtLinkLauncherFn launcher, gpointer user_data)
+{
+  if (app == NULL)
+    return;
+  app->test_launcher = launcher;
+  app->test_launcher_ud = user_data;
+}
+
+GtkPopover *bt_app_active_confirm_popover_for_test(const BtApp *app)
+{
+  return app ? app->active_confirm_popover : NULL;
+}
+
+const gchar *bt_app_active_confirm_detail_for_test(const BtApp *app)
+{
+  return app ? app->active_confirm_detail : NULL;
+}
+
+gboolean bt_app_confirm_active_popover_for_test(BtApp *app, gboolean dont_ask_again)
+{
+  if (app == NULL || app->pending_confirm_res == NULL)
+    return FALSE;
+  BtLinkResolution *res = dup_resolution(app->pending_confirm_res);
+  if (res->kind == BT_LINK_KIND_URL && dont_ask_again)
+    app->session_external_confirmed = TRUE;
+  clear_active_confirm(app);
+  execute_permitted_open(app, res);
+  bt_link_resolution_free(res);
+  return TRUE;
+}
+
+gboolean bt_app_activate_link(BtApp *app, const gchar *raw_target)
+{
+  g_return_val_if_fail(app != NULL, FALSE);
+  if (app->vault == NULL || raw_target == NULL)
+    return FALSE;
+  if (app->link_snap == NULL)
+    rebuild_link_snapshot(app);
+  if (app->link_snap == NULL)
+    return FALSE;
+
+  const gchar *src = app->editor ? bt_editorpane_relpath(app->editor) : NULL;
+  BtLinkResolution *res = bt_link_resolve(app->link_snap, src, raw_target);
+  if (res == NULL)
+    return TRUE;
+
+  if (res->status == BT_LINK_PLACEHOLDER) {
+    bt_link_resolution_free(res);
+    return TRUE;
+  }
+
+  if (res->status == BT_LINK_UNRESOLVED) {
+    bt_app_set_statusbar_notice(app, "Note not found");
+    bt_link_resolution_free(res);
+    return FALSE;
+  }
+
+  if (res->status == BT_LINK_AMBIGUOUS) {
+    guint cnt = 0;
+    while (res->candidates != NULL && res->candidates[cnt] != NULL)
+      cnt++;
+    g_autofree gchar *msg = g_strdup_printf("%u notes match. Click to choose.", cnt);
+    bt_app_set_statusbar_notice(app, msg);
+    bt_link_resolution_free(res);
+    return FALSE;
+  }
+
+  gboolean need_url_confirm = app->confirm_external_urls && !app->session_external_confirmed;
+  BtLinkOpenPolicy pol;
+  bt_link_check_open_policy(res, app->vault, need_url_confirm, &pol);
+
+  gboolean ok = TRUE;
+  if (pol.action == BT_LINK_OPEN_BLOCKED) {
+    bt_app_set_statusbar_notice(app, pol.reason_msg ? pol.reason_msg : "Blocked");
+    ok = FALSE;
+  } else if (res->kind == BT_LINK_KIND_SAME_NOTE) {
+    if (res->anchor != NULL && app->editor != NULL)
+      bt_editorpane_scroll_to_anchor(app->editor, res->anchor, NULL);
+    bt_app_set_statusbar_notice(app, "");
+  } else if (res->kind == BT_LINK_KIND_NOTE) {
+    g_autoptr(GError) nerr = NULL;
+    ok = bt_app_open_note(app, res->path, &nerr);
+    if (!ok) {
+      bt_app_set_statusbar_notice(app, nerr ? nerr->message : "Cannot open note");
+    } else {
+      if (res->anchor != NULL && app->editor != NULL)
+        bt_editorpane_scroll_to_anchor(app->editor, res->anchor, NULL);
+      bt_app_set_statusbar_notice(app, "");
+    }
+  } else if (pol.action == BT_LINK_OPEN_ALLOW) {
+    execute_permitted_open(app, res);
+  } else {
+    show_confirm_open_popover(app, res, &pol);
+  }
+
+  bt_link_open_policy_clear(&pol);
+  bt_link_resolution_free(res);
+  return ok;
+}
+
 void bt_app_set_test_mode(BtApp *app, gboolean enabled)
 {
   if (app != NULL)
@@ -390,8 +767,10 @@ void bt_app_prepare_ui_for_test(BtApp *app)
   if (app == NULL || app->adw_app == NULL)
     return;
   app->smoke_test = TRUE;
-  g_application_register(G_APPLICATION(app->adw_app), NULL, NULL);
-  g_application_activate(G_APPLICATION(app->adw_app));
+  if (app->window == NULL) {
+    on_startup(G_APPLICATION(app->adw_app), app);
+    on_activate(GTK_APPLICATION(app->adw_app), app);
+  }
 }
 
 void bt_app_show_error(BtApp *app, const gchar *title, const gchar *detail)
@@ -479,6 +858,7 @@ gboolean bt_app_open_vault(BtApp *app, const gchar *path, GError **error)
     bt_editorpane_clear(app->editor);
   if (app->tree != NULL)
     bt_filetree_populate(app->tree, app->vault);
+  rebuild_link_snapshot(app);
   refresh_graph(app, !app->smoke_test);
 
   if (app->tabs != NULL && app->capture_dir == NULL && !app->smoke_test) {
@@ -801,6 +1181,7 @@ static gboolean on_editor_save(const gchar *relpath, const gchar *text, gsize le
     bt_editorpane_mark_saved(app->editor);
     if (app->index != NULL)
       bt_index_upsert_note(app->index, app->vault, relpath, NULL, NULL);
+    rebuild_link_snapshot(app);
     refresh_graph(app, FALSE);
     update_header(app);
     gchar *msg = g_strdup_printf("Saved — %s", relpath);
@@ -824,12 +1205,7 @@ static gboolean on_editor_save(const gchar *relpath, const gchar *text, gsize le
 
 static void on_editor_link(const gchar *target, gpointer ud)
 {
-  BtApp *app = ud;
-  GError *err = NULL;
-  if (!bt_app_open_or_create_wikilink(app, target, &err)) {
-    bt_app_show_error(app, "Cannot open wiki-link", err->message);
-    g_error_free(err);
-  }
+  bt_app_activate_link((BtApp *)ud, target);
 }
 
 static void on_editor_dirty(gboolean dirty, gpointer ud)
@@ -950,6 +1326,7 @@ static void on_watcher_event(BtWatchEventKind kind, const gchar *relpath, gpoint
     vault_rescan(app->vault, NULL, NULL);
     if (app->tree) bt_filetree_populate(app->tree, app->vault);
     if (app->index) bt_watcher_audit_drift(app->vault, app->index, NULL);
+    rebuild_link_snapshot(app);
     refresh_graph(app, FALSE);
     show_toast(app, "Rename storm detected — rescanned vault", 3);
     return;
@@ -960,6 +1337,7 @@ static void on_watcher_event(BtWatchEventKind kind, const gchar *relpath, gpoint
     if (app->tree) bt_filetree_populate(app->tree, app->vault);
     if (app->editor && g_strcmp0(bt_editorpane_relpath(app->editor), relpath) == 0)
       bt_editorpane_show_conflict(app->editor, TRUE);
+    rebuild_link_snapshot(app);
     refresh_graph(app, FALSE);
     return;
   }
@@ -969,6 +1347,7 @@ static void on_watcher_event(BtWatchEventKind kind, const gchar *relpath, gpoint
     bt_index_upsert_note(app->index, app->vault, relpath, &skipped, NULL);
   vault_rescan(app->vault, NULL, NULL);
   if (app->tree) bt_filetree_populate(app->tree, app->vault);
+  rebuild_link_snapshot(app);
   refresh_graph(app, FALSE);
 
   if (app->editor && g_strcmp0(bt_editorpane_relpath(app->editor), relpath) == 0) {
@@ -1137,6 +1516,7 @@ static gboolean rename_note_in_app(BtApp *app, const gchar *old_relpath,
   vault_rescan(app->vault, NULL, NULL);
   if (app->tree != NULL)
     bt_filetree_populate(app->tree, app->vault);
+  rebuild_link_snapshot(app);
 
   if (was_open) {
     gchar *text = NULL;
@@ -1227,6 +1607,7 @@ static gboolean create_named_note_in_app(BtApp *app, const gchar *parent_dir,
   vault_rescan(app->vault, NULL, NULL);
   if (app->tree != NULL)
     bt_filetree_populate(app->tree, app->vault);
+  rebuild_link_snapshot(app);
   refresh_graph(app, TRUE);
   bt_app_open_note(app, new_rel, NULL);
 
@@ -1295,6 +1676,7 @@ static void duplicate_note_in_app(BtApp *app, const gchar *relpath)
   vault_rescan(app->vault, NULL, NULL);
   if (app->tree != NULL)
     bt_filetree_populate(app->tree, app->vault);
+  rebuild_link_snapshot(app);
   refresh_graph(app, TRUE);
   bt_app_open_note(app, dest, NULL);
 
@@ -1555,6 +1937,7 @@ static void on_delete_confirm_response(GObject *src, GAsyncResult *res, gpointer
       vault_rescan(ctx->app->vault, NULL, NULL);
       if (ctx->app->tree != NULL)
         bt_filetree_populate(ctx->app->tree, ctx->app->vault);
+      rebuild_link_snapshot(ctx->app);
       refresh_graph(ctx->app, FALSE);
       update_header(ctx->app);
       gchar *msg = g_strdup_printf("Deleted %s", ctx->relpath);
@@ -1782,6 +2165,7 @@ static void act_rescan_vault(GSimpleAction *a, GVariant *p, gpointer ud)
   BtScanStats st = {0};
   if (vault_rescan(app->vault, &st, NULL)) {
     bt_filetree_populate(app->tree, app->vault);
+    rebuild_link_snapshot(app);
     update_header(app);
     gchar *msg = g_strdup_printf("Rescanned %u notes (%.1f ms)", st.notes, (double)st.elapsed_us / 1000.0);
     show_toast(app, msg, 2);
@@ -2549,6 +2933,7 @@ BtApp *bt_app_new(void)
   BtApp *app = g_new0(BtApp, 1);
   bt_agents_detect(&app->agents);
   app->scheme = BT_SCHEME_DARK;
+  app->confirm_external_urls = TRUE;
   app->adw_app = adw_application_new("local.brainterm.App", G_APPLICATION_NON_UNIQUE);
 
   static const GOptionEntry opts[] = {
@@ -2574,6 +2959,10 @@ void bt_app_free(BtApp *app)
 {
   if (app == NULL)
     return;
+  clear_active_confirm(app);
+  if (app->editor != NULL)
+    bt_editorpane_set_index_snapshot(app->editor, NULL, NULL);
+  g_clear_pointer(&app->link_snap, bt_index_snapshot_free);
   bt_termtabs_free(app->tabs);
   bt_sessionspanel_free(app->sessions_panel);
   bt_sessions_free(app->sessions);

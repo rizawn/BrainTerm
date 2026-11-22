@@ -357,6 +357,124 @@ static void test_l2_5_flush_before_navigation(void **state)
   g_free(cfg);
 }
 
+typedef struct {
+  guint calls;
+  gchar *last_target;
+  gboolean last_is_uri;
+} LauncherMock;
+
+static gboolean on_test_launcher(const char *target_or_url, gboolean is_uri, void *ud)
+{
+  LauncherMock *m = ud;
+  m->calls++;
+  g_free(m->last_target);
+  m->last_target = g_strdup(target_or_url);
+  m->last_is_uri = is_uri;
+  return TRUE;
+}
+
+static void test_l2_4_dispatcher_and_launcher_mock(void **state)
+{
+  (void)state;
+  if (!gtk_init_check()) {
+    skip();
+    return;
+  }
+  adw_init();
+
+  gchar *root = g_dir_make_tmp("bt-l24-XXXXXX", NULL);
+  gchar *cfg = g_dir_make_tmp("bt-cfg24-XXXXXX", NULL);
+  g_setenv("BT_CONFIG_DIR", cfg, TRUE);
+  bt_test_put(root, "a.md", "# A\nLinks to [[b#Core Concepts]] and [[scripts/run.ps1]].\n");
+  bt_test_put(root, "b.md",
+              "# B\nline 1\nline 2\nline 3\nline 4\nline 5\n"
+              "## Core Concepts\nBody under Core Concepts.\n");
+  bt_test_put(root, "assets/paper.pdf", "%PDF-1.4\n");
+  bt_test_put(root, "assets/data.xyz", "custom binary");
+  bt_test_put(root, "scripts/run.ps1", "Write-Host 1\n");
+
+  BtApp *app = bt_app_new();
+  bt_app_prepare_ui_for_test(app);
+  LauncherMock mock = {0};
+  bt_app_set_launcher_for_test(app, on_test_launcher, &mock);
+
+  assert_true(bt_app_open_vault(app, root, NULL));
+  assert_true(bt_app_open_note(app, "a.md", NULL));
+
+  /* 1. Note link with anchor -> opens b.md in same pane, scrolls to heading, 0 external calls. */
+  assert_true(bt_app_activate_link(app, "b#Core Concepts"));
+  assert_string_equal(bt_app_active_note(app), "b.md");
+  assert_int_equal(mock.calls, 0);
+
+  /* 2. SAME_NOTE anchor scroll. */
+  assert_true(bt_app_activate_link(app, "#Core Concepts"));
+  assert_string_equal(bt_app_active_note(app), "b.md");
+  assert_int_equal(mock.calls, 0);
+
+  /* 3. Blocked cases: zero calls, no confirm popover, status-bar reason. */
+  const char *blocked_targets[] = {
+    "scripts/run.ps1",
+    "javascript:alert(1)",
+    "../../escape",
+    "file:///C:/Windows/calc.exe",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS(blocked_targets); i++) {
+    assert_false(bt_app_activate_link(app, blocked_targets[i]));
+    assert_int_equal(mock.calls, 0);
+    assert_null(bt_app_active_confirm_popover_for_test(app));
+    assert_non_null(strstr(bt_app_last_statusbar_notice(app), "Blocked"));
+  }
+
+  /* 4. Unconfirmed external URL (with userinfo): 0 launcher calls until confirmed, strips secret. */
+  assert_true(bt_app_activate_link(app, "https://user:secret@example.org/doc"));
+  assert_int_equal(mock.calls, 0);
+  assert_non_null(bt_app_active_confirm_popover_for_test(app));
+  assert_non_null(strstr(bt_app_active_confirm_detail_for_test(app), "https://example.org/doc"));
+  assert_null(strstr(bt_app_active_confirm_detail_for_test(app), "secret"));
+  assert_true(bt_app_confirm_active_popover_for_test(app, TRUE)); /* Don't ask again */
+  assert_int_equal(mock.calls, 1);
+  assert_true(mock.last_is_uri);
+
+  /* Subsequent external URL in same session skips confirm popover. */
+  assert_true(bt_app_activate_link(app, "https://example.org/two"));
+  assert_int_equal(mock.calls, 2);
+  assert_null(bt_app_active_confirm_popover_for_test(app));
+
+  /* 5. Non-allow-listed extension -> confirm popover first, then launches after confirm. */
+  assert_true(bt_app_activate_link(app, "assets/data.xyz"));
+  assert_int_equal(mock.calls, 2);
+  assert_non_null(bt_app_active_confirm_popover_for_test(app));
+  assert_true(bt_app_confirm_active_popover_for_test(app, FALSE));
+  assert_int_equal(mock.calls, 3);
+  assert_false(mock.last_is_uri);
+
+  /* 6. Directory -> confirm popover first, then reveals after confirm. */
+  assert_true(bt_app_activate_link(app, "assets"));
+  assert_int_equal(mock.calls, 3);
+  assert_non_null(bt_app_active_confirm_popover_for_test(app));
+  assert_true(bt_app_confirm_active_popover_for_test(app, FALSE));
+  assert_int_equal(mock.calls, 4);
+
+  /* 7. Allow-listed file (.pdf) -> launches immediately without confirm. */
+  assert_true(bt_app_activate_link(app, "assets/paper.pdf"));
+  assert_int_equal(mock.calls, 5);
+  assert_null(bt_app_active_confirm_popover_for_test(app));
+
+  /* 8. Placeholder -> no-op, 0 calls. */
+  assert_true(bt_app_activate_link(app, "{{template}}"));
+  assert_int_equal(mock.calls, 5);
+
+  printf("BT_TEST_L2_4 dispatcher_mock_calls=%u\n", mock.calls);
+  g_free(mock.last_target);
+  GtkWindow *win = bt_app_window(app);
+  if (win) gtk_window_destroy(win);
+  bt_app_free(app);
+  bt_test_rm_rf(root);
+  bt_test_rm_rf(cfg);
+  g_free(root);
+  g_free(cfg);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -364,6 +482,7 @@ int main(void)
     cmocka_unit_test(test_l2_2_click_and_gesture_rules),
     cmocka_unit_test(test_l2_3_hover_styles_and_tooltips),
     cmocka_unit_test(test_l2_5_flush_before_navigation),
+    cmocka_unit_test(test_l2_4_dispatcher_and_launcher_mock),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }
