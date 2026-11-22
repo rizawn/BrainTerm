@@ -781,13 +781,23 @@ static void on_term_ctx_closed(GtkPopover *pop, gpointer ud)
   }
 }
 
-static GtkWidget *make_term_ctx_btn(const gchar *label, GCallback cb, gpointer ud, gboolean sens)
+static GtkWidget *make_term_ctx_btn(const gchar *label, const gchar *accel, GCallback cb,
+                                    gpointer ud, gboolean sens)
 {
-  GtkWidget *b = gtk_button_new_with_label(label);
+  GtkWidget *b = gtk_button_new();
   gtk_widget_add_css_class(b, "bt-ctx-item");
-  GtkWidget *ch = gtk_button_get_child(GTK_BUTTON(b));
-  if (GTK_IS_LABEL(ch))
-    gtk_label_set_xalign(GTK_LABEL(ch), 0.0f);
+  GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 16);
+  GtkWidget *lbl = gtk_label_new(label);
+  gtk_label_set_xalign(GTK_LABEL(lbl), 0.0f);
+  gtk_widget_set_hexpand(lbl, TRUE);
+  gtk_box_append(GTK_BOX(row), lbl);
+  if (accel != NULL && accel[0] != '\0') {
+    GtkWidget *acc = gtk_label_new(accel);
+    gtk_label_set_xalign(GTK_LABEL(acc), 1.0f);
+    gtk_widget_add_css_class(acc, "bt-ctx-accel");
+    gtk_box_append(GTK_BOX(row), acc);
+  }
+  gtk_button_set_child(GTK_BUTTON(b), row);
   gtk_widget_set_sensitive(b, sens);
   g_signal_connect(b, "clicked", cb, ud);
   return b;
@@ -811,18 +821,19 @@ static void on_term_right_click(GtkGestureClick *g, gint n_press, gdouble x, gdo
   gtk_popover_set_autohide(GTK_POPOVER(pop), TRUE);
   gtk_widget_set_halign(pop, GTK_ALIGN_START);
 
-  GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+  GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 1);
   gtk_widget_add_css_class(box, "bt-ctx-menu");
-  gtk_box_append(GTK_BOX(box), make_term_ctx_btn("Copy   Ctrl+Shift+C",
+  gtk_widget_set_focusable(box, TRUE);
+  gtk_box_append(GTK_BOX(box), make_term_ctx_btn("Copy", "Ctrl+Shift+C",
                                                  G_CALLBACK(on_term_ctx_copy), t, t->has_selection));
-  gtk_box_append(GTK_BOX(box), make_term_ctx_btn("Paste   Ctrl+Shift+V",
+  gtk_box_append(GTK_BOX(box), make_term_ctx_btn("Paste", "Ctrl+Shift+V",
                                                  G_CALLBACK(on_term_ctx_paste), t, t->pty != NULL));
-  gtk_box_append(GTK_BOX(box), make_term_ctx_btn("Find…   Ctrl+Shift+F",
+  gtk_box_append(GTK_BOX(box), make_term_ctx_btn("Find…", "Ctrl+Shift+F",
                                                  G_CALLBACK(on_term_ctx_find), t, TRUE));
   GtkWidget *sep = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
   gtk_widget_add_css_class(sep, "bt-ctx-sep");
   gtk_box_append(GTK_BOX(box), sep);
-  gtk_box_append(GTK_BOX(box), make_term_ctx_btn("Clear   Ctrl+L",
+  gtk_box_append(GTK_BOX(box), make_term_ctx_btn("Clear Terminal", "Ctrl+L",
                                                  G_CALLBACK(on_term_ctx_clear), t, t->pty != NULL));
 
   gtk_popover_set_child(GTK_POPOVER(pop), box);
@@ -832,6 +843,7 @@ static void on_term_right_click(GtkGestureClick *g, gint n_press, gdouble x, gdo
   g_signal_connect(pop, "closed", G_CALLBACK(on_term_ctx_closed), t);
   t->ctx_popover = pop;
   gtk_popover_popup(GTK_POPOVER(pop));
+  gtk_widget_grab_focus(box);
 }
 
 /* ---------------------------------------------------------- public API -- */

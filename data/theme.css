@@ -72,10 +72,18 @@
 }
 
 window,
-window.background,
-.background {
+window.background {
   background-color: @bt_bg_base;
   color: @bt_text_primary;
+}
+
+popover,
+popover.background {
+  background-color: transparent;
+  background-image: none;
+  border: none;
+  box-shadow: none;
+  outline: none;
 }
 
 .bt-mono,
@@ -96,8 +104,11 @@ separator {
   min-height: 1px;
 }
 
-/* Visible keyboard focus (accent). */
-*:focus-visible {
+/* Visible keyboard focus (accent) on interactive controls only. */
+button:focus-visible,
+togglebutton:focus-visible,
+switch:focus-visible,
+checkbutton:focus-visible {
   outline: 2px solid @bt_accent;
   outline-offset: -2px;
   outline-style: solid;
@@ -106,7 +117,10 @@ separator {
 textview:focus-visible,
 textview text:focus-visible,
 .bt-terminal-area:focus-visible,
-paned > separator:focus-visible {
+paned > separator:focus-visible,
+popover:focus-visible,
+popover > contents:focus-visible,
+.bt-ctx-menu:focus-visible {
   outline: none;
 }
 
@@ -294,71 +308,116 @@ splitbutton > separator {
 }
 
 /* ---- Popovers / menus ---------------------------------------------------- */
-popover > contents {
+popover > contents,
+popover.bt-ctx-popover > contents {
   background-color: @bt_surface_2;
   color: @bt_text_primary;
   border: 1px solid @bt_border_strong;
-  border-radius: 8px;
-  padding: 4px;
-  box-shadow: 0 8px 24px alpha(black, 0.45);
+  border-radius: 6px;
+  padding: 4px 0;
+  box-shadow: 0 8px 24px alpha(black, 0.55);
 }
 
 popover modelbutton,
 popover.menu modelbutton {
-  min-height: 28px;
+  min-height: 26px;
+  margin: 0 4px;
   padding: 0 10px;
-  border-radius: 6px;
+  border-radius: 4px;
+  font-size: 13px;
+  font-weight: 400;
   color: @bt_text_primary;
 }
 
 popover modelbutton:hover,
 popover modelbutton:focus {
   background-color: @bt_accent_soft;
-  color: @bt_accent;
+  color: @bt_text_primary;
 }
 
 popover separator {
   background-color: @bt_border;
+  min-height: 1px;
   margin: 4px 0;
 }
 
 .bt-ctx-menu {
-  min-width: 176px;
-  padding: 2px;
+  min-width: 224px;
+  padding: 0;
+  background-color: transparent;
 }
 
 button.bt-ctx-item {
-  min-height: 28px;
+  min-height: 26px;
+  margin: 0 4px;
   padding: 0 10px;
-  border-radius: 6px;
+  border-radius: 4px;
   border: none;
+  outline: none;
   background-color: transparent;
+  background-image: none;
   color: @bt_text_primary;
+  font-size: 13px;
+  font-weight: 400;
+  box-shadow: none;
+  transition: background-color 80ms ease-out, color 80ms ease-out;
+}
+
+button.bt-ctx-item label {
+  font-size: 13px;
+  font-weight: 400;
+  color: @bt_text_primary;
+}
+
+button.bt-ctx-item .bt-ctx-accel {
   font-size: 12px;
-}
-
-button.bt-ctx-item:hover {
-  background-color: @bt_accent_soft;
-  color: @bt_accent;
-}
-
-button.bt-ctx-item:disabled {
+  font-weight: 400;
   color: @bt_text_muted;
+  margin-left: 24px;
+}
+
+button.bt-ctx-item:hover,
+button.bt-ctx-item:focus-visible {
+  background-color: @bt_accent_soft;
+  outline: none;
+}
+
+button.bt-ctx-item:hover label,
+button.bt-ctx-item:focus-visible label {
+  color: @bt_text_primary;
+}
+
+button.bt-ctx-item:hover .bt-ctx-accel,
+button.bt-ctx-item:focus-visible .bt-ctx-accel {
+  color: @bt_text_secondary;
+}
+
+button.bt-ctx-item:disabled,
+button.bt-ctx-item:disabled label,
+button.bt-ctx-item:disabled .bt-ctx-accel {
+  color: @bt_text_muted;
+  opacity: 0.55;
   background-color: transparent;
 }
 
-button.bt-ctx-danger {
+button.bt-ctx-danger label {
   color: @bt_danger;
 }
 
-button.bt-ctx-danger:hover {
+button.bt-ctx-danger:hover,
+button.bt-ctx-danger:focus-visible {
   background-color: alpha(@bt_danger, 0.14);
+}
+
+button.bt-ctx-danger:hover label,
+button.bt-ctx-danger:focus-visible label {
   color: @bt_danger;
 }
 
 .bt-ctx-sep {
   background-color: @bt_border;
-  margin: 3px 6px;
+  min-height: 1px;
+  margin: 4px 0;
 }
 
 .bt-dialog-hint {

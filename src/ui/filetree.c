@@ -122,15 +122,27 @@ static void on_ctx_item_clicked(GtkButton *btn, gpointer ud)
 }
 
 static void add_ctx_button(GtkWidget *box, BtFileTree *tree, const gchar *label,
-                           BtFileTreeAction act, gboolean destructive)
+                           const gchar *accel, BtFileTreeAction act, gboolean destructive)
 {
-  GtkWidget *b = gtk_button_new_with_label(label);
+  GtkWidget *b = gtk_button_new();
   gtk_widget_add_css_class(b, "bt-ctx-item");
   if (destructive)
     gtk_widget_add_css_class(b, "bt-ctx-danger");
-  GtkWidget *child = gtk_button_get_child(GTK_BUTTON(b));
-  if (GTK_IS_LABEL(child))
-    gtk_label_set_xalign(GTK_LABEL(child), 0.0f);
+
+  GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 16);
+  GtkWidget *lbl = gtk_label_new(label);
+  gtk_label_set_xalign(GTK_LABEL(lbl), 0.0f);
+  gtk_widget_set_hexpand(lbl, TRUE);
+  gtk_box_append(GTK_BOX(row), lbl);
+
+  if (accel != NULL && accel[0] != '\0') {
+    GtkWidget *acc = gtk_label_new(accel);
+    gtk_label_set_xalign(GTK_LABEL(acc), 1.0f);
+    gtk_widget_add_css_class(acc, "bt-ctx-accel");
+    gtk_box_append(GTK_BOX(row), acc);
+  }
+
+  gtk_button_set_child(GTK_BUTTON(b), row);
   g_object_set_data(G_OBJECT(b), "bt-ctx-act", GINT_TO_POINTER((gint)act));
   g_signal_connect(b, "clicked", G_CALLBACK(on_ctx_item_clicked), tree);
   gtk_box_append(GTK_BOX(box), b);
@@ -172,30 +184,34 @@ static void show_context_menu(BtFileTree *tree, GtkWidget *anchor, gdouble x, gd
   gtk_popover_set_autohide(GTK_POPOVER(pop), TRUE);
   gtk_widget_set_halign(pop, GTK_ALIGN_START);
 
-  GtkWidget *menu_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+  GtkWidget *menu_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 1);
   gtk_widget_add_css_class(menu_box, "bt-ctx-menu");
+  gtk_widget_set_focusable(menu_box, TRUE);
 
   if (relpath != NULL && !is_dir) {
-    add_ctx_button(menu_box, tree, "Open", BT_TREE_ACT_OPEN, FALSE);
-    add_ctx_button(menu_box, tree, "Rename…   F2", BT_TREE_ACT_RENAME, FALSE);
-    add_ctx_button(menu_box, tree, "Duplicate", BT_TREE_ACT_DUPLICATE, FALSE);
+    add_ctx_button(menu_box, tree, "Open", NULL, BT_TREE_ACT_OPEN, FALSE);
+    add_ctx_button(menu_box, tree, "New Note here…", NULL, BT_TREE_ACT_NEW_NOTE, FALSE);
     add_ctx_sep(menu_box);
-    add_ctx_button(menu_box, tree, "New Note here…", BT_TREE_ACT_NEW_NOTE, FALSE);
-    add_ctx_button(menu_box, tree, "Open terminal here", BT_TREE_ACT_OPEN_TERM, FALSE);
-    add_ctx_button(menu_box, tree, "Copy path", BT_TREE_ACT_COPY_PATH, FALSE);
-    add_ctx_button(menu_box, tree, "Reveal in Explorer", BT_TREE_ACT_REVEAL, FALSE);
+    add_ctx_button(menu_box, tree, "Reveal in File Explorer", NULL, BT_TREE_ACT_REVEAL, FALSE);
+    add_ctx_button(menu_box, tree, "Open in Terminal", NULL, BT_TREE_ACT_OPEN_TERM, FALSE);
     add_ctx_sep(menu_box);
-    add_ctx_button(menu_box, tree, "Delete…", BT_TREE_ACT_DELETE, TRUE);
+    add_ctx_button(menu_box, tree, "Copy Relative Path", NULL, BT_TREE_ACT_COPY_PATH, FALSE);
+    add_ctx_button(menu_box, tree, "Duplicate", NULL, BT_TREE_ACT_DUPLICATE, FALSE);
+    add_ctx_sep(menu_box);
+    add_ctx_button(menu_box, tree, "Rename…", "F2", BT_TREE_ACT_RENAME, FALSE);
+    add_ctx_button(menu_box, tree, "Delete", "Delete", BT_TREE_ACT_DELETE, TRUE);
   } else if (relpath != NULL && is_dir) {
-    add_ctx_button(menu_box, tree, "New Note in folder…", BT_TREE_ACT_NEW_NOTE, FALSE);
-    add_ctx_button(menu_box, tree, "Open terminal here", BT_TREE_ACT_OPEN_TERM, FALSE);
-    add_ctx_button(menu_box, tree, "Copy path", BT_TREE_ACT_COPY_PATH, FALSE);
-    add_ctx_button(menu_box, tree, "Reveal in Explorer", BT_TREE_ACT_REVEAL, FALSE);
-  } else {
-    add_ctx_button(menu_box, tree, "New Note…", BT_TREE_ACT_NEW_NOTE, FALSE);
-    add_ctx_button(menu_box, tree, "Open terminal in vault", BT_TREE_ACT_OPEN_TERM, FALSE);
+    add_ctx_button(menu_box, tree, "New Note in Folder…", NULL, BT_TREE_ACT_NEW_NOTE, FALSE);
     add_ctx_sep(menu_box);
-    add_ctx_button(menu_box, tree, "Rescan vault", BT_TREE_ACT_RESCAN, FALSE);
+    add_ctx_button(menu_box, tree, "Reveal in File Explorer", NULL, BT_TREE_ACT_REVEAL, FALSE);
+    add_ctx_button(menu_box, tree, "Open in Terminal", NULL, BT_TREE_ACT_OPEN_TERM, FALSE);
+    add_ctx_sep(menu_box);
+    add_ctx_button(menu_box, tree, "Copy Relative Path", NULL, BT_TREE_ACT_COPY_PATH, FALSE);
+  } else {
+    add_ctx_button(menu_box, tree, "New Note…", "Ctrl+N", BT_TREE_ACT_NEW_NOTE, FALSE);
+    add_ctx_button(menu_box, tree, "Open in Terminal", NULL, BT_TREE_ACT_OPEN_TERM, FALSE);
+    add_ctx_sep(menu_box);
+    add_ctx_button(menu_box, tree, "Rescan Vault", "F5", BT_TREE_ACT_RESCAN, FALSE);
   }
 
   gtk_popover_set_child(GTK_POPOVER(pop), menu_box);
@@ -205,6 +221,7 @@ static void show_context_menu(BtFileTree *tree, GtkWidget *anchor, gdouble x, gd
   g_signal_connect(pop, "closed", G_CALLBACK(on_ctx_closed), tree);
   tree->ctx_popover = pop;
   gtk_popover_popup(GTK_POPOVER(pop));
+  gtk_widget_grab_focus(menu_box);
 }
 
 static void on_row_right_click(GtkGestureClick *g, gint n_press, gdouble x, gdouble y, gpointer ud)

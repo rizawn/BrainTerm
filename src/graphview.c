@@ -1539,13 +1539,23 @@ static void on_gctx_toggle_mode(GtkButton *b, gpointer ud)
   on_btn_mode_clicked(NULL, gv);
 }
 
-static GtkWidget *make_gctx_btn(const gchar *label, GCallback cb, BtGraphView *gv)
+static GtkWidget *make_gctx_btn(const gchar *label, const gchar *accel, GCallback cb,
+                                BtGraphView *gv)
 {
-  GtkWidget *btn = gtk_button_new_with_label(label);
-  GtkWidget *lbl = gtk_button_get_child(GTK_BUTTON(btn));
-  if (GTK_IS_LABEL(lbl))
-    gtk_label_set_xalign(GTK_LABEL(lbl), 0.0f);
+  GtkWidget *btn = gtk_button_new();
   gtk_widget_add_css_class(btn, "bt-ctx-item");
+  GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 16);
+  GtkWidget *lbl = gtk_label_new(label);
+  gtk_label_set_xalign(GTK_LABEL(lbl), 0.0f);
+  gtk_widget_set_hexpand(lbl, TRUE);
+  gtk_box_append(GTK_BOX(row), lbl);
+  if (accel != NULL && accel[0] != '\0') {
+    GtkWidget *acc = gtk_label_new(accel);
+    gtk_label_set_xalign(GTK_LABEL(acc), 1.0f);
+    gtk_widget_add_css_class(acc, "bt-ctx-accel");
+    gtk_box_append(GTK_BOX(row), acc);
+  }
+  gtk_button_set_child(GTK_BUTTON(btn), row);
   g_signal_connect(btn, "clicked", cb, gv);
   return btn;
 }
@@ -1564,8 +1574,9 @@ static void show_graph_context_menu(BtGraphView *gv, gdouble x, gdouble y)
   dismiss_ctx_popover(gv);
 
   gint hit = pick_node_at(gv, x, y);
-  GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+  GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 1);
   gtk_widget_add_css_class(box, "bt-ctx-menu");
+  gtk_widget_set_focusable(box, TRUE);
 
   if (hit >= 0 && gv->graph != NULL && (guint)hit < gv->graph->nodes->len) {
     const BtGraphNode *nd = g_ptr_array_index(gv->graph->nodes, (guint)hit);
@@ -1581,28 +1592,31 @@ static void show_graph_context_menu(BtGraphView *gv, gdouble x, gdouble y)
 
     if (has_note && gv->on_open != NULL)
       gtk_box_append(GTK_BOX(box),
-                     make_gctx_btn(gv->ctx_is_ghost ? "Create note" : "Open note",
+                     make_gctx_btn(gv->ctx_is_ghost ? "Create Note" : "Open Note", NULL,
                                    G_CALLBACK(on_gctx_open), gv));
-    if (is_real_note && gv->on_rename != NULL)
-      gtk_box_append(GTK_BOX(box), make_gctx_btn("Rename…", G_CALLBACK(on_gctx_rename), gv));
-    gtk_box_append(GTK_BOX(box), make_gctx_btn("Center on node", G_CALLBACK(on_gctx_center), gv));
-    if (is_real_note && gv->on_open_term != NULL) {
+    gtk_box_append(GTK_BOX(box),
+                   make_gctx_btn("Center on Node", NULL, G_CALLBACK(on_gctx_center), gv));
+    if (is_real_note && (gv->on_open_term != NULL || gv->on_rename != NULL))
       gtk_box_append(GTK_BOX(box), make_gctx_sep());
+    if (is_real_note && gv->on_open_term != NULL)
       gtk_box_append(GTK_BOX(box),
-                     make_gctx_btn("Open terminal here", G_CALLBACK(on_gctx_term), gv));
-    }
+                     make_gctx_btn("Open in Terminal", NULL, G_CALLBACK(on_gctx_term), gv));
+    if (is_real_note && gv->on_rename != NULL)
+      gtk_box_append(GTK_BOX(box),
+                     make_gctx_btn("Rename…", "F2", G_CALLBACK(on_gctx_rename), gv));
   } else {
-    gtk_box_append(GTK_BOX(box), make_gctx_btn("Fit graph", G_CALLBACK(on_gctx_fit), gv));
-    gtk_box_append(GTK_BOX(box), make_gctx_btn("Reset view", G_CALLBACK(on_gctx_reset), gv));
+    gtk_box_append(GTK_BOX(box), make_gctx_btn("Fit Graph", NULL, G_CALLBACK(on_gctx_fit), gv));
+    gtk_box_append(GTK_BOX(box), make_gctx_btn("Reset View", NULL, G_CALLBACK(on_gctx_reset), gv));
     if (gv->active_backend == BT_GRAPH_BACKEND_GL) {
       gtk_box_append(GTK_BOX(box), make_gctx_sep());
       gtk_box_append(GTK_BOX(box),
                      make_gctx_btn(gv->mode == BT_GRAPH_MODE_3D ? "Switch to 2D" : "Switch to 3D",
-                                   G_CALLBACK(on_gctx_toggle_mode), gv));
+                                   NULL, G_CALLBACK(on_gctx_toggle_mode), gv));
     }
   }
 
   GtkWidget *pop = gtk_popover_new();
+  gtk_widget_add_css_class(pop, "bt-ctx-popover");
   gtk_popover_set_has_arrow(GTK_POPOVER(pop), FALSE);
   gtk_popover_set_autohide(GTK_POPOVER(pop), TRUE);
   gtk_popover_set_position(GTK_POPOVER(pop), GTK_POS_BOTTOM);
@@ -1616,6 +1630,7 @@ static void show_graph_context_menu(BtGraphView *gv, gdouble x, gdouble y)
 
   gv->ctx_popover = pop;
   gtk_popover_popup(GTK_POPOVER(pop));
+  gtk_widget_grab_focus(box);
 }
 
 static void on_toplevel_active_notify(GObject *obj, GParamSpec *pspec, gpointer ud)
