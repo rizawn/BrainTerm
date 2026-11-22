@@ -4,6 +4,8 @@
 
 #include <gtk/gtk.h>
 
+#include "linkresolve.h"
+
 G_BEGIN_DECLS
 
 typedef struct BtEditorPane BtEditorPane;
@@ -43,7 +45,9 @@ void bt_editorpane_flush_save(BtEditorPane *pane);
 /* Called by BtApp after vault_atomic_write succeeds. */
 void bt_editorpane_mark_saved(BtEditorPane *pane);
 
-/* Inspection helpers for unit tests (Group H / Phase M1). */
+/* Inspection & incremental link model helpers (L2 / Group H). */
+const GArray *bt_editorpane_link_spans(const BtEditorPane *pane);
+gboolean bt_editorpane_link_at_offset(const BtEditorPane *pane, gsize byte_offset, BtLinkSpan *out_span);
 gboolean bt_editorpane_range_has_emphasis_tag(const BtEditorPane *pane, gsize byte_start, gsize byte_end);
 gboolean bt_editorpane_offset_has_tag_name(const BtEditorPane *pane, gsize byte_offset, const gchar *tag_name);
 const gchar *bt_editorpane_language_id(const BtEditorPane *pane);

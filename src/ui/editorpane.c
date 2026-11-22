@@ -3,6 +3,7 @@
  * blockquote / ## AI draft accents, 1s debounced autosave, and Ctrl+Click wiki-links. */
 #include "editorpane.h"
 #include "frontmatter.h"
+#include "linkresolve.h"
 #include "math/mathtok.h"
 #include "noteutil.h"
 #include "theme.h"
@@ -56,6 +57,13 @@ struct BtEditorPane {
   BtEditorDiffFn on_diff;
   BtEditorReloadFn on_reload;
   gpointer user_data;
+
+  /* Incremental link span model (L2-1, sorted by byte offset). */
+  GArray *link_spans;
+  gint pending_del_char;
+  gsize pending_del_bytes;
+  gint pending_del_nl;
+  gboolean pending_del_structural;
 };
 
 /* ----------------------------------------------------- autosave & dirty -- */
@@ -517,6 +525,190 @@ static void retag_lines(BtEditorPane *p, gint start_line, gint end_line)
     tag_single_line(p, ln, &ctx);
 }
 
+static gboolean has_link_structural_token(const gchar *txt, gsize len)
+{
+  if (txt == NULL || len == 0)
+    return FALSE;
+  g_autofree gchar *tmp = g_strndup(txt, len);
+  return strstr(tmp, "```") != NULL || strstr(tmp, "~~~") != NULL ||
+         strstr(tmp, "$$") != NULL || strstr(tmp, "---") != NULL ||
+         strstr(tmp, "<!--") != NULL || strstr(tmp, "-->") != NULL ||
+         strchr(tmp, '`') != NULL;
+}
+
+static gsize count_nl_bytes(const gchar *s, gsize len)
+{
+  gsize n = 0;
+  for (gsize i = 0; i < len; i++)
+    if (s[i] == '\n')
+      n++;
+  return n;
+}
+
+static void expand_to_neighbor_paragraphs(const gchar *text, gsize len,
+                                          gsize *io_start, gsize *io_end)
+{
+  /* Walk backwards across one preceding blank-line boundary so previous neighbor
+   * paragraph is included in the scan window (A.2). */
+  gsize s = *io_start;
+  gboolean saw_blank = FALSE;
+  while (s > 0) {
+    gsize line_end = s;
+    gsize line_start = line_end;
+    while (line_start > 0 && text[line_start - 1] != '\n')
+      line_start--;
+    gboolean blank = TRUE;
+    for (gsize k = line_start; k < line_end; k++) {
+      if (text[k] != ' ' && text[k] != '\t' && text[k] != '\r') {
+        blank = FALSE;
+        break;
+      }
+    }
+    if (blank) {
+      if (saw_blank)
+        break;
+      saw_blank = TRUE;
+    } else if (saw_blank) {
+      /* We stepped back into the start of the previous neighbor paragraph; keep stepping
+       * to its own beginning, then stop on the blank line before it. */
+    }
+    if (line_start == 0) {
+      s = 0;
+      break;
+    }
+    s = line_start - 1;
+  }
+  *io_start = s;
+
+  /* Walk forwards across the next blank-line boundary so the following neighbor
+   * paragraph is included as well. */
+  gsize e = *io_end;
+  saw_blank = FALSE;
+  while (e < len) {
+    gsize line_start = e;
+    gsize line_end = line_start;
+    while (line_end < len && text[line_end] != '\n')
+      line_end++;
+    gboolean blank = TRUE;
+    for (gsize k = line_start; k < line_end; k++) {
+      if (text[k] != ' ' && text[k] != '\t' && text[k] != '\r') {
+        blank = FALSE;
+        break;
+      }
+    }
+    if (blank) {
+      if (saw_blank)
+        break;
+      saw_blank = TRUE;
+    }
+    e = (line_end < len) ? (line_end + 1) : len;
+  }
+  *io_end = e;
+}
+
+static BtLinkSpan copy_link_span(const BtLinkSpan *src)
+{
+  BtLinkSpan c = *src;
+  c.raw_target = g_strdup(src->raw_target);
+  c.md_label = g_strdup(src->md_label);
+  return c;
+}
+
+static void update_link_spans_incremental(BtEditorPane *p, gsize edit_byte, gsize old_bytes,
+                                          gsize new_bytes, gint nl_delta, gboolean structural)
+{
+  GtkTextBuffer *buf = GTK_TEXT_BUFFER(p->buffer);
+  GtkTextIter bstart, bend;
+  gtk_text_buffer_get_bounds(buf, &bstart, &bend);
+  g_autofree gchar *txt = gtk_text_buffer_get_text(buf, &bstart, &bend, TRUE);
+  gsize len = strlen(txt);
+
+  if (p->link_spans == NULL) {
+    p->link_spans = bt_link_scan(txt, len);
+    return;
+  }
+
+  gsize rstart = edit_byte;
+  gsize rend = MIN(edit_byte + new_bytes, len);
+  if (structural || edit_byte < 256u) {
+    rstart = 0;
+    rend = len;
+  } else {
+    expand_to_neighbor_paragraphs(txt, len, &rstart, &rend);
+  }
+
+  gsize block_start = 0, block_end = len;
+  GArray *fresh = bt_link_scan_range(txt, len, rstart, rend, &block_start, &block_end);
+
+  /* Ensure block boundaries cover the edit window in post-edit coordinates. */
+  if (block_start > edit_byte)
+    block_start = 0;
+  if (block_end < MIN(edit_byte + new_bytes, len))
+    block_end = len;
+
+  gssize delta = (gssize)new_bytes - (gssize)old_bytes;
+  gsize pre_block_end = (gsize)MAX((gssize)block_end - delta, 0);
+
+  GArray *merged = g_array_new(FALSE, FALSE, sizeof(BtLinkSpan));
+  g_array_set_clear_func(merged, (GDestroyNotify) NULL); /* manual ownership below */
+
+  guint i = 0;
+  while (i < p->link_spans->len) {
+    const BtLinkSpan *os = &g_array_index(p->link_spans, BtLinkSpan, i);
+    if (os->end <= block_start) {
+      BtLinkSpan cp = copy_link_span(os);
+      g_array_append_val(merged, cp);
+      i++;
+    } else {
+      break;
+    }
+  }
+  while (i < p->link_spans->len) {
+    const BtLinkSpan *os = &g_array_index(p->link_spans, BtLinkSpan, i);
+    if (os->start < pre_block_end || os->start < edit_byte + old_bytes)
+      i++;
+    else
+      break;
+  }
+  for (guint j = 0; j < fresh->len; j++) {
+    BtLinkSpan cp = copy_link_span(&g_array_index(fresh, BtLinkSpan, j));
+    g_array_append_val(merged, cp);
+  }
+  while (i < p->link_spans->len) {
+    const BtLinkSpan *os = &g_array_index(p->link_spans, BtLinkSpan, i);
+    BtLinkSpan cp = copy_link_span(os);
+    cp.start = (gsize)((gssize)cp.start + delta);
+    cp.end = (gsize)((gssize)cp.end + delta);
+    cp.target_start = (gsize)((gssize)cp.target_start + delta);
+    cp.target_end = (gsize)((gssize)cp.target_end + delta);
+    cp.line_no = (guint)MAX((gint)cp.line_no + nl_delta, 1);
+    g_array_append_val(merged, cp);
+    i++;
+  }
+
+  g_array_unref(fresh);
+  /* Transfer clear_func by freeing old link_spans and setting clear_func on merged. */
+  for (guint k = 0; k < merged->len; k++) {
+    /* already valid owned strings */
+    (void)k;
+  }
+  g_array_unref(p->link_spans);
+  /* Build final array with clear_func from bt_link_scan-compatible array */
+  GArray *final_arr = bt_link_scan("", 0);
+  for (guint k = 0; k < merged->len; k++)
+    g_array_append_val(final_arr, g_array_index(merged, BtLinkSpan, k));
+  g_array_free(merged, TRUE);
+  p->link_spans = final_arr;
+}
+
+static gsize iter_byte_in_buffer(GtkTextBuffer *buf, const GtkTextIter *it)
+{
+  GtkTextIter bstart;
+  gtk_text_buffer_get_start_iter(buf, &bstart);
+  g_autofree gchar *prefix = gtk_text_buffer_get_text(buf, &bstart, it, TRUE);
+  return strlen(prefix);
+}
+
 static void on_insert_text_after(GtkTextBuffer *buf, GtkTextIter *loc, gchar *text, gint len,
                                  gpointer ud)
 {
@@ -524,10 +716,7 @@ static void on_insert_text_after(GtkTextBuffer *buf, GtkTextIter *loc, gchar *te
   if (p->loading)
     return;
   gint end_ln = gtk_text_iter_get_line(loc);
-  gint newlines = 0;
-  for (gint i = 0; i < len; i++)
-    if (text[i] == '\n')
-      newlines++;
+  gint newlines = (gint)count_nl_bytes(text, (gsize)MAX(len, 0));
   gint start_ln = MAX(end_ln - newlines, 0);
 
   /* Fence/heading/frontmatter/display-math edits can affect subsequent lines. */
@@ -538,6 +727,25 @@ static void on_insert_text_after(GtkTextBuffer *buf, GtkTextIter *loc, gchar *te
     retag_lines(p, start_ln, gtk_text_buffer_get_line_count(buf) - 1);
   else
     retag_lines(p, start_ln, end_ln);
+
+  gsize end_byte = iter_byte_in_buffer(buf, loc);
+  gsize ulen = (gsize)MAX(len, 0);
+  gsize edit_byte = (end_byte >= ulen) ? (end_byte - ulen) : 0;
+  gboolean link_struct = has_link_structural_token(text, ulen);
+  update_link_spans_incremental(p, edit_byte, 0, ulen, newlines, link_struct);
+}
+
+static void on_delete_range_before(GtkTextBuffer *buf, GtkTextIter *start, GtkTextIter *end,
+                                   gpointer ud)
+{
+  BtEditorPane *p = ud;
+  if (p->loading)
+    return;
+  p->pending_del_char = gtk_text_iter_get_offset(start);
+  g_autofree gchar *del_txt = gtk_text_buffer_get_text(buf, start, end, TRUE);
+  p->pending_del_bytes = strlen(del_txt);
+  p->pending_del_nl = (gint)count_nl_bytes(del_txt, p->pending_del_bytes);
+  p->pending_del_structural = has_link_structural_token(del_txt, p->pending_del_bytes);
 }
 
 static void on_delete_range_after(GtkTextBuffer *buf, GtkTextIter *start, GtkTextIter *end,
@@ -550,6 +758,15 @@ static void on_delete_range_after(GtkTextBuffer *buf, GtkTextIter *start, GtkTex
   gint ln = gtk_text_iter_get_line(start);
   gint total = gtk_text_buffer_get_line_count(buf);
   retag_lines(p, ln, MIN(ln + 1, total - 1));
+
+  GtkTextIter del_it;
+  gtk_text_buffer_get_iter_at_offset(buf, &del_it, p->pending_del_char);
+  gsize edit_byte = iter_byte_in_buffer(buf, &del_it);
+  update_link_spans_incremental(p, edit_byte, p->pending_del_bytes, 0,
+                                -p->pending_del_nl, p->pending_del_structural);
+  p->pending_del_bytes = 0;
+  p->pending_del_nl = 0;
+  p->pending_del_structural = FALSE;
 }
 
 /* --------------------- centered ~72ch column & visual gutter overlay -- */
@@ -892,6 +1109,7 @@ BtEditorPane *bt_editorpane_new(BtEditorSaveFn on_save, BtEditorLinkFn on_link,
   init_markdown_tags(pane);
   g_signal_connect(pane->buffer, "changed", G_CALLBACK(on_buffer_changed), pane);
   g_signal_connect_after(pane->buffer, "insert-text", G_CALLBACK(on_insert_text_after), pane);
+  g_signal_connect(pane->buffer, "delete-range", G_CALLBACK(on_delete_range_before), pane);
   g_signal_connect_after(pane->buffer, "delete-range", G_CALLBACK(on_delete_range_after), pane);
 
   pane->view = GTK_SOURCE_VIEW(gtk_source_view_new_with_buffer(pane->buffer));
@@ -1049,6 +1267,7 @@ void bt_editorpane_free(BtEditorPane *pane)
   if (pane == NULL)
     return;
   cancel_autosave(pane);
+  g_clear_pointer(&pane->link_spans, g_array_unref);
   g_free(pane->relpath);
   g_clear_object(&pane->buffer);
   g_free(pane);
@@ -1075,6 +1294,8 @@ void bt_editorpane_load(BtEditorPane *pane, const gchar *relpath, const gchar *t
   gtk_text_buffer_set_text(GTK_TEXT_BUFFER(pane->buffer), text ? text : "", (gint)length);
   gint nlines = gtk_text_buffer_get_line_count(GTK_TEXT_BUFFER(pane->buffer));
   retag_lines(pane, 0, MAX(nlines - 1, 0));
+  g_clear_pointer(&pane->link_spans, g_array_unref);
+  pane->link_spans = bt_link_scan(text ? text : "", length);
   GtkTextIter start;
   gtk_text_buffer_get_start_iter(GTK_TEXT_BUFFER(pane->buffer), &start);
   gtk_text_buffer_place_cursor(GTK_TEXT_BUFFER(pane->buffer), &start);
@@ -1098,6 +1319,7 @@ void bt_editorpane_clear(BtEditorPane *pane)
   g_clear_pointer(&pane->relpath, g_free);
   pane->loading = TRUE;
   gtk_text_buffer_set_text(GTK_TEXT_BUFFER(pane->buffer), "", 0);
+  g_clear_pointer(&pane->link_spans, g_array_unref);
   pane->loading = FALSE;
   pane->dirty = FALSE;
   gtk_widget_set_visible(pane->overlay, FALSE);
@@ -1206,6 +1428,18 @@ gboolean bt_editorpane_offset_has_tag_name(const BtEditorPane *pane, gsize byte_
   }
   g_slist_free(tags);
   return found;
+}
+
+const GArray *bt_editorpane_link_spans(const BtEditorPane *pane)
+{
+  return pane ? pane->link_spans : NULL;
+}
+
+gboolean bt_editorpane_link_at_offset(const BtEditorPane *pane, gsize byte_offset, BtLinkSpan *out_span)
+{
+  if (pane == NULL || pane->link_spans == NULL)
+    return FALSE;
+  return bt_link_span_at(pane->link_spans, byte_offset, out_span);
 }
 
 const gchar *bt_editorpane_language_id(const BtEditorPane *pane)

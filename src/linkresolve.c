@@ -801,6 +801,7 @@ GArray *bt_link_scan_range(const char *text, gsize len, gsize range_start, gsize
   char fence_ch = 0;
   guint fence_len = 0;
   gboolean in_display = FALSE;
+  gboolean in_comment = FALSE;
   gsize chunk_start = body_pos;
   guint chunk_line = body_line;
 
@@ -816,19 +817,27 @@ GArray *bt_link_scan_range(const char *text, gsize len, gsize range_start, gsize
     } else if (!blank) {
       char fch = 0;
       guint flen = 0;
-      if (!in_display && spaces <= 3 && parse_fence_open(text, cs, le, &fch, &flen)) {
+      if (!in_display && !in_comment && spaces <= 3 && parse_fence_open(text, cs, le, &fch, &flen)) {
         in_fence = TRUE;
         fence_ch = fch;
         fence_len = flen;
       } else {
-        for (gsize i = pos; i + 1 < le; i++) {
-          if (text[i] == '$' && text[i + 1] == '$' && !is_escaped(text, i)) {
+        for (gsize i = pos; i < le; i++) {
+          if (in_comment) {
+            if (i + 3 <= le && memcmp(text + i, "-->", 3) == 0) {
+              in_comment = FALSE;
+              i += 2;
+            }
+          } else if (!in_display && i + 4 <= le && memcmp(text + i, "<!--", 4) == 0) {
+            in_comment = TRUE;
+            i += 3;
+          } else if (i + 1 < le && text[i] == '$' && text[i + 1] == '$' && !is_escaped(text, i)) {
             in_display = !in_display;
             i++;
           }
         }
       }
-    } else if (!in_display) {
+    } else if (!in_display && !in_comment) {
       gsize c_end = (le < len) ? (le + 1) : len;
       if (win_start == len && c_end >= range_start) {
         win_start = chunk_start;
