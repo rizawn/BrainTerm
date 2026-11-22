@@ -39,6 +39,10 @@ typedef struct {
   cairo_surface_t *glow[BT_SPRITE_KINDS];
   cairo_surface_t *vignette;
   BtDustParticle dust[BT_DUST_MAX];
+  BtGraphLabelCand *lbl_cands;
+  BtGraphLabelCand lbl_placed[64];
+  BtGraphCoreObstacle *obs_scratch;
+  guint lbl_scratch_cap;
   gboolean initialized;
 } BtCairoPriv;
 
@@ -165,6 +169,8 @@ static void cairo_backend_destroy(BtGraphRenderer *r)
     for (guint i = 0; i < BT_SPRITE_KINDS; i++)
       g_clear_pointer(&p->glow[i], cairo_surface_destroy);
     g_clear_pointer(&p->vignette, cairo_surface_destroy);
+    g_free(p->lbl_cands);
+    g_free(p->obs_scratch);
     g_free(p);
   }
   g_free(r);
@@ -492,71 +498,125 @@ static void cairo_backend_render(BtGraphRenderer *r, cairo_t *cr, const BtGraphR
     }
   }
 
-  /* Pass 3: crisp fading Pango labels (driven by bt_graph_label_alpha()). */
+  cairo_restore(cr);
+
+  /* Pass 3: Greedy screen-space culled Pango labels (shared bt_graph_place_labels). */
   if (!very_heavy || has_focus || st->selected_idx >= 0) {
+    if (g->nodes->len > p->lbl_scratch_cap) {
+      g_free(p->lbl_cands);
+      g_free(p->obs_scratch);
+      p->lbl_cands = g_new0(BtGraphLabelCand, g->nodes->len);
+      p->obs_scratch = g_new0(BtGraphCoreObstacle, g->nodes->len);
+      p->lbl_scratch_cap = g->nodes->len;
+    }
+
     PangoLayout *pl = pango_cairo_create_layout(cr);
     PangoFontDescription *fd = pango_font_description_from_string("Inter, Segoe UI, Sans 10");
-    pango_font_description_set_size(fd, (gint)(10.5 * PANGO_SCALE / CLAMP(zoom, 0.65, 1.8)));
+    pango_font_description_set_size(fd, (gint)(10.5 * PANGO_SCALE));
     pango_layout_set_font_description(pl, fd);
+    pango_layout_set_ellipsize(pl, PANGO_ELLIPSIZE_END);
+    pango_layout_set_width(pl, 220 * PANGO_SCALE);
 
-    guint drawn_labels = 0;
-    const guint label_cap = heavy ? 28u : 120u;
+    guint cand_n = 0;
+    guint obs_n = 0;
     for (guint i = 0; i < g->nodes->len; i++) {
       const BtGraphNode *nd = g_ptr_array_index(g->nodes, i);
+      if (!nd->visible)
+        continue;
+      gdouble nx, ny;
+      node_pos(nd, &nx, &ny);
+      float sx = (float)(width * 0.5 + st->pan_x + nx * zoom);
+      float sy = (float)(height * 0.5 + st->pan_y + ny * zoom);
+      float core_px = MAX((float)(nd->radius * zoom), 2.2f);
+      if (sx + core_px >= -20.0f && sx - core_px <= (float)width + 20.0f &&
+          sy + core_px >= -20.0f && sy - core_px <= (float)height + 20.0f) {
+        p->obs_scratch[obs_n].cx = sx;
+        p->obs_scratch[obs_n].cy = sy;
+        p->obs_scratch[obs_n].r = core_px;
+        p->obs_scratch[obs_n].node_idx = i;
+        obs_n++;
+      }
+
       guint8 nbr = (st->nbr_mask != NULL && i < st->nbr_mask_len) ? st->nbr_mask[i] : BT_NBR_NONE;
       gboolean is_sel = ((gint)i == st->selected_idx);
       gboolean is_kbd = ((gint)i == st->focus_idx);
-      gboolean priority = (nbr == BT_NBR_FOCUS || nbr == BT_NBR_NEIGHBOR || is_sel || is_kbd);
-      if (!priority && drawn_labels >= label_cap)
-        continue;
-
+      gboolean is_hov = ((gint)i == st->hover_idx) || (nbr == BT_NBR_FOCUS);
       gdouble la = bt_graph_label_alpha(nd, nbr, is_sel, is_kbd, st->hub_thresh, zoom,
                                         has_focus, hf, g->nodes->len);
       if (la < 0.06)
         continue;
 
-      gdouble nx, ny;
-      node_pos(nd, &nx, &ny);
-      if (nx < min_wx || nx > max_wx || ny < min_wy || ny > max_wy)
-        continue;
-
       pango_layout_set_text(pl, nd->label, -1);
       int tw = 0, th = 0;
       pango_layout_get_pixel_size(pl, &tw, &th);
-      gdouble lx = nx - (gdouble)tw * 0.5;
-      gdouble ly = ny + nd->radius + 5.0 / zoom;
+      if (tw <= 0 || th <= 0)
+        continue;
+      float bw = (float)(tw + 8);
+      float bh = (float)(th + 4);
+      if (sx + bw * 0.5f < 0.0f || sx - bw * 0.5f > (float)width ||
+          sy + bh + 24.0f < 0.0f || sy - 24.0f > (float)height)
+        continue;
 
-      if (nbr == BT_NBR_FOCUS || is_sel || is_kbd) {
-        draw_rrect(cr, lx - 5.0 / zoom, ly - 2.0 / zoom,
-                   (gdouble)tw + 10.0 / zoom, (gdouble)th + 4.0 / zoom, 4.0 / zoom);
-        set_tok(cr, BT_COL_SURFACE_2, 0.92 * la);
+      guint8 prio = 1u;
+      if (is_kbd) prio = 5u;
+      else if (is_sel) prio = 4u;
+      else if (is_hov) prio = 3u;
+      else if (nbr == BT_NBR_NEIGHBOR) prio = 2u;
+
+      BtGraphLabelCand *c = &p->lbl_cands[cand_n++];
+      c->node_idx = i;
+      c->x = floorf(sx - bw * 0.5f);
+      c->y = floorf(sy + core_px + 5.0f);
+      c->w = bw;
+      c->h = bh;
+      c->alpha = (float)la;
+      c->degree = nd->degree;
+      c->priority = prio;
+      c->always_show = (is_kbd || is_sel || is_hov);
+      c->is_neighbor = (nbr == BT_NBR_NEIGHBOR && !c->always_show);
+      c->pill = c->always_show;
+    }
+
+    guint max_labels = bt_graph_label_cap_for_zoom(zoom);
+    guint placed = bt_graph_place_labels(p->lbl_cands, cand_n, p->obs_scratch, obs_n,
+                                         max_labels, 12u, p->lbl_placed, 64u);
+
+    for (guint k = 0; k < placed; k++) {
+      const BtGraphLabelCand *lp = &p->lbl_placed[placed - 1u - k];
+      const BtGraphNode *nd = g_ptr_array_index(g->nodes, lp->node_idx);
+      pango_layout_set_text(pl, nd->label, -1);
+
+      draw_rrect(cr, (gdouble)lp->x, (gdouble)lp->y, (gdouble)lp->w, (gdouble)lp->h, 4.0);
+      if (lp->pill) {
+        set_tok(cr, BT_COL_SURFACE_2, 0.92 * (gdouble)lp->alpha);
         cairo_fill_preserve(cr);
-        set_tok(cr, (is_sel || is_kbd) ? BT_COL_ACCENT : BT_COL_BORDER_STRONG, 0.9 * la);
-        cairo_set_line_width(cr, 1.0 / zoom);
+        set_tok(cr, (lp->priority >= 4u) ? BT_COL_ACCENT : BT_COL_BORDER_STRONG,
+                0.9 * (gdouble)lp->alpha);
+        cairo_set_line_width(cr, 1.0);
         cairo_stroke(cr);
+      } else {
+        set_tok(cr, BT_COL_GRAPH_BG, 0.70 * (gdouble)lp->alpha);
+        cairo_fill(cr);
       }
-      set_tok(cr, (nbr == BT_NBR_FOCUS || is_sel || is_kbd) ? BT_COL_TEXT_PRIMARY
-                                                            : BT_COL_TEXT_SECONDARY,
-              la);
-      cairo_move_to(cr, lx, ly);
+      set_tok(cr, lp->pill ? BT_COL_TEXT_PRIMARY : BT_COL_TEXT_SECONDARY, (gdouble)lp->alpha);
+      cairo_move_to(cr, (gdouble)lp->x + 4.0, (gdouble)lp->y + 2.0);
       pango_cairo_show_layout(cr, pl);
-      drawn_labels++;
     }
 
     if (has_stem) {
       pango_layout_set_text(pl, "sessions", -1);
       int tw = 0, th = 0;
       pango_layout_get_pixel_size(pl, &tw, &th);
+      gdouble sx_stem = width * 0.5 + st->pan_x + (stem_min_x + stem_max_x) * 0.5 * zoom;
+      gdouble sy_stem = height * 0.5 + st->pan_y + 224.0 * zoom;
       set_tok(cr, BT_COL_TEXT_MUTED, 0.72 * dim_factor);
-      cairo_move_to(cr, (stem_min_x + stem_max_x) * 0.5 - (gdouble)tw * 0.5, 224.0);
+      cairo_move_to(cr, sx_stem - (gdouble)tw * 0.5, sy_stem);
       pango_cairo_show_layout(cr, pl);
     }
 
     pango_font_description_free(fd);
     g_object_unref(pl);
   }
-
-  cairo_restore(cr);
 }
 
 static const BtGraphRendererVTable CAIRO_VT = {

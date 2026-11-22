@@ -100,7 +100,7 @@ struct BtGraphGL {
   GLint u_node_vp, u_node_pan, u_node_zoom, u_node_scale, u_node_bt;
   GLint u_node_has_foc, u_node_hf, u_node_hq, u_node_glow_col, u_node_s2_col;
   GLint u_node_mode3d, u_node_mvp;
-  GLint u_lbl_vp, u_lbl_atlas, u_lbl_tp, u_lbl_ts, u_lbl_pbg;
+  GLint u_lbl_vp, u_lbl_atlas, u_lbl_tp, u_lbl_ts, u_lbl_pbg, u_lbl_bg;
   GLint u_ext_scene, u_ext_thresh;
   GLint u_blur_tex, u_blur_dir;
   GLint u_comp_scene, u_comp_bloom, u_comp_str;
@@ -126,6 +126,10 @@ struct BtGraphGL {
   AtlasSlot *atlas_slots;
   guint atlas_slot_count;
   LabelInst label_scratch[BT_GL_LABEL_CAP];
+  BtGraphLabelCand *lbl_cands;
+  BtGraphLabelCand lbl_placed[BT_GL_LABEL_CAP];
+  BtGraphCoreObstacle *obs_scratch;
+  guint lbl_scratch_cap;
 };
 
 /* ----------------------------------------------------- shader helpers -- */
@@ -614,6 +618,13 @@ static void upload_graph_buffers(BtGraphGL *gl)
   } else {
     memset(gl->node_state_scratch, 0, nn * sizeof(float));
   }
+  if (nn > gl->lbl_scratch_cap) {
+    g_free(gl->lbl_cands);
+    g_free(gl->obs_scratch);
+    gl->lbl_cands = g_new0(BtGraphLabelCand, nn);
+    gl->obs_scratch = g_new0(BtGraphCoreObstacle, nn);
+    gl->lbl_scratch_cap = nn;
+  }
   glBindBuffer(GL_ARRAY_BUFFER, gl->vbo_node_state);
   glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(nn * sizeof(float)), gl->node_state_scratch,
                GL_DYNAMIC_DRAW);
@@ -865,25 +876,22 @@ void bt_graph_gl_render_state(BtGraphGL *gl, const BtGraphRenderState *st)
     glBindTexture(GL_TEXTURE_2D, 0);
   }
 
-  /* Pass 6: Crisp Pango RGBA label atlas drawn AFTER bloom so text stays sharp */
-  if (st->graph != NULL && gl->node_count > 0 && gl->atlas_slots != NULL && gl->tex_atlas != 0) {
-    guint lbl_n = 0;
+  /* Pass 6: Greedy screen-space culled Pango RGBA labels drawn AFTER bloom */
+  if (st->graph != NULL && gl->node_count > 0 && gl->atlas_slots != NULL && gl->tex_atlas != 0 &&
+      gl->lbl_cands != NULL && gl->obs_scratch != NULL) {
+    guint cand_n = 0;
+    guint obs_n = 0;
     float bt_eased = 1.0f - powf(1.0f - CLAMP(bt, 0.0f, 1.0f), 3.0f);
     gdouble eff_zoom = mode_3d ? CLAMP(2.6 / MAX(st->dist3d, 1.2), 0.5, 2.0) : st->zoom;
+    guint limit_n = MIN(gl->node_count, MIN(gl->atlas_slot_count, gl->lbl_scratch_cap));
 
-    for (guint i = 0; i < gl->node_count && i < gl->atlas_slot_count && lbl_n < BT_GL_LABEL_CAP; i++) {
-      if (!gl->atlas_slots[i].valid)
-        continue;
+    for (guint i = 0; i < limit_n; i++) {
       const BtGraphNode *nd = g_ptr_array_index(st->graph->nodes, i);
-      guint8 nbr = (st->nbr_mask != NULL && i < st->nbr_mask_len) ? st->nbr_mask[i] : BT_NBR_NONE;
-      gboolean is_sel = ((gint)i == st->selected_idx);
-      gboolean is_kbd = ((gint)i == st->focus_idx);
-      gdouble la = bt_graph_label_alpha(nd, nbr, is_sel, is_kbd, st->hub_thresh, eff_zoom,
-                                        has_focus, (gdouble)hf, gl->node_count);
-      if (la < 0.06)
+      if (!nd->visible)
         continue;
 
-      float sx = 0.0f, sy = 0.0f, y_off = (float)nd->radius * (float)eff_zoom + 5.0f;
+      float sx = 0.0f, sy = 0.0f, core_px = 0.0f;
+      gdouble depth_w = 1.0;
       if (mode_3d) {
         if (i >= gl->pts3d_count)
           continue;
@@ -894,13 +902,38 @@ void bt_graph_gl_render_state(BtGraphGL *gl, const BtGraphRenderState *st)
           continue;
         sx = (float)psx;
         sy = (float)psy;
-        if (nbr == BT_NBR_NONE && !is_sel && !is_kbd)
-          la *= CLAMP(1.42 - pw * 0.22, 0.25, 1.0);
-        if (la < 0.06)
-          continue;
+        depth_w = pw;
+        float persp = CLAMP(2.4f / MAX((float)pw, 0.35f), 0.35f, 2.4f);
+        core_px = MAX((float)nd->radius * persp * 0.85f, 2.0f);
       } else {
         sx = vp_w * 0.5f + (float)st->pan_x + (float)nd->x * bt_eased * (float)st->zoom;
         sy = vp_h * 0.5f + (float)st->pan_y + (float)nd->y * bt_eased * (float)st->zoom;
+        core_px = MAX((float)nd->radius * (float)st->zoom, 2.2f);
+      }
+
+      if (sx + core_px >= -20.0f && sx - core_px <= vp_w + 20.0f &&
+          sy + core_px >= -20.0f && sy - core_px <= vp_h + 20.0f) {
+        gl->obs_scratch[obs_n].cx = sx;
+        gl->obs_scratch[obs_n].cy = sy;
+        gl->obs_scratch[obs_n].r = core_px;
+        gl->obs_scratch[obs_n].node_idx = i;
+        obs_n++;
+      }
+
+      if (!gl->atlas_slots[i].valid)
+        continue;
+      guint8 nbr = (st->nbr_mask != NULL && i < st->nbr_mask_len) ? st->nbr_mask[i] : BT_NBR_NONE;
+      gboolean is_sel = ((gint)i == st->selected_idx);
+      gboolean is_kbd = ((gint)i == st->focus_idx);
+      gboolean is_hov = ((gint)i == st->hover_idx) || (nbr == BT_NBR_FOCUS);
+      gdouble la = bt_graph_label_alpha(nd, nbr, is_sel, is_kbd, st->hub_thresh, eff_zoom,
+                                        has_focus, (gdouble)hf, gl->node_count);
+      if (la < 0.06)
+        continue;
+      if (mode_3d && nbr == BT_NBR_NONE && !is_sel && !is_kbd) {
+        la *= CLAMP(1.42 - depth_w * 0.22, 0.25, 1.0);
+        if (la < 0.06)
+          continue;
       }
 
       const AtlasSlot *sl = &gl->atlas_slots[i];
@@ -908,17 +941,45 @@ void bt_graph_gl_render_state(BtGraphGL *gl, const BtGraphRenderState *st)
           sy + sl->h_log + 24.0f < 0.0f || sy - 24.0f > vp_h)
         continue;
 
-      LabelInst *li = &gl->label_scratch[lbl_n++];
-      li->x = floorf(sx - sl->w_log * 0.5f);
-      li->y = floorf(sy + y_off);
-      li->w = sl->w_log;
-      li->h = sl->h_log;
+      guint8 prio = 1u;
+      if (is_kbd) prio = 5u;
+      else if (is_sel) prio = 4u;
+      else if (is_hov) prio = 3u;
+      else if (nbr == BT_NBR_NEIGHBOR) prio = 2u;
+
+      BtGraphLabelCand *c = &gl->lbl_cands[cand_n++];
+      c->node_idx = i;
+      c->x = floorf(sx - sl->w_log * 0.5f);
+      c->y = floorf(sy + core_px + 5.0f);
+      c->w = sl->w_log;
+      c->h = sl->h_log;
+      c->alpha = (float)la;
+      c->degree = nd->degree;
+      c->priority = prio;
+      c->always_show = (is_kbd || is_sel || is_hov);
+      c->is_neighbor = (nbr == BT_NBR_NEIGHBOR && !c->always_show);
+      c->pill = c->always_show;
+    }
+
+    guint max_labels = bt_graph_label_cap_for_zoom(eff_zoom);
+    guint lbl_n = bt_graph_place_labels(gl->lbl_cands, cand_n, gl->obs_scratch, obs_n,
+                                        max_labels, 12u, gl->lbl_placed, BT_GL_LABEL_CAP);
+
+    for (guint k = 0; k < lbl_n; k++) {
+      /* Draw lower priority first so primary focused/selected pill renders on top. */
+      const BtGraphLabelCand *p = &gl->lbl_placed[lbl_n - 1u - k];
+      const AtlasSlot *sl = &gl->atlas_slots[p->node_idx];
+      LabelInst *li = &gl->label_scratch[k];
+      li->x = p->x;
+      li->y = p->y;
+      li->w = p->w;
+      li->h = p->h;
       li->u0 = sl->u0;
       li->v0 = sl->v0;
       li->u1 = sl->u1;
       li->v1 = sl->v1;
-      li->alpha = (float)la;
-      li->pill = (nbr == BT_NBR_FOCUS || is_sel || is_kbd) ? 1.0f : 0.0f;
+      li->alpha = p->alpha;
+      li->pill = p->pill ? 1.0f : 0.0f;
     }
 
     if (lbl_n > 0) {
@@ -938,6 +999,8 @@ void bt_graph_gl_render_state(BtGraphGL *gl, const BtGraphRenderState *st)
       glUniform3f(gl->u_lbl_ts, r, g, b);
       bt_theme_unpack_f(BT_COL_SURFACE_2, &r, &g, &b);
       glUniform3f(gl->u_lbl_pbg, r, g, b);
+      bt_theme_unpack_f(BT_COL_GRAPH_BG, &r, &g, &b);
+      glUniform3f(gl->u_lbl_bg, r, g, b);
 
       glActiveTexture(GL_TEXTURE0);
       glBindTexture(GL_TEXTURE_2D, gl->tex_atlas);
@@ -1065,6 +1128,7 @@ static void on_realize(GtkWidget *widget, gpointer ud)
   gl->u_lbl_tp = glGetUniformLocation(gl->prog_label, "u_text_primary");
   gl->u_lbl_ts = glGetUniformLocation(gl->prog_label, "u_text_secondary");
   gl->u_lbl_pbg = glGetUniformLocation(gl->prog_label, "u_pill_bg");
+  gl->u_lbl_bg = glGetUniformLocation(gl->prog_label, "u_bg_col");
 
   if (gl->bloom_supported) {
     gl->u_ext_scene = glGetUniformLocation(gl->prog_extract, "u_scene");
@@ -1146,6 +1210,8 @@ void bt_graph_gl_free(BtGraphGL *gl)
   g_free(gl->pts3d);
   g_free(gl->node_state_scratch);
   g_free(gl->atlas_slots);
+  g_free(gl->lbl_cands);
+  g_free(gl->obs_scratch);
   g_free(gl);
 }
 

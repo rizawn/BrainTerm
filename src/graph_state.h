@@ -70,6 +70,34 @@ gdouble bt_graph_label_alpha(const BtGraphNode *nd, guint8 nbr_state, gboolean i
                              gboolean is_kbd_focus, guint hub_thresh, gdouble zoom,
                              gboolean has_focus, gdouble focus_fade, guint total_nodes);
 
+/* Screen-space greedy label placement (shared by GL and Cairo, zero heap allocs). */
+typedef struct {
+  guint node_idx;
+  float x, y, w, h;
+  float alpha;
+  guint degree;
+  guint8 priority;       /* 5=kbd focus, 4=selected, 3=hovered, 2=neighbor, 1=hub */
+  gboolean always_show;  /* focused / selected / hovered: always placed */
+  gboolean is_neighbor;  /* counts toward max_neighbors cap */
+  gboolean pill;         /* primary pill style */
+} BtGraphLabelCand;
+
+typedef struct {
+  float cx, cy, r;
+  guint node_idx;
+} BtGraphCoreObstacle;
+
+/* Default visible label cap at a given zoom (20 at zoom 1.0). */
+guint bt_graph_label_cap_for_zoom(gdouble zoom);
+
+/* Sorts cands in-place by (priority desc, degree desc, node_idx asc), skips any
+ * non-always_show label overlapping an already placed label or a visible node core,
+ * enforces max_labels and max_neighbors, and writes accepted labels to out[]. */
+guint bt_graph_place_labels(BtGraphLabelCand *cands, guint cand_count,
+                            const BtGraphCoreObstacle *obstacles, guint obstacle_count,
+                            guint max_labels, guint max_neighbors,
+                            BtGraphLabelCand *out, guint out_cap);
+
 /* Deterministic 3D cortex/spine/brainstem projection derived from BtGraph.
  * Writes MIN(g->nodes->len, max_pts) normalized points into out_pts. */
 void bt_graph_compute_3d_layout(const BtGraph *g, BtGraphVec3 *out_pts, guint max_pts);

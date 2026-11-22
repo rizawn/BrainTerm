@@ -249,6 +249,80 @@ static void test_3d_layout_deterministic_and_bounded(void **state)
   free_sample_graph(g);
 }
 
+static void test_label_placement_no_overlap_and_caps(void **state)
+{
+  (void)state;
+  assert_int_equal(bt_graph_label_cap_for_zoom(1.0), 20u);
+
+  /* 1. Crowded overlapping cluster + cap enforcement */
+  BtGraphLabelCand cands[40];
+  memset(cands, 0, sizeof(cands));
+  for (guint i = 0; i < 40; i++) {
+    cands[i].node_idx = i;
+    cands[i].x = (float)((i % 5) * 120);
+    cands[i].y = (float)((i / 5) * 28);
+    cands[i].w = 100.0f;
+    cands[i].h = 18.0f;
+    cands[i].alpha = 0.8f;
+    cands[i].degree = 40u - i;
+    cands[i].priority = 1u;
+  }
+  /* Force half of them onto colliding coordinates */
+  for (guint i = 10; i < 20; i++) {
+    cands[i].x = cands[0].x + 5.0f;
+    cands[i].y = cands[0].y + 2.0f;
+  }
+  /* Mark node 39 as focused and node 38 as selected (must always appear) */
+  cands[39].priority = 5u;
+  cands[39].always_show = TRUE;
+  cands[39].x = cands[0].x;
+  cands[39].y = cands[0].y;
+  cands[38].priority = 4u;
+  cands[38].always_show = TRUE;
+  cands[38].x = cands[0].x;
+  cands[38].y = cands[0].y;
+
+  BtGraphCoreObstacle obs[1] = {{.cx = 290.0f, .cy = 9.0f, .r = 8.0f, .node_idx = 999u}};
+  BtGraphLabelCand out[64];
+  guint n = bt_graph_place_labels(cands, 40u, obs, 1u, 20u, 12u, out, 64u);
+  assert_true(n <= 20u);
+  assert_true(n >= 2u);
+  /* Focused (39) and selected (38) are placed first */
+  assert_int_equal(out[0].node_idx, 39u);
+  assert_int_equal(out[1].node_idx, 38u);
+
+  /* Zero pairwise AABB overlaps across all placed boxes */
+  for (guint i = 0; i < n; i++) {
+    for (guint j = i + 1; j < n; j++) {
+      gboolean ov = (out[i].x < out[j].x + out[j].w) && (out[i].x + out[i].w > out[j].x) &&
+                    (out[i].y < out[j].y + out[j].h) && (out[i].y + out[i].h > out[j].y);
+      assert_false(ov);
+    }
+  }
+
+  /* 2. Hub hover neighbor cap: 25 non-overlapping neighbors -> at most 12 placed, highest degree */
+  BtGraphLabelCand nbrs[26];
+  memset(nbrs, 0, sizeof(nbrs));
+  nbrs[0].node_idx = 100u;
+  nbrs[0].x = 10.0f; nbrs[0].y = 10.0f; nbrs[0].w = 80.0f; nbrs[0].h = 16.0f;
+  nbrs[0].alpha = 1.0f; nbrs[0].degree = 70u; nbrs[0].priority = 3u; nbrs[0].always_show = TRUE;
+  for (guint i = 1; i < 26; i++) {
+    nbrs[i].node_idx = 100u + i;
+    nbrs[i].x = (float)((i % 5) * 140);
+    nbrs[i].y = (float)((i / 5 + 1) * 40);
+    nbrs[i].w = 90.0f; nbrs[i].h = 16.0f;
+    nbrs[i].alpha = 0.9f;
+    nbrs[i].degree = i; /* highest degree = 25 down to 14 */
+    nbrs[i].priority = 2u;
+    nbrs[i].is_neighbor = TRUE;
+  }
+  guint nn = bt_graph_place_labels(nbrs, 26u, NULL, 0u, 20u, 12u, out, 64u);
+  assert_int_equal(nn, 13u); /* 1 hovered + 12 highest-degree neighbors */
+  assert_int_equal(out[0].node_idx, 100u);
+  assert_int_equal(out[1].degree, 25u);
+  assert_int_equal(out[12].degree, 14u);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -257,6 +331,7 @@ int main(void)
     cmocka_unit_test(test_hover_neighbors),
     cmocka_unit_test(test_label_visibility_rules),
     cmocka_unit_test(test_3d_layout_deterministic_and_bounded),
+    cmocka_unit_test(test_label_placement_no_overlap_and_caps),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

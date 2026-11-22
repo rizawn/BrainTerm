@@ -146,6 +146,120 @@ gdouble bt_graph_label_alpha(const BtGraphNode *nd, guint8 nbr_state, gboolean i
   return 0.0;
 }
 
+guint bt_graph_label_cap_for_zoom(gdouble zoom)
+{
+  int cap = (int)llround(20.0 * CLAMP(zoom, 0.5, 2.5));
+  return (guint)CLAMP(cap, 12, 48);
+}
+
+static gboolean cand_higher_priority(const BtGraphLabelCand *a, const BtGraphLabelCand *b)
+{
+  if (a->priority != b->priority)
+    return a->priority > b->priority;
+  if (a->degree != b->degree)
+    return a->degree > b->degree;
+  return a->node_idx < b->node_idx;
+}
+
+static gboolean aabb_overlaps(const BtGraphLabelCand *a, const BtGraphLabelCand *b,
+                              float pad_x, float pad_y)
+{
+  return (a->x - pad_x < b->x + b->w + pad_x) &&
+         (a->x + a->w + pad_x > b->x - pad_x) &&
+         (a->y - pad_y < b->y + b->h + pad_y) &&
+         (a->y + a->h + pad_y > b->y - pad_y);
+}
+
+static gboolean aabb_hits_core(const BtGraphLabelCand *c, const BtGraphCoreObstacle *o)
+{
+  float qx = CLAMP(o->cx, c->x, c->x + c->w);
+  float qy = CLAMP(o->cy, c->y, c->y + c->h);
+  float dx = qx - o->cx;
+  float dy = qy - o->cy;
+  float rr = o->r + 1.0f;
+  return (dx * dx + dy * dy) < (rr * rr);
+}
+
+guint bt_graph_place_labels(BtGraphLabelCand *cands, guint cand_count,
+                            const BtGraphCoreObstacle *obstacles, guint obstacle_count,
+                            guint max_labels, guint max_neighbors,
+                            BtGraphLabelCand *out, guint out_cap)
+{
+  if (cands == NULL || cand_count == 0 || out == NULL || out_cap == 0)
+    return 0;
+
+  /* Deterministic zero-alloc Shell sort by (priority desc, degree desc, node_idx asc). */
+  for (guint gap = cand_count / 2u; gap > 0u; gap /= 2u) {
+    for (guint i = gap; i < cand_count; i++) {
+      BtGraphLabelCand tmp = cands[i];
+      guint j = i;
+      while (j >= gap && cand_higher_priority(&tmp, &cands[j - gap])) {
+        cands[j] = cands[j - gap];
+        j -= gap;
+      }
+      cands[j] = tmp;
+    }
+  }
+
+  guint placed = 0;
+  guint placed_neighbors = 0;
+
+  for (guint i = 0; i < cand_count && placed < out_cap; i++) {
+    BtGraphLabelCand c = cands[i];
+    if (c.always_show) {
+      /* Always show focused/selected/hovered; nudge down if colliding with prior always_show. */
+      for (guint tries = 0; tries < 4u; tries++) {
+        gboolean hit = FALSE;
+        for (guint j = 0; j < placed; j++) {
+          if (aabb_overlaps(&c, &out[j], 1.0f, 1.0f)) {
+            c.y = out[j].y + out[j].h + 3.0f;
+            hit = TRUE;
+            break;
+          }
+        }
+        if (!hit)
+          break;
+      }
+      out[placed++] = c;
+      continue;
+    }
+
+    if (placed >= max_labels)
+      continue;
+    if (c.is_neighbor && placed_neighbors >= max_neighbors)
+      continue;
+
+    gboolean collides = FALSE;
+    for (guint j = 0; j < placed; j++) {
+      if (aabb_overlaps(&c, &out[j], 2.0f, 1.0f)) {
+        collides = TRUE;
+        break;
+      }
+    }
+    if (collides)
+      continue;
+
+    if (obstacles != NULL && obstacle_count > 0) {
+      for (guint k = 0; k < obstacle_count; k++) {
+        if (obstacles[k].node_idx == c.node_idx)
+          continue;
+        if (aabb_hits_core(&c, &obstacles[k])) {
+          collides = TRUE;
+          break;
+        }
+      }
+      if (collides)
+        continue;
+    }
+
+    out[placed++] = c;
+    if (c.is_neighbor)
+      placed_neighbors++;
+  }
+
+  return placed;
+}
+
 static guint32 hash_u32(guint32 x)
 {
   x ^= x >> 16;
