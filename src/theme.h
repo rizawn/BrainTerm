@@ -37,6 +37,12 @@ typedef enum {
 #define BT_COL_GRAPH_EDGE_ACTIVE 0xA79BFAu
 #define BT_COL_GRAPH_DUST        0x7A8296u
 
+/* Editor clickable-link tokens (mirrored in data/theme.css, L2-3). */
+#define BT_COL_LINK              0x8B7CF6u
+#define BT_COL_LINK_HOVER        0xA79BFAu
+#define BT_COL_LINK_BROKEN       0xD4A12Au
+#define BT_COL_LINK_BLOCKED      0xD96B6Bu
+
 /* Alpha tokens. */
 #define BT_ALPHA_ACCENT_SOFT  0.14
 #define BT_ALPHA_ACCENT_SEL   0.30
@@ -70,9 +76,10 @@ gboolean bt_theme_parse_hex(const gchar *hex, guint32 *rgb_out);
 /* ANSI 16-color palette (0..7 normal, 8..15 bright), derived from the tokens. */
 guint32 bt_theme_ansi(guint idx);
 
-/* Terminal-specific colors. */
+/* Terminal & link colors. */
 guint32 bt_theme_terminal_selection(void);   /* accent over surface-1, opaque */
 guint32 bt_theme_terminal_search_hit(void);  /* warning over surface-1, opaque */
+guint32 bt_theme_blend(guint32 fg, guint32 bg, gdouble alpha);
 
 const gchar *bt_scheme_to_string(BtUiScheme scheme);
 BtUiScheme bt_scheme_from_string(const gchar *str);

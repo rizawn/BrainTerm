@@ -80,6 +80,10 @@ static void test_token_parity(void **state)
   assert_int_equal(css_token(css, "bt_graph_edge_dim"), BT_COL_GRAPH_EDGE_DIM);
   assert_int_equal(css_token(css, "bt_graph_edge_active"), BT_COL_GRAPH_EDGE_ACTIVE);
   assert_int_equal(css_token(css, "bt_graph_dust"), BT_COL_GRAPH_DUST);
+  assert_int_equal(css_token(css, "bt_link"), BT_COL_LINK);
+  assert_int_equal(css_token(css, "bt_link_hover"), BT_COL_LINK_HOVER);
+  assert_int_equal(css_token(css, "bt_link_broken"), BT_COL_LINK_BROKEN);
+  assert_int_equal(css_token(css, "bt_link_blocked"), BT_COL_LINK_BLOCKED);
   assert_non_null(strstr(css, "alpha(#8B7CF6, 0.14)")); /* accent-soft = 14% */
   g_free(css);
 }
@@ -95,6 +99,10 @@ static void test_contrast_aa(void **state)
   assert_true(bt_theme_contrast(BT_COL_ACCENT, BT_COL_SURFACE_2) >= 4.5);
   assert_true(bt_theme_contrast(BT_COL_ACCENT, BT_COL_SURFACE_1) >= 4.5);
   assert_true(bt_theme_contrast(BT_COL_DANGER, BT_COL_SURFACE_1) >= 4.5);
+  assert_true(bt_theme_contrast(BT_COL_LINK, BT_COL_SURFACE_1) >= 4.5);
+  assert_true(bt_theme_contrast(BT_COL_LINK_HOVER, BT_COL_SURFACE_1) >= 4.5);
+  assert_true(bt_theme_contrast(BT_COL_LINK_BROKEN, BT_COL_SURFACE_1) >= 4.5);
+  assert_true(bt_theme_contrast(BT_COL_LINK_BLOCKED, BT_COL_SURFACE_1) >= 4.5);
 }
 
 static guint css_errors;

@@ -82,7 +82,7 @@ guint32 bt_theme_ansi(guint idx)
   return ANSI[idx & 15u];
 }
 
-static guint32 blend(guint32 fg, guint32 bg, gdouble a)
+guint32 bt_theme_blend(guint32 fg, guint32 bg, gdouble a)
 {
   guint32 out = 0;
   for (int sh = 16; sh >= 0; sh -= 8) {
@@ -95,12 +95,12 @@ static guint32 blend(guint32 fg, guint32 bg, gdouble a)
 
 guint32 bt_theme_terminal_selection(void)
 {
-  return blend(BT_COL_ACCENT, BT_COL_SURFACE_1, 0.38);
+  return bt_theme_blend(BT_COL_ACCENT, BT_COL_SURFACE_1, 0.38);
 }
 
 guint32 bt_theme_terminal_search_hit(void)
 {
-  return blend(BT_COL_WARNING, BT_COL_SURFACE_1, 0.28);
+  return bt_theme_blend(BT_COL_WARNING, BT_COL_SURFACE_1, 0.28);
 }
 
 const gchar *bt_scheme_to_string(BtUiScheme scheme)

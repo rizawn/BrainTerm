@@ -27,6 +27,10 @@
 @define-color bt_graph_edge_dim    #6E778A;
 @define-color bt_graph_edge_active #A79BFA;
 @define-color bt_graph_dust        #7A8296;
+@define-color bt_link              #8B7CF6;
+@define-color bt_link_hover        #A79BFA;
+@define-color bt_link_broken       #D4A12A;
+@define-color bt_link_blocked      #D96B6B;
 
 /* ---- Re-point libadwaita named colors at our tokens ---------------------- */
 @define-color accent_color            @bt_accent;

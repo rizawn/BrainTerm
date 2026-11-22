@@ -45,6 +45,9 @@ struct BtEditorPane {
   GtkTextTag *t_list_marker;
   GtkTextTag *t_quote;
   GtkTextTag *t_wikilink;
+  GtkTextTag *t_link_broken;
+  GtkTextTag *t_link_blocked;
+  GtkTextTag *t_link_hover;
   GtkTextTag *t_tag;
   GtkTextTag *t_frontmatter;
   GtkTextTag *t_ai_heading;
@@ -60,6 +63,8 @@ struct BtEditorPane {
 
   /* Incremental link span model (L2-1, sorted by byte offset). */
   GArray *link_spans;
+  const BtIndexSnapshot *snapshot;
+  const BtVault *vault;
   gint pending_del_char;
   gsize pending_del_bytes;
   gint pending_del_nl;
@@ -78,6 +83,17 @@ struct BtEditorPane {
   gboolean press_has_span;
   gsize press_span_start;
   gsize press_span_end;
+
+  /* Hover, cursor & transition state (L2-3). */
+  gboolean ctrl_held;
+  gboolean hover_active;
+  gdouble hover_x;
+  gdouble hover_y;
+  gsize hover_span_start;
+  gsize hover_span_end;
+  guint32 hover_base_rgb;
+  gint64 hover_start_us;
+  guint hover_anim_id;
 };
 
 /* ----------------------------------------------------- autosave & dirty -- */
@@ -172,6 +188,12 @@ static void init_markdown_tags(BtEditorPane *p)
       "indent", 14, NULL);
   p->t_wikilink = gtk_text_buffer_create_tag(b, "bt-wikilink",
       "foreground", "#8B7CF6", "underline", PANGO_UNDERLINE_SINGLE, NULL);
+  p->t_link_broken = gtk_text_buffer_create_tag(b, "bt-link-broken",
+      "foreground", "#D4A12A", "underline", PANGO_UNDERLINE_ERROR, NULL);
+  p->t_link_blocked = gtk_text_buffer_create_tag(b, "bt-link-blocked",
+      "foreground", "#D96B6B", "underline", PANGO_UNDERLINE_DOUBLE, NULL);
+  p->t_link_hover = gtk_text_buffer_create_tag(b, "bt-link-hover",
+      "foreground", "#A79BFA", NULL);
   p->t_tag = gtk_text_buffer_create_tag(b, "bt-tag",
       "foreground", "#8B7CF6", NULL);
   p->t_frontmatter = gtk_text_buffer_create_tag(b, "bt-frontmatter",
@@ -185,6 +207,8 @@ static void init_markdown_tags(BtEditorPane *p)
       "foreground", "#C4BFFA", "paragraph-background", "#181724", NULL);
   p->t_math = gtk_text_buffer_create_tag(b, "bt-math",
       "family", mono, "foreground", "#E6E8EC", "style", PANGO_STYLE_NORMAL, NULL);
+  gtk_text_tag_set_priority(p->t_link_hover,
+                            gtk_text_tag_table_get_size(gtk_text_buffer_get_tag_table(b)) - 1);
 }
 
 static void clear_md_tags(BtEditorPane *p, const GtkTextIter *a, const GtkTextIter *b)
@@ -193,7 +217,8 @@ static void clear_md_tags(BtEditorPane *p, const GtkTextIter *a, const GtkTextIt
   GtkTextTag *all[] = {
     p->t_h1, p->t_h2, p->t_h3, p->t_syntax, p->t_bold, p->t_italic,
     p->t_code, p->t_codeblock, p->t_list_marker, p->t_quote,
-    p->t_wikilink, p->t_tag, p->t_frontmatter, p->t_ai_heading, p->t_ai_body,
+    p->t_wikilink, p->t_link_broken, p->t_link_blocked, p->t_link_hover,
+    p->t_tag, p->t_frontmatter, p->t_ai_heading, p->t_ai_body,
     p->t_math,
   };
   for (gsize i = 0; i < G_N_ELEMENTS(all); i++)
@@ -274,15 +299,12 @@ static void tag_inline_spans(BtEditorPane *p, const GtkTextIter *ls, const gchar
       i = (gint)ms->end;
       continue;
     }
-    /* Wiki-link: [[target]] */
+    /* Wiki-link: [[target]] (keep delimiter/emphasis protection; status tags applied from link_spans) */
     if (s[i] == '[' && i + 1 < len && s[i + 1] == '[') {
       const gchar *close = strstr(s + i + 2, "]]");
       if (close != NULL && close > s + i + 2 &&
           find_math_span_at(mspans, (gsize)(close - s)) == NULL) {
         gint end = (gint)(close - s);
-        apply_byte_tag(buf, p->t_syntax, ls, i, i + 2);
-        apply_byte_tag(buf, p->t_wikilink, ls, i + 2, end);
-        apply_byte_tag(buf, p->t_syntax, ls, end, end + 2);
         i = end + 2;
         continue;
       }
@@ -715,6 +737,159 @@ static void update_link_spans_incremental(BtEditorPane *p, gsize edit_byte, gsiz
   p->link_spans = final_arr;
 }
 
+static gboolean raw_target_is_placeholder(const char *raw_target);
+
+static BtLinkResolution *resolve_span_for_pane(const BtEditorPane *pane, const BtLinkSpan *sp)
+{
+  if (pane == NULL || sp == NULL || sp->raw_target == NULL)
+    return NULL;
+  if (raw_target_is_placeholder(sp->raw_target)) {
+    BtLinkResolution *r = g_new0(BtLinkResolution, 1);
+    r->status = BT_LINK_PLACEHOLDER;
+    r->kind = BT_LINK_KIND_NOTE;
+    r->display = g_strdup(sp->raw_target);
+    return r;
+  }
+  if (pane->snapshot != NULL)
+    return bt_link_resolve(pane->snapshot, pane->relpath, sp->raw_target);
+  return NULL;
+}
+
+static GtkTextTag *tag_for_span(const BtEditorPane *pane, const BtLinkSpan *sp,
+                                gboolean *out_is_placeholder, guint32 *out_rgb)
+{
+  *out_is_placeholder = FALSE;
+  if (raw_target_is_placeholder(sp->raw_target)) {
+    *out_is_placeholder = TRUE;
+    if (out_rgb) *out_rgb = BT_COL_TEXT_PRIMARY;
+    return NULL;
+  }
+  if (pane->snapshot == NULL) {
+    if (out_rgb) *out_rgb = BT_COL_LINK;
+    return pane->t_wikilink;
+  }
+  BtLinkResolution *res = bt_link_resolve(pane->snapshot, pane->relpath, sp->raw_target);
+  if (res == NULL) {
+    if (out_rgb) *out_rgb = BT_COL_LINK;
+    return pane->t_wikilink;
+  }
+  if (res->status == BT_LINK_PLACEHOLDER) {
+    bt_link_resolution_free(res);
+    *out_is_placeholder = TRUE;
+    if (out_rgb) *out_rgb = BT_COL_TEXT_PRIMARY;
+    return NULL;
+  }
+  BtLinkOpenPolicy pol;
+  bt_link_check_open_policy(res, pane->vault, TRUE, &pol);
+  GtkTextTag *tag = pane->t_wikilink;
+  guint32 rgb = BT_COL_LINK;
+  if (res->status == BT_LINK_BLOCKED || pol.action == BT_LINK_OPEN_BLOCKED) {
+    tag = pane->t_link_blocked;
+    rgb = BT_COL_LINK_BLOCKED;
+  } else if (res->status == BT_LINK_UNRESOLVED) {
+    tag = pane->t_link_broken;
+    rgb = BT_COL_LINK_BROKEN;
+  }
+  bt_link_open_policy_clear(&pol);
+  bt_link_resolution_free(res);
+  if (out_rgb) *out_rgb = rgb;
+  return tag;
+}
+
+static void apply_link_tags_range(BtEditorPane *p, gsize byte_lo, gsize byte_hi)
+{
+  if (p == NULL || p->buffer == NULL || p->link_spans == NULL)
+    return;
+  GtkTextBuffer *buf = GTK_TEXT_BUFFER(p->buffer);
+  GtkTextIter bstart, bend;
+  gtk_text_buffer_get_bounds(buf, &bstart, &bend);
+  g_autofree gchar *txt = gtk_text_buffer_get_text(buf, &bstart, &bend, TRUE);
+  gsize total = strlen(txt);
+  if (byte_hi > total)
+    byte_hi = total;
+  if (byte_lo > byte_hi)
+    byte_lo = byte_hi;
+
+  gint c_lo = (gint)g_utf8_strlen(txt, (gssize)byte_lo);
+  gint c_hi = c_lo + (gint)g_utf8_strlen(txt + byte_lo, (gssize)(byte_hi - byte_lo));
+  GtkTextIter it_lo, it_hi;
+  gtk_text_buffer_get_iter_at_offset(buf, &it_lo, c_lo);
+  gtk_text_buffer_get_iter_at_offset(buf, &it_hi, c_hi);
+
+  gtk_text_buffer_remove_tag(buf, p->t_wikilink, &it_lo, &it_hi);
+  gtk_text_buffer_remove_tag(buf, p->t_link_broken, &it_lo, &it_hi);
+  gtk_text_buffer_remove_tag(buf, p->t_link_blocked, &it_lo, &it_hi);
+
+  /* Binary search for first span overlapping [byte_lo, byte_hi). */
+  guint lo = 0, hi = p->link_spans->len;
+  while (lo < hi) {
+    guint mid = lo + (hi - lo) / 2;
+    const BtLinkSpan *ms = &g_array_index(p->link_spans, BtLinkSpan, mid);
+    if (ms->end <= byte_lo)
+      lo = mid + 1;
+    else
+      hi = mid;
+  }
+
+  gsize cur_b = 0;
+  gint cur_c = 0;
+  for (guint i = lo; i < p->link_spans->len; i++) {
+    const BtLinkSpan *sp = &g_array_index(p->link_spans, BtLinkSpan, i);
+    if (sp->start >= byte_hi)
+      break;
+    if (sp->end > total)
+      continue;
+
+    gboolean is_placeholder = FALSE;
+    GtkTextTag *ltag = tag_for_span(p, sp, &is_placeholder, NULL);
+
+    /* Advance O(1)-amortized UTF-8 char cursor cleanly. */
+    if (sp->start < cur_b) {
+      cur_b = 0;
+      cur_c = 0;
+    }
+    cur_c += (gint)g_utf8_strlen(txt + cur_b, (gssize)(sp->start - cur_b));
+    cur_b = sp->start;
+    gint s_c = cur_c;
+    gint e_c = s_c + (gint)g_utf8_strlen(txt + sp->start, (gssize)(sp->end - sp->start));
+
+    GtkTextIter s_it, e_it;
+    gtk_text_buffer_get_iter_at_offset(buf, &s_it, s_c);
+    gtk_text_buffer_get_iter_at_offset(buf, &e_it, e_c);
+
+    if (is_placeholder || ltag == NULL) {
+      gtk_text_buffer_remove_tag(buf, p->t_syntax, &s_it, &e_it);
+      continue;
+    }
+
+    if (sp->syntax == BT_LINK_SYNTAX_WIKILINK) {
+      gint ts_c = s_c + (gint)g_utf8_strlen(txt + sp->start, (gssize)(sp->target_start - sp->start));
+      gint te_c = s_c + (gint)g_utf8_strlen(txt + sp->start, (gssize)(sp->target_end - sp->start));
+      GtkTextIter ts_it, te_it;
+      gtk_text_buffer_get_iter_at_offset(buf, &ts_it, ts_c);
+      gtk_text_buffer_get_iter_at_offset(buf, &te_it, te_c);
+      gtk_text_buffer_apply_tag(buf, p->t_syntax, &s_it, &ts_it);
+      gtk_text_buffer_apply_tag(buf, ltag, &ts_it, &te_it);
+      gtk_text_buffer_apply_tag(buf, p->t_syntax, &te_it, &e_it);
+    } else if (sp->syntax == BT_LINK_SYNTAX_MARKDOWN) {
+      /* Style visible label and destination delimiters; keep entire span hoverable. */
+      const char *close_br = strstr(txt + sp->start + 1, "](");
+      gsize lbl_end_b = close_br ? (gsize)(close_br - txt) : sp->target_start;
+      gsize lb_b = MIN(sp->start + 1, lbl_end_b);
+      gint l0_c = s_c + (gint)g_utf8_strlen(txt + sp->start, (gssize)(lb_b - sp->start));
+      gint l1_c = s_c + (gint)g_utf8_strlen(txt + sp->start, (gssize)(lbl_end_b - sp->start));
+      GtkTextIter l0_it, l1_it;
+      gtk_text_buffer_get_iter_at_offset(buf, &l0_it, l0_c);
+      gtk_text_buffer_get_iter_at_offset(buf, &l1_it, l1_c);
+      gtk_text_buffer_apply_tag(buf, p->t_syntax, &s_it, &l0_it);
+      gtk_text_buffer_apply_tag(buf, ltag, &l0_it, &l1_it);
+      gtk_text_buffer_apply_tag(buf, p->t_syntax, &l1_it, &e_it);
+    } else {
+      gtk_text_buffer_apply_tag(buf, ltag, &s_it, &e_it);
+    }
+  }
+}
+
 static gsize iter_byte_in_buffer(GtkTextBuffer *buf, const GtkTextIter *it)
 {
   GtkTextIter bstart;
@@ -747,6 +922,15 @@ static void on_insert_text_after(GtkTextBuffer *buf, GtkTextIter *loc, gchar *te
   gsize edit_byte = (end_byte >= ulen) ? (end_byte - ulen) : 0;
   gboolean link_struct = has_link_structural_token(text, ulen);
   update_link_spans_incremental(p, edit_byte, 0, ulen, newlines, link_struct);
+  GtkTextIter line_it;
+  gtk_text_buffer_get_iter_at_line(buf, &line_it, start_ln);
+  gsize r0 = iter_byte_in_buffer(buf, &line_it);
+  gsize r1 = MAX(end_byte + 1, r0);
+  if (structural || link_struct) {
+    r0 = 0;
+    r1 = G_MAXSIZE;
+  }
+  apply_link_tags_range(p, r0, r1);
 }
 
 static void on_delete_range_before(GtkTextBuffer *buf, GtkTextIter *start, GtkTextIter *end,
@@ -776,8 +960,16 @@ static void on_delete_range_after(GtkTextBuffer *buf, GtkTextIter *start, GtkTex
   GtkTextIter del_it;
   gtk_text_buffer_get_iter_at_offset(buf, &del_it, p->pending_del_char);
   gsize edit_byte = iter_byte_in_buffer(buf, &del_it);
+  gboolean was_struct = p->pending_del_structural;
   update_link_spans_incremental(p, edit_byte, p->pending_del_bytes, 0,
                                 -p->pending_del_nl, p->pending_del_structural);
+  if (was_struct)
+    apply_link_tags_range(p, 0, G_MAXSIZE);
+  else {
+    GtkTextIter l_it;
+    gtk_text_buffer_get_iter_at_line(buf, &l_it, ln);
+    apply_link_tags_range(p, iter_byte_in_buffer(buf, &l_it), edit_byte + 1);
+  }
   p->pending_del_bytes = 0;
   p->pending_del_nl = 0;
   p->pending_del_structural = FALSE;
@@ -1102,6 +1294,288 @@ static void on_editor_stopped(GtkGestureClick *gesture, gpointer ud)
   pane->press_has_span = FALSE;
 }
 
+/* ------------------------------------------- hover, cursor & tooltips -- */
+
+static gboolean editor_reduce_motion(const BtEditorPane *pane)
+{
+  const char *env = g_getenv("BT_REDUCE_MOTION");
+  if (env != NULL && strcmp(env, "1") == 0)
+    return TRUE;
+  if (pane == NULL || pane->view == NULL)
+    return TRUE;
+  GtkSettings *st = gtk_widget_get_settings(GTK_WIDGET(pane->view));
+  if (st == NULL)
+    return TRUE;
+  gboolean anim = TRUE;
+  g_object_get(st, "gtk-enable-animations", &anim, NULL);
+  return !anim;
+}
+
+static void apply_hover_tag_fraction(BtEditorPane *pane, double t)
+{
+  if (pane == NULL || pane->buffer == NULL || !pane->hover_active)
+    return;
+  gdouble r0, g0, b0, r1, g1, b1;
+  bt_theme_unpack(pane->hover_base_rgb, &r0, &g0, &b0);
+  bt_theme_unpack(BT_COL_LINK_HOVER, &r1, &g1, &b1);
+  GdkRGBA col = {
+    .red = (float)(r0 + (r1 - r0) * t),
+    .green = (float)(g0 + (g1 - g0) * t),
+    .blue = (float)(b0 + (b1 - b0) * t),
+    .alpha = 1.0f,
+  };
+  g_object_set(pane->t_link_hover, "foreground-rgba", &col, NULL);
+
+  GtkTextBuffer *buf = GTK_TEXT_BUFFER(pane->buffer);
+  GtkTextIter b0_it, b1_it;
+  gtk_text_buffer_get_bounds(buf, &b0_it, &b1_it);
+  gtk_text_buffer_remove_tag(buf, pane->t_link_hover, &b0_it, &b1_it);
+
+  g_autofree gchar *txt = gtk_text_buffer_get_text(buf, &b0_it, &b1_it, TRUE);
+  gsize total = strlen(txt);
+  gsize hs = MIN(pane->hover_span_start, total);
+  gsize he = MIN(pane->hover_span_end, total);
+  if (he > hs) {
+    GtkTextIter s_it, e_it;
+    gint cs = (gint)g_utf8_strlen(txt, (gssize)hs);
+    gint ce = cs + (gint)g_utf8_strlen(txt + hs, (gssize)(he - hs));
+    gtk_text_buffer_get_iter_at_offset(buf, &s_it, cs);
+    gtk_text_buffer_get_iter_at_offset(buf, &e_it, ce);
+    gtk_text_buffer_apply_tag(buf, pane->t_link_hover, &s_it, &e_it);
+  }
+}
+
+static gboolean on_hover_anim_tick(gpointer ud)
+{
+  BtEditorPane *pane = ud;
+  if (!pane->hover_active) {
+    pane->hover_anim_id = 0;
+    return G_SOURCE_REMOVE;
+  }
+  double elapsed_ms = (double)(g_get_monotonic_time() - pane->hover_start_us) / 1000.0;
+  double t = CLAMP(elapsed_ms / 120.0, 0.0, 1.0);
+  apply_hover_tag_fraction(pane, t);
+  if (t >= 1.0) {
+    pane->hover_anim_id = 0;
+    return G_SOURCE_REMOVE;
+  }
+  return G_SOURCE_CONTINUE;
+}
+
+static void clear_hover_state(BtEditorPane *pane)
+{
+  if (pane == NULL)
+    return;
+  if (pane->hover_anim_id != 0) {
+    g_source_remove(pane->hover_anim_id);
+    pane->hover_anim_id = 0;
+  }
+  pane->hover_active = FALSE;
+  pane->hover_span_start = 0;
+  pane->hover_span_end = 0;
+  if (pane->buffer != NULL && pane->t_link_hover != NULL) {
+    GtkTextIter s, e;
+    gtk_text_buffer_get_bounds(GTK_TEXT_BUFFER(pane->buffer), &s, &e);
+    gtk_text_buffer_remove_tag(GTK_TEXT_BUFFER(pane->buffer), pane->t_link_hover, &s, &e);
+  }
+  if (pane->view != NULL)
+    gtk_widget_set_cursor_from_name(GTK_WIDGET(pane->view), "text");
+}
+
+static void update_hover_at_coords(BtEditorPane *pane, gdouble x, gdouble y)
+{
+  if (pane == NULL || pane->view == NULL)
+    return;
+  pane->hover_x = x;
+  pane->hover_y = y;
+  BtLinkSpan sp;
+  if (!hit_test_link_at_coords(pane, x, y, &sp)) {
+    clear_hover_state(pane);
+    return;
+  }
+
+  gboolean want_pointer = pane->links_open_on_click || pane->ctrl_held;
+  gtk_widget_set_cursor_from_name(GTK_WIDGET(pane->view), want_pointer ? "pointer" : "text");
+
+  gboolean same = pane->hover_active &&
+                  pane->hover_span_start == sp.start &&
+                  pane->hover_span_end == sp.end;
+  if (same)
+    return;
+
+  clear_hover_state(pane);
+  gtk_widget_set_cursor_from_name(GTK_WIDGET(pane->view), want_pointer ? "pointer" : "text");
+
+  gboolean is_placeholder = FALSE;
+  guint32 base_rgb = BT_COL_LINK;
+  tag_for_span(pane, &sp, &is_placeholder, &base_rgb);
+  if (is_placeholder)
+    return;
+
+  pane->hover_active = TRUE;
+  pane->hover_span_start = sp.start;
+  pane->hover_span_end = sp.end;
+  pane->hover_base_rgb = base_rgb;
+
+  if (editor_reduce_motion(pane)) {
+    apply_hover_tag_fraction(pane, 1.0);
+  } else {
+    pane->hover_start_us = g_get_monotonic_time();
+    apply_hover_tag_fraction(pane, 0.25);
+    pane->hover_anim_id = g_timeout_add(16, on_hover_anim_tick, pane);
+  }
+}
+
+static void on_editor_motion(GtkEventControllerMotion *ctrl, gdouble x, gdouble y, gpointer ud)
+{
+  BtEditorPane *pane = ud;
+  GdkModifierType mods = gtk_event_controller_get_current_event_state(GTK_EVENT_CONTROLLER(ctrl));
+  pane->ctrl_held = (mods & GDK_CONTROL_MASK) != 0;
+  update_hover_at_coords(pane, x, y);
+}
+
+static void on_editor_leave(GtkEventControllerMotion *ctrl, gpointer ud)
+{
+  (void)ctrl;
+  clear_hover_state(ud);
+}
+
+static gboolean on_editor_key_event(GtkEventControllerKey *ctrl, guint keyval, guint keycode,
+                                    GdkModifierType state, gpointer ud)
+{
+  (void)ctrl; (void)keycode;
+  BtEditorPane *pane = ud;
+  gboolean now_ctrl = (state & GDK_CONTROL_MASK) != 0 ||
+                      keyval == GDK_KEY_Control_L || keyval == GDK_KEY_Control_R;
+  if (keyval == GDK_KEY_Control_L || keyval == GDK_KEY_Control_R) {
+    /* key-released updates cleared mask via current state below if needed */
+  }
+  if (pane->hover_active && now_ctrl != pane->ctrl_held) {
+    pane->ctrl_held = now_ctrl;
+    gboolean want_pointer = pane->links_open_on_click || pane->ctrl_held;
+    gtk_widget_set_cursor_from_name(GTK_WIDGET(pane->view), want_pointer ? "pointer" : "text");
+  }
+  return FALSE;
+}
+
+static void on_editor_key_released(GtkEventControllerKey *ctrl, guint keyval, guint keycode,
+                                   GdkModifierType state, gpointer ud)
+{
+  (void)ctrl; (void)keycode; (void)keyval;
+  BtEditorPane *pane = ud;
+  pane->ctrl_held = (state & GDK_CONTROL_MASK) != 0;
+  if (pane->hover_active) {
+    gboolean want_pointer = pane->links_open_on_click || pane->ctrl_held;
+    gtk_widget_set_cursor_from_name(GTK_WIDGET(pane->view), want_pointer ? "pointer" : "text");
+  }
+}
+
+static gboolean offset_is_in_ai_draft(const BtEditorPane *pane, gsize byte_offset)
+{
+  if (pane == NULL || pane->buffer == NULL)
+    return FALSE;
+  GtkTextBuffer *buf = GTK_TEXT_BUFFER(pane->buffer);
+  GtkTextIter s, e;
+  gtk_text_buffer_get_bounds(buf, &s, &e);
+  g_autofree gchar *txt = gtk_text_buffer_get_text(buf, &s, &e, TRUE);
+  gsize total = strlen(txt);
+  if (byte_offset > total)
+    byte_offset = total;
+  GtkTextIter it;
+  gtk_text_buffer_get_iter_at_offset(buf, &it, (gint)g_utf8_strlen(txt, (gssize)byte_offset));
+  return gtk_text_iter_has_tag(&it, pane->t_ai_body) ||
+         gtk_text_iter_has_tag(&it, pane->t_ai_heading);
+}
+
+gchar *bt_editorpane_tooltip_for_offset(const BtEditorPane *pane, gsize byte_offset)
+{
+  if (pane == NULL || pane->relpath == NULL)
+    return NULL;
+  BtLinkSpan sp;
+  if (!bt_editorpane_link_at_offset(pane, byte_offset, &sp))
+    return NULL;
+  if (raw_target_is_placeholder(sp.raw_target))
+    return NULL;
+
+  BtLinkResolution *res = resolve_span_for_pane(pane, &sp);
+  gchar *tip = NULL;
+  if (res == NULL) {
+    tip = g_strdup(sp.raw_target);
+  } else if (res->status == BT_LINK_PLACEHOLDER) {
+    bt_link_resolution_free(res);
+    return NULL;
+  } else {
+    BtLinkOpenPolicy pol;
+    bt_link_check_open_policy(res, pane->vault, TRUE, &pol);
+
+    if (res->status == BT_LINK_BLOCKED || pol.action == BT_LINK_OPEN_BLOCKED) {
+      tip = g_strdup(pol.reason_msg ? pol.reason_msg
+                                    : bt_link_block_reason_message(res->block_reason));
+    } else if (res->status == BT_LINK_EXTERNAL) {
+      if (pol.has_userinfo) {
+        tip = g_strdup_printf("%s (Warning: embedded credentials stripped)",
+                              pol.safe_display_url ? pol.safe_display_url : res->url);
+      } else {
+        tip = g_strdup(pol.safe_display_url ? pol.safe_display_url : res->url);
+      }
+    } else if (res->status == BT_LINK_AMBIGUOUS) {
+      guint cnt = 0;
+      while (res->candidates != NULL && res->candidates[cnt] != NULL)
+        cnt++;
+      tip = g_strdup_printf("%u notes match. Click to choose.", cnt);
+    } else if (res->status == BT_LINK_UNRESOLVED) {
+      tip = g_strdup("Note not found");
+    } else if (res->kind == BT_LINK_KIND_SAME_NOTE) {
+      tip = res->anchor ? g_strdup_printf("#%s", res->anchor) : g_strdup("(current note)");
+    } else if (res->kind == BT_LINK_KIND_FILE) {
+      tip = g_strdup_printf("%s — Opens in default app", res->path ? res->path : sp.raw_target);
+    } else if (res->kind == BT_LINK_KIND_DIR) {
+      tip = g_strdup_printf("%s — Opens in file manager", res->path ? res->path : sp.raw_target);
+    } else {
+      tip = res->anchor ? g_strdup_printf("%s#%s", res->path, res->anchor)
+                        : g_strdup(res->path ? res->path : sp.raw_target);
+    }
+    bt_link_open_policy_clear(&pol);
+    bt_link_resolution_free(res);
+  }
+
+  if (tip != NULL && offset_is_in_ai_draft(pane, byte_offset)) {
+    gchar *with_ai = g_strdup_printf("%s · AI draft", tip);
+    g_free(tip);
+    tip = with_ai;
+  }
+  return tip;
+}
+
+const gchar *bt_editorpane_cursor_name_at_offset(const BtEditorPane *pane, gsize byte_offset,
+                                                 GdkModifierType mods)
+{
+  if (pane == NULL || pane->relpath == NULL)
+    return "text";
+  BtLinkSpan sp;
+  if (!bt_editorpane_link_at_offset(pane, byte_offset, &sp))
+    return "text";
+  if (raw_target_is_placeholder(sp.raw_target))
+    return "text";
+  gboolean allow_pointer = pane->links_open_on_click || ((mods & GDK_CONTROL_MASK) != 0);
+  return allow_pointer ? "pointer" : "text";
+}
+
+static gboolean on_editor_query_tooltip(GtkWidget *w, gint x, gint y, gboolean keyboard_mode,
+                                        GtkTooltip *tooltip, gpointer ud)
+{
+  (void)w; (void)keyboard_mode;
+  BtEditorPane *pane = ud;
+  BtLinkSpan sp;
+  if (!hit_test_link_at_coords(pane, (gdouble)x, (gdouble)y, &sp))
+    return FALSE;
+  g_autofree gchar *tip = bt_editorpane_tooltip_for_offset(pane, sp.start);
+  if (tip == NULL || tip[0] == '\0')
+    return FALSE;
+  gtk_tooltip_set_text(tooltip, tip);
+  return TRUE;
+}
+
 /* ------------------------------------------- language & scheme loading -- */
 
 static gchar *find_exe_dir(void)
@@ -1299,6 +1773,19 @@ BtEditorPane *bt_editorpane_new(BtEditorSaveFn on_save, BtEditorLinkFn on_link,
   g_signal_connect(click, "stopped", G_CALLBACK(on_editor_stopped), pane);
   gtk_widget_add_controller(GTK_WIDGET(pane->view), GTK_EVENT_CONTROLLER(click));
 
+  GtkEventController *motion = gtk_event_controller_motion_new();
+  g_signal_connect(motion, "motion", G_CALLBACK(on_editor_motion), pane);
+  g_signal_connect(motion, "leave", G_CALLBACK(on_editor_leave), pane);
+  gtk_widget_add_controller(GTK_WIDGET(pane->view), motion);
+
+  GtkEventController *keyc = gtk_event_controller_key_new();
+  g_signal_connect(keyc, "key-pressed", G_CALLBACK(on_editor_key_event), pane);
+  g_signal_connect(keyc, "key-released", G_CALLBACK(on_editor_key_released), pane);
+  gtk_widget_add_controller(GTK_WIDGET(pane->view), keyc);
+
+  gtk_widget_set_has_tooltip(GTK_WIDGET(pane->view), TRUE);
+  g_signal_connect(pane->view, "query-tooltip", G_CALLBACK(on_editor_query_tooltip), pane);
+
   pane->scrolled = gtk_scrolled_window_new();
   gtk_widget_set_name(pane->scrolled, "bt-editor-scrolled");
   gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(pane->scrolled), GTK_WIDGET(pane->view));
@@ -1425,6 +1912,22 @@ gboolean bt_editorpane_get_links_open_on_click(const BtEditorPane *pane)
   return pane ? pane->links_open_on_click : TRUE;
 }
 
+void bt_editorpane_set_index_snapshot(BtEditorPane *pane, BtIndexSnapshot *snap, const BtVault *vault)
+{
+  if (pane == NULL)
+    return;
+  pane->snapshot = snap;
+  pane->vault = vault;
+  if (pane->relpath != NULL)
+    apply_link_tags_range(pane, 0, G_MAXSIZE);
+}
+
+void bt_editorpane_refresh_link_styles(BtEditorPane *pane)
+{
+  if (pane != NULL && pane->relpath != NULL)
+    apply_link_tags_range(pane, 0, G_MAXSIZE);
+}
+
 gchar *bt_editorpane_buffer_hash(const BtEditorPane *pane)
 {
   if (pane == NULL)
@@ -1441,6 +1944,7 @@ void bt_editorpane_free(BtEditorPane *pane)
 {
   if (pane == NULL)
     return;
+  clear_hover_state(pane);
   cancel_autosave(pane);
   g_clear_pointer(&pane->link_spans, g_array_unref);
   g_free(pane->relpath);
@@ -1461,16 +1965,21 @@ GtkWidget *bt_editorpane_view_widget(BtEditorPane *pane)
 void bt_editorpane_load(BtEditorPane *pane, const gchar *relpath, const gchar *text, gsize length)
 {
   g_return_if_fail(pane != NULL && relpath != NULL);
+  clear_hover_state(pane);
   cancel_autosave(pane);
   g_free(pane->relpath);
   pane->relpath = g_strdup(relpath);
 
   pane->loading = TRUE;
   gtk_text_buffer_set_text(GTK_TEXT_BUFFER(pane->buffer), text ? text : "", (gint)length);
+  GtkTextIter bstart, bend;
+  gtk_text_buffer_get_bounds(GTK_TEXT_BUFFER(pane->buffer), &bstart, &bend);
+  g_autofree gchar *buf_txt = gtk_text_buffer_get_text(GTK_TEXT_BUFFER(pane->buffer), &bstart, &bend, TRUE);
+  g_clear_pointer(&pane->link_spans, g_array_unref);
+  pane->link_spans = bt_link_scan(buf_txt, strlen(buf_txt));
   gint nlines = gtk_text_buffer_get_line_count(GTK_TEXT_BUFFER(pane->buffer));
   retag_lines(pane, 0, MAX(nlines - 1, 0));
-  g_clear_pointer(&pane->link_spans, g_array_unref);
-  pane->link_spans = bt_link_scan(text ? text : "", length);
+  apply_link_tags_range(pane, 0, G_MAXSIZE);
   GtkTextIter start;
   gtk_text_buffer_get_start_iter(GTK_TEXT_BUFFER(pane->buffer), &start);
   gtk_text_buffer_place_cursor(GTK_TEXT_BUFFER(pane->buffer), &start);
@@ -1490,6 +1999,7 @@ void bt_editorpane_load(BtEditorPane *pane, const gchar *relpath, const gchar *t
 void bt_editorpane_clear(BtEditorPane *pane)
 {
   g_return_if_fail(pane != NULL);
+  clear_hover_state(pane);
   cancel_autosave(pane);
   g_clear_pointer(&pane->relpath, g_free);
   pane->loading = TRUE;
