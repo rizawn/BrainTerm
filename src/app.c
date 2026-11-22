@@ -769,7 +769,7 @@ void bt_app_prepare_ui_for_test(BtApp *app)
   app->smoke_test = TRUE;
   if (app->window == NULL) {
     on_startup(G_APPLICATION(app->adw_app), app);
-    on_activate(GTK_APPLICATION(app->adw_app), app);
+    on_activate(NULL, app);
   }
 }
 

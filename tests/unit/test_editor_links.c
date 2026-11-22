@@ -475,6 +475,83 @@ static void test_l2_4_dispatcher_and_launcher_mock(void **state)
   g_free(cfg);
 }
 
+static guint count_files_recursive(const gchar *dir_path)
+{
+  guint total = 0;
+  GDir *dir = g_dir_open(dir_path, 0, NULL);
+  if (dir == NULL)
+    return 0;
+  const gchar *name;
+  while ((name = g_dir_read_name(dir)) != NULL) {
+    g_autofree gchar *full = g_build_filename(dir_path, name, NULL);
+    if (g_file_test(full, G_FILE_TEST_IS_DIR))
+      total += count_files_recursive(full);
+    else
+      total++;
+  }
+  g_dir_close(dir);
+  return total;
+}
+
+static void test_l2_8_unresolved_click_does_not_call_stub_writer(void **state)
+{
+  (void)state;
+  if (!gtk_init_check()) {
+    skip();
+    return;
+  }
+  adw_init();
+
+  gchar *root = g_dir_make_tmp("bt-l28-XXXXXX", NULL);
+  gchar *cfg = g_dir_make_tmp("bt-cfg28-XXXXXX", NULL);
+  g_setenv("BT_CONFIG_DIR", cfg, TRUE);
+  const gchar *note_text = "# A\nUnresolved target [[missing-note]] here.\n";
+  bt_test_put(root, "a.md", note_text);
+
+  BtApp *app = bt_app_new();
+  bt_app_prepare_ui_for_test(app);
+  assert_true(bt_app_open_vault(app, root, NULL));
+  assert_true(bt_app_open_note(app, "a.md", NULL));
+
+  guint files_before = count_files_recursive(root);
+  BtEditorPane *ed = (BtEditorPane *)bt_app_editor(app);
+  assert_non_null(ed);
+
+  /* Place caret outside the link, then click inside [[missing-note]] via real editorpane click path. */
+  const gchar *hit = strstr(note_text, "missing-note");
+  assert_non_null(hit);
+  gsize target_off = (gsize)(hit - note_text);
+  bt_editorpane_set_caret_byte_offset(ed, 0);
+  bt_app_set_statusbar_notice(app, NULL);
+
+  assert_true(bt_editorpane_simulate_click(ed, target_off, 1, 1, 0.0, 0.0, 0));
+  assert_string_equal(bt_app_active_note(app), "a.md");
+  assert_string_equal(bt_app_last_statusbar_notice(app), "Note not found");
+  assert_null(bt_app_active_confirm_popover_for_test(app));
+
+  /* Also verify nested path target via bt_app_activate_link directly. */
+  bt_app_set_statusbar_notice(app, NULL);
+  assert_false(bt_app_activate_link(app, "folder/missing-two"));
+  assert_string_equal(bt_app_active_note(app), "a.md");
+  assert_string_equal(bt_app_last_statusbar_notice(app), "Note not found");
+  assert_null(bt_app_active_confirm_popover_for_test(app));
+
+  g_autofree gchar *p1 = g_build_filename(root, "missing-note.md", NULL);
+  g_autofree gchar *p2 = g_build_filename(root, "folder", "missing-two.md", NULL);
+  assert_false(g_file_test(p1, G_FILE_TEST_EXISTS));
+  assert_false(g_file_test(p2, G_FILE_TEST_EXISTS));
+  assert_int_equal(count_files_recursive(root), files_before);
+
+  printf("BT_TEST_L2_8 unresolved_no_stub_create=1 files=%u\n", files_before);
+  GtkWindow *win = bt_app_window(app);
+  if (win) gtk_window_destroy(win);
+  bt_app_free(app);
+  bt_test_rm_rf(root);
+  bt_test_rm_rf(cfg);
+  g_free(root);
+  g_free(cfg);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -483,6 +560,7 @@ int main(void)
     cmocka_unit_test(test_l2_3_hover_styles_and_tooltips),
     cmocka_unit_test(test_l2_5_flush_before_navigation),
     cmocka_unit_test(test_l2_4_dispatcher_and_launcher_mock),
+    cmocka_unit_test(test_l2_8_unresolved_click_does_not_call_stub_writer),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }
