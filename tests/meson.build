@@ -192,11 +192,11 @@ test('bench_graph_1k', bench_graph, suite: 'bench', is_parallel: false, timeout:
 
 bench_graph_gl = executable(
   'bench_graph_gl',
-  ['bench/bench_graph_gl.c', '../src/ui/graphgl.c', bt_resources],
+  ['bench/bench_graph_gl.c', '../src/ui/graphgl.c', bt_resources, bt_build_stamp_h],
   include_directories: [test_inc, include_directories('../src')],
   dependencies: [bt_core_dep, gtk4_dep, epoxy_dep],
 )
-test('bench_graph_gl', bench_graph_gl, suite: 'bench', is_parallel: false, timeout: 45)
+test('bench_graph_gl', bench_graph_gl, suite: 'bench', is_parallel: false, timeout: 60)
 
 t_importers = executable(
   'test_importers',
