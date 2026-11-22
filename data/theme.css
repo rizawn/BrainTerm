@@ -669,6 +669,23 @@ toast {
   padding: 0;
 }
 
+.bt-graph-controls button.bt-graph-pill,
+.bt-graph-controls togglebutton.bt-graph-pill {
+  min-width: 0;
+  min-height: 24px;
+  padding: 0 9px;
+  font-size: 11px;
+  font-weight: 500;
+  border-radius: 6px;
+  color: @bt_text_secondary;
+}
+
+.bt-graph-controls button.bt-pill-active,
+.bt-graph-controls togglebutton.bt-graph-pill:checked {
+  background-color: @bt_accent_soft;
+  color: @bt_accent;
+}
+
 .bt-graph-legend {
   background-color: alpha(@bt_surface_2, 0.92);
   border: 1px solid @bt_border;

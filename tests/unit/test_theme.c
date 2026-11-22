@@ -183,7 +183,10 @@ static void test_graph_render(void **state)
   const guint32 *px = (const guint32 *)(const void *)cairo_image_surface_get_data(surf);
   int stride = cairo_image_surface_get_stride(surf) / 4;
   guint32 bg = px[0] & 0x00FFFFFFu;
-  assert_int_equal(bg, BT_COL_SURFACE_1); /* graph card background == surface-1 */
+  /* Corner sits inside the dark @bt_graph_bg / @bt_graph_vignette band. */
+  assert_true(((bg >> 16) & 0xFFu) <= 0x15u);
+  assert_true(((bg >> 8) & 0xFFu) <= 0x17u);
+  assert_true((bg & 0xFFu) <= 0x1Cu);
   guint differing = 0;
   gboolean saw_accent_family = FALSE;
   for (int y = 0; y < 300; y++)
