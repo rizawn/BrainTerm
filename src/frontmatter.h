@@ -27,6 +27,7 @@ typedef struct {
   GPtrArray *tags;    /* gchar* human-owned tags (P4) */
   GPtrArray *tags_ai; /* gchar* AI-proposed tags */
   GPtrArray *links;   /* gchar* declared wiki-links */
+  GPtrArray *aliases; /* gchar* note aliases */
 
   GPtrArray *unknown; /* BtUnknownField* preserved verbatim */
 

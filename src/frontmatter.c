@@ -46,7 +46,8 @@ static gboolean is_known_key(const gchar *k)
 {
   return strcmp(k, "id") == 0 || strcmp(k, "title") == 0 || strcmp(k, "created") == 0 ||
          strcmp(k, "updated") == 0 || strcmp(k, "source") == 0 || strcmp(k, "agent") == 0 ||
-         strcmp(k, "tags") == 0 || strcmp(k, "tags_ai") == 0 || strcmp(k, "links") == 0;
+         strcmp(k, "tags") == 0 || strcmp(k, "tags_ai") == 0 || strcmp(k, "links") == 0 ||
+         strcmp(k, "aliases") == 0 || strcmp(k, "alias") == 0;
 }
 
 /* Locate closing '---' line. Returns FALSE if no valid frontmatter block. */
@@ -160,6 +161,7 @@ BtFrontmatter *bt_frontmatter_parse(const gchar *doc, gsize len)
   fm->tags = g_ptr_array_new_with_free_func(g_free);
   fm->tags_ai = g_ptr_array_new_with_free_func(g_free);
   fm->links = g_ptr_array_new_with_free_func(g_free);
+  fm->aliases = g_ptr_array_new_with_free_func(g_free);
   fm->unknown = g_ptr_array_new_with_free_func(unknown_free);
   fm->source = g_strdup("human");
 
@@ -235,6 +237,8 @@ BtFrontmatter *bt_frontmatter_parse(const gchar *doc, gsize len)
         read_string_list(&ydoc, vn, fm->tags_ai);
       } else if (strcmp(k, "links") == 0) {
         read_string_list(&ydoc, vn, fm->links);
+      } else if (strcmp(k, "aliases") == 0 || strcmp(k, "alias") == 0) {
+        read_string_list(&ydoc, vn, fm->aliases);
       }
 
       g_free(sv);
@@ -262,6 +266,7 @@ void bt_frontmatter_free(BtFrontmatter *fm)
   g_ptr_array_unref(fm->tags);
   g_ptr_array_unref(fm->tags_ai);
   g_ptr_array_unref(fm->links);
+  g_ptr_array_unref(fm->aliases);
   g_ptr_array_unref(fm->unknown);
   g_free(fm);
 }
@@ -312,6 +317,8 @@ gchar *bt_frontmatter_serialize(const BtFrontmatter *fm, const gchar *body)
   append_flow_list(s, "tags", fm->tags, FALSE);
   append_flow_list(s, "tags_ai", fm->tags_ai, FALSE);
   append_flow_list(s, "links", fm->links, TRUE);
+  if (fm->aliases != NULL && fm->aliases->len > 0)
+    append_flow_list(s, "aliases", fm->aliases, TRUE);
   for (guint i = 0; i < fm->unknown->len; i++) {
     const BtUnknownField *u = g_ptr_array_index(fm->unknown, i);
     g_string_append_printf(s, "%s\n", u->raw_line);

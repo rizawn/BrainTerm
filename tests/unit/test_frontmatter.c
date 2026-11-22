@@ -59,6 +59,87 @@ static void test_valid_and_unknown_preserved(void **state)
   bt_frontmatter_free(fm);
 }
 
+static void test_aliases_and_unknown_roundtrip(void **state)
+{
+  (void)state;
+  const gchar *doc =
+      "---\n"
+      "id: bt-20261123-alias1\n"
+      "title: \"Bootstrap Methods & MCMC\"\n"
+      "created: 2026-11-23T00:00:00Z\n"
+      "updated: 2026-11-23T01:00:00Z\n"
+      "source: human\n"
+      "agent: null\n"
+      "tags: [bootstrap, mcmc]\n"
+      "tags_ai: []\n"
+      "links: [\"[[chapter-13-empirical/01-jackknife.md]]\"]\n"
+      "aliases:\n"
+      "  - Bootstrap Notes\n"
+      "  - MCMC Intro\n"
+      "difficulty: advanced\n"
+      "---\n"
+      "# Bootstrap\n";
+
+  BtFrontmatter *fm = bt_frontmatter_parse(doc, strlen(doc));
+  assert_true(fm->has_frontmatter);
+  assert_false(fm->parse_error);
+  assert_non_null(fm->aliases);
+  assert_int_equal(fm->aliases->len, 2);
+  assert_string_equal(g_ptr_array_index(fm->aliases, 0), "Bootstrap Notes");
+  assert_string_equal(g_ptr_array_index(fm->aliases, 1), "MCMC Intro");
+  assert_int_equal(fm->unknown->len, 1);
+
+  gchar *ser = bt_frontmatter_serialize(fm, doc + fm->body_offset);
+  const gchar *expected =
+      "---\n"
+      "id: bt-20261123-alias1\n"
+      "title: \"Bootstrap Methods & MCMC\"\n"
+      "created: 2026-11-23T00:00:00Z\n"
+      "updated: 2026-11-23T01:00:00Z\n"
+      "source: human\n"
+      "agent: null\n"
+      "tags: [bootstrap, mcmc]\n"
+      "tags_ai: []\n"
+      "links: [\"[[chapter-13-empirical/01-jackknife.md]]\"]\n"
+      "aliases: [\"Bootstrap Notes\", \"MCMC Intro\"]\n"
+      "difficulty: advanced\n"
+      "---\n"
+      "# Bootstrap\n";
+  assert_string_equal(ser, expected);
+
+  BtFrontmatter *fm2 = bt_frontmatter_parse(ser, strlen(ser));
+  assert_false(fm2->parse_error);
+  assert_int_equal(fm2->aliases->len, 2);
+  assert_string_equal(g_ptr_array_index(fm2->aliases, 0), "Bootstrap Notes");
+  assert_string_equal(g_ptr_array_index(fm2->aliases, 1), "MCMC Intro");
+  assert_int_equal(fm2->unknown->len, 1);
+
+  /* Also verify existing notes without aliases stay byte-for-byte identical. */
+  const gchar *no_alias =
+      "---\n"
+      "id: bt-20261123-plain\n"
+      "title: \"Plain\"\n"
+      "created: 2026-11-23T00:00:00Z\n"
+      "updated: 2026-11-23T00:00:00Z\n"
+      "source: human\n"
+      "agent: null\n"
+      "tags: [a]\n"
+      "tags_ai: []\n"
+      "links: []\n"
+      "---\n"
+      "Body\n";
+  BtFrontmatter *fm3 = bt_frontmatter_parse(no_alias, strlen(no_alias));
+  assert_int_equal(fm3->aliases->len, 0);
+  gchar *ser3 = bt_frontmatter_serialize(fm3, no_alias + fm3->body_offset);
+  assert_string_equal(ser3, no_alias);
+
+  g_free(ser3);
+  bt_frontmatter_free(fm3);
+  bt_frontmatter_free(fm2);
+  g_free(ser);
+  bt_frontmatter_free(fm);
+}
+
 static void test_duplicate_and_malformed(void **state)
 {
   (void)state;
@@ -88,6 +169,7 @@ int main(void)
 {
   const struct CMUnitTest tests[] = {
     cmocka_unit_test(test_valid_and_unknown_preserved),
+    cmocka_unit_test(test_aliases_and_unknown_roundtrip),
     cmocka_unit_test(test_duplicate_and_malformed),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
