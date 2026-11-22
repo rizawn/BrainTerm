@@ -43,6 +43,8 @@ typedef struct {
   BtGraphLabelCand lbl_placed[64];
   BtGraphCoreObstacle *obs_scratch;
   guint lbl_scratch_cap;
+  guint last_label_count;
+  guint last_overlap_count;
   gboolean initialized;
 } BtCairoPriv;
 
@@ -592,6 +594,19 @@ static void cairo_backend_render(BtGraphRenderer *r, cairo_t *cr, const BtGraphR
     guint max_labels = bt_graph_label_cap_for_zoom(zoom);
     guint placed = bt_graph_place_labels(p->lbl_cands, cand_n, p->obs_scratch, obs_n,
                                          max_labels, 12u, p->lbl_placed, 64u);
+    p->last_label_count = placed;
+    guint ov_cnt = 0;
+    for (guint i = 0; i < placed; i++) {
+      for (guint j = i + 1; j < placed; j++) {
+        const BtGraphLabelCand *a = &p->lbl_placed[i];
+        const BtGraphLabelCand *b = &p->lbl_placed[j];
+        if (a->x < b->x + b->w && a->x + a->w > b->x &&
+            a->y < b->y + b->h && a->y + a->h > b->y) {
+          ov_cnt++;
+        }
+      }
+    }
+    p->last_overlap_count = ov_cnt;
 
     for (guint k = 0; k < placed; k++) {
       const BtGraphLabelCand *lp = &p->lbl_placed[placed - 1u - k];
@@ -719,6 +734,8 @@ static void alive_unref(BtGraphAlive *a)
     g_free(a);
 }
 
+#define BT_FRAME_HIST_CAP 256u
+
 struct BtGraphView {
   GtkWidget *root;         /* GtkStack: "canvas" | "empty" */
   GtkWidget *overlay;      /* GtkOverlay wrapping canvas_stack + controls + legend */
@@ -735,6 +752,7 @@ struct BtGraphView {
   GtkWidget *btn_ghosts;
   GtkWidget *legend_lbl;
   GtkWidget *hover_lbl;
+  GtkWidget *debug_lbl;
   GtkWindow *toplevel;
   gulong toplevel_active_sig;
 
@@ -788,6 +806,15 @@ struct BtGraphView {
   gdouble pulse_phase;
   gint64 last_tick_us;
   guint tick_id;
+
+  /* Frame-time debug overlay metrics (from GdkFrameClock, zero per-frame alloc) */
+  gboolean debug_overlay;
+  gint64 frame_ts_us[BT_FRAME_HIST_CAP];
+  gdouble frame_dt_ms[BT_FRAME_HIST_CAP];
+  guint frame_hist_head;
+  guint frame_hist_count;
+  gint64 prev_frame_clock_us;
+  gint64 last_debug_refresh_us;
 
   GtkWidget *ctx_popover;
   gint ctx_hit_idx;
@@ -996,15 +1023,147 @@ static gboolean needs_ambient_tick(const BtGraphView *gv)
   return gv->active_backend == BT_GRAPH_BACKEND_GL || gv->graph->nodes->len <= 1500u;
 }
 
+static void count_visible_graph_stats(const BtGraphView *gv, guint *vis_nodes_out,
+                                      guint *tot_nodes_out, guint *vis_edges_out,
+                                      guint *tot_edges_out)
+{
+  guint vn = 0, tn = 0, ve = 0, te = 0;
+  if (gv != NULL && gv->graph != NULL) {
+    tn = gv->graph->nodes ? gv->graph->nodes->len : 0u;
+    for (guint i = 0; i < tn; i++) {
+      const BtGraphNode *nd = g_ptr_array_index(gv->graph->nodes, i);
+      if (nd->visible)
+        vn++;
+    }
+    te = gv->graph->edges ? gv->graph->edges->len : 0u;
+    for (guint i = 0; i < te; i++) {
+      const BtGraphEdge *e = &g_array_index(gv->graph->edges, BtGraphEdge, i);
+      if (e->src_idx < tn && e->dst_idx < tn) {
+        const BtGraphNode *a = g_ptr_array_index(gv->graph->nodes, e->src_idx);
+        const BtGraphNode *b = g_ptr_array_index(gv->graph->nodes, e->dst_idx);
+        if (a->visible && b->visible)
+          ve++;
+      }
+    }
+  }
+  if (vis_nodes_out) *vis_nodes_out = vn;
+  if (tot_nodes_out) *tot_nodes_out = tn;
+  if (vis_edges_out) *vis_edges_out = ve;
+  if (tot_edges_out) *tot_edges_out = te;
+}
+
+static guint current_drawn_label_count(const BtGraphView *gv)
+{
+  if (gv == NULL)
+    return 0u;
+  if (gv->active_backend == BT_GRAPH_BACKEND_GL && gv->gl != NULL)
+    return bt_graph_gl_last_label_count(gv->gl);
+  if (gv->cairo_renderer != NULL && gv->cairo_renderer->priv != NULL)
+    return ((const BtCairoPriv *)gv->cairo_renderer->priv)->last_label_count;
+  return 0u;
+}
+
+static void record_frame_clock_sample(BtGraphView *gv, gint64 fc_us)
+{
+  if (fc_us <= 0)
+    return;
+  if (gv->prev_frame_clock_us > 0 && fc_us > gv->prev_frame_clock_us) {
+    gdouble dt_ms = (gdouble)(fc_us - gv->prev_frame_clock_us) / 1000.0;
+    if (dt_ms > 0.0 && dt_ms < 500.0) {
+      gv->frame_ts_us[gv->frame_hist_head] = fc_us;
+      gv->frame_dt_ms[gv->frame_hist_head] = dt_ms;
+      gv->frame_hist_head = (gv->frame_hist_head + 1u) % BT_FRAME_HIST_CAP;
+      if (gv->frame_hist_count < BT_FRAME_HIST_CAP)
+        gv->frame_hist_count++;
+    }
+  }
+  gv->prev_frame_clock_us = fc_us;
+}
+
+static void update_debug_overlay(BtGraphView *gv, gint64 now_fc_us)
+{
+  if (gv == NULL || gv->debug_lbl == NULL || !gv->debug_overlay)
+    return;
+
+  if (now_fc_us <= 0 && gv->canvas_stack != NULL) {
+    GdkFrameClock *fc = gtk_widget_get_frame_clock(gv->canvas_stack);
+    if (fc != NULL)
+      now_fc_us = gdk_frame_clock_get_frame_time(fc);
+  }
+  if (now_fc_us <= 0)
+    now_fc_us = gv->prev_frame_clock_us;
+
+  gdouble dts[BT_FRAME_HIST_CAP];
+  guint cnt = 0;
+  gdouble sum = 0.0;
+  gdouble max_dt = 0.0;
+  gint64 cutoff = (now_fc_us > 1000000) ? (now_fc_us - 1000000) : 0;
+
+  for (guint i = 0; i < gv->frame_hist_count; i++) {
+    if (gv->frame_ts_us[i] >= cutoff && gv->frame_ts_us[i] <= now_fc_us) {
+      gdouble d = gv->frame_dt_ms[i];
+      dts[cnt++] = d;
+      sum += d;
+      if (d > max_dt)
+        max_dt = d;
+    }
+  }
+
+  /* Stack shell sort for exact p95 (zero heap alloc). */
+  for (guint gap = cnt / 2u; gap > 0u; gap /= 2u) {
+    for (guint i = gap; i < cnt; i++) {
+      gdouble tmp = dts[i];
+      guint j = i;
+      while (j >= gap && dts[j - gap] > tmp) {
+        dts[j] = dts[j - gap];
+        j -= gap;
+      }
+      dts[j] = tmp;
+    }
+  }
+
+  gdouble avg_ms = (cnt > 0u) ? (sum / (gdouble)cnt) : 0.0;
+  gdouble p95_ms = (cnt > 0u) ? dts[(guint)((gdouble)(cnt - 1u) * 0.95)] : 0.0;
+  gdouble fps = (gv->tick_id != 0 && avg_ms > 0.0) ? (1000.0 / avg_ms) : 0.0;
+
+  guint vn = 0, tn = 0, ve = 0, te = 0;
+  count_visible_graph_stats(gv, &vn, &tn, &ve, &te);
+  guint lbls = current_drawn_label_count(gv);
+
+  gboolean is_gl = (gv->active_backend == BT_GRAPH_BACKEND_GL && gv->gl != NULL &&
+                    bt_graph_gl_is_ready(gv->gl));
+  const gchar *be = is_gl ? "GL" : "Cairo";
+  const gchar *gl_ver = is_gl ? bt_graph_gl_version(gv->gl) : "N/A";
+  const gchar *gpu = is_gl ? bt_graph_gl_renderer(gv->gl) : "CPU (Cairo fallback)";
+  const gchar *qual = (gv->quality == BT_GRAPH_QUALITY_HIGH) ? "High" : "Low";
+  const gchar *mode = (is_gl && gv->mode == BT_GRAPH_MODE_3D) ? "3D" : "2D";
+  const gchar *tick_st = (gv->tick_id != 0) ? "running" : "idle";
+
+  char buf[512];
+  g_snprintf(buf, sizeof(buf),
+             "FPS %5.1f | frame avg %.2f / p95 %.2f / max %.2f ms | tick: %s\n"
+             "%s %s | %s\n"
+             "%s | %s | nodes %u/%u | edges %u/%u | labels %u",
+             fps, avg_ms, p95_ms, max_dt, tick_st,
+             be, gl_ver, gpu,
+             mode, qual, vn, tn, ve, te, lbls);
+  gtk_label_set_text(GTK_LABEL(gv->debug_lbl), buf);
+  gv->last_debug_refresh_us = now_fc_us;
+}
+
 static gboolean on_tick(GtkWidget *widget, GdkFrameClock *clock, gpointer ud)
 {
-  (void)clock;
   BtGraphView *gv = ud;
   if (gv->canvas_stack == NULL || !gtk_widget_get_mapped(widget)) {
     gv->tick_id = 0;
     gv->last_tick_us = 0;
+    gv->prev_frame_clock_us = 0;
+    update_debug_overlay(gv, 0);
     return G_SOURCE_REMOVE;
   }
+
+  gint64 fc_us = (clock != NULL) ? gdk_frame_clock_get_frame_time(clock) : 0;
+  record_frame_clock_sample(gv, fc_us);
 
   gint64 now = g_get_monotonic_time();
   gdouble dt = (gv->last_tick_us > 0) ? CLAMP((gdouble)(now - gv->last_tick_us) / 1e6, 0.0, 0.05)
@@ -1108,8 +1267,12 @@ static gboolean on_tick(GtkWidget *widget, GdkFrameClock *clock, gpointer ud)
   if (!active) {
     gv->tick_id = 0;
     gv->last_tick_us = 0;
+    gv->prev_frame_clock_us = 0;
+    update_debug_overlay(gv, fc_us);
     return G_SOURCE_REMOVE;
   }
+  if (gv->debug_overlay && (fc_us - gv->last_debug_refresh_us >= 200000 || gv->last_debug_refresh_us == 0))
+    update_debug_overlay(gv, fc_us);
   return G_SOURCE_CONTINUE;
 }
 
@@ -1118,7 +1281,9 @@ static void ensure_tick(BtGraphView *gv)
   if (gv->canvas_stack == NULL || gv->tick_id != 0 || !gtk_widget_get_mapped(gv->canvas_stack))
     return;
   gv->last_tick_us = g_get_monotonic_time();
+  gv->prev_frame_clock_us = 0;
   gv->tick_id = gtk_widget_add_tick_callback(gv->canvas_stack, on_tick, gv, NULL);
+  update_debug_overlay(gv, 0);
 }
 
 static void stop_tick_if_idle(BtGraphView *gv)
@@ -1130,6 +1295,8 @@ static void stop_tick_if_idle(BtGraphView *gv)
     gtk_widget_remove_tick_callback(gv->canvas_stack, gv->tick_id);
     gv->tick_id = 0;
     gv->last_tick_us = 0;
+    gv->prev_frame_clock_us = 0;
+    update_debug_overlay(gv, 0);
   }
 }
 
@@ -1292,8 +1459,13 @@ static void clear_selection(BtGraphView *gv)
 static gboolean on_key_pressed(GtkEventControllerKey *c, guint keyval, guint keycode,
                                GdkModifierType state, gpointer ud)
 {
-  (void)c; (void)keycode; (void)state;
+  (void)c; (void)keycode;
   BtGraphView *gv = ud;
+  if ((state & (GDK_CONTROL_MASK | GDK_SHIFT_MASK)) == (GDK_CONTROL_MASK | GDK_SHIFT_MASK) &&
+      (keyval == GDK_KEY_F || keyval == GDK_KEY_f)) {
+    bt_graphview_toggle_debug_overlay(gv);
+    return TRUE;
+  }
   if (keyval == GDK_KEY_Escape && gv->selected_idx >= 0) {
     clear_selection(gv);
     return TRUE;
@@ -1973,6 +2145,7 @@ static void on_canvas_destroy(GtkWidget *area, gpointer ud)
   gv->btn_ghosts = NULL;
   gv->legend_lbl = NULL;
   gv->hover_lbl = NULL;
+  gv->debug_lbl = NULL;
 }
 
 static GtkWidget *make_ctrl_btn(const gchar *icon, const gchar *tip, GCallback cb, gpointer ud)
@@ -2200,6 +2373,18 @@ BtGraphView *bt_graphview_new(BtGraphOpenNoteFn on_open, BtGraphOpenTermFn on_op
   gtk_widget_set_visible(gv->hover_lbl, FALSE);
   gtk_overlay_add_overlay(GTK_OVERLAY(gv->overlay), gv->hover_lbl);
 
+  gv->debug_lbl = gtk_label_new("");
+  gtk_widget_set_name(gv->debug_lbl, "bt-graph-debug");
+  gtk_widget_add_css_class(gv->debug_lbl, "bt-graph-debug");
+  gtk_label_set_xalign(GTK_LABEL(gv->debug_lbl), 0.0f);
+  gtk_widget_set_halign(gv->debug_lbl, GTK_ALIGN_START);
+  gtk_widget_set_valign(gv->debug_lbl, GTK_ALIGN_START);
+  gtk_widget_set_margin_top(gv->debug_lbl, 44);
+  gtk_widget_set_margin_start(gv->debug_lbl, 10);
+  gtk_widget_set_can_target(gv->debug_lbl, FALSE);
+  gtk_widget_set_visible(gv->debug_lbl, FALSE);
+  gtk_overlay_add_overlay(GTK_OVERLAY(gv->overlay), gv->debug_lbl);
+
   /* Calm empty state when graph has 0 nodes. */
   GtkWidget *empty = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
   gtk_widget_add_css_class(empty, "bt-empty");
@@ -2419,6 +2604,29 @@ void bt_graphview_set_prefs_cb(BtGraphView *gv, BtGraphPrefsChangedFn on_prefs, 
     return;
   gv->on_prefs = on_prefs;
   gv->prefs_ud = user_data;
+}
+
+void bt_graphview_set_debug_overlay(BtGraphView *gv, gboolean enabled)
+{
+  if (gv == NULL)
+    return;
+  gv->debug_overlay = enabled ? TRUE : FALSE;
+  if (gv->debug_lbl != NULL) {
+    gtk_widget_set_visible(gv->debug_lbl, gv->debug_overlay);
+    if (gv->debug_overlay)
+      update_debug_overlay(gv, 0);
+  }
+}
+
+gboolean bt_graphview_get_debug_overlay(const BtGraphView *gv)
+{
+  return gv ? gv->debug_overlay : FALSE;
+}
+
+void bt_graphview_toggle_debug_overlay(BtGraphView *gv)
+{
+  if (gv != NULL)
+    bt_graphview_set_debug_overlay(gv, !gv->debug_overlay);
 }
 
 void bt_graphview_set_notice_cb(BtGraphView *gv, BtGraphNoticeFn on_notice, gpointer user_data)

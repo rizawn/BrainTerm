@@ -34,6 +34,9 @@ const gchar *bt_graph_gl_vendor(const BtGraphGL *gl);
 const gchar *bt_graph_gl_renderer(const BtGraphGL *gl);
 const gchar *bt_graph_gl_version(const BtGraphGL *gl);
 gdouble bt_graph_gl_init_ms(const BtGraphGL *gl);
+guint bt_graph_gl_last_label_count(const BtGraphGL *gl);
+guint bt_graph_gl_last_overlap_count(const BtGraphGL *gl);
+guint bt_graph_gl_visible_edge_count(const BtGraphGL *gl);
 
 /* Direct draw helper for headless/offscreen GL benchmarks (caller must bind FBO & make_current). */
 void bt_graph_gl_render_state(BtGraphGL *gl, const BtGraphRenderState *st);

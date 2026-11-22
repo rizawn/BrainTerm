@@ -130,6 +130,8 @@ struct BtGraphGL {
   BtGraphLabelCand lbl_placed[BT_GL_LABEL_CAP];
   BtGraphCoreObstacle *obs_scratch;
   guint lbl_scratch_cap;
+  guint last_label_count;
+  guint last_overlap_count;
 };
 
 /* ----------------------------------------------------- shader helpers -- */
@@ -975,6 +977,19 @@ void bt_graph_gl_render_state(BtGraphGL *gl, const BtGraphRenderState *st)
     guint max_labels = bt_graph_label_cap_for_zoom(eff_zoom);
     guint lbl_n = bt_graph_place_labels(gl->lbl_cands, cand_n, gl->obs_scratch, obs_n,
                                         max_labels, 12u, gl->lbl_placed, BT_GL_LABEL_CAP);
+    gl->last_label_count = lbl_n;
+    guint ov_cnt = 0;
+    for (guint i = 0; i < lbl_n; i++) {
+      for (guint j = i + 1; j < lbl_n; j++) {
+        const BtGraphLabelCand *la_box = &gl->lbl_placed[i];
+        const BtGraphLabelCand *lb_box = &gl->lbl_placed[j];
+        if (la_box->x < lb_box->x + lb_box->w && la_box->x + la_box->w > lb_box->x &&
+            la_box->y < lb_box->y + lb_box->h && la_box->y + la_box->h > lb_box->y) {
+          ov_cnt++;
+        }
+      }
+    }
+    gl->last_overlap_count = ov_cnt;
 
     for (guint k = 0; k < lbl_n; k++) {
       /* Draw lower priority first so primary focused/selected pill renders on top. */
@@ -1301,4 +1316,19 @@ const gchar *bt_graph_gl_version(const BtGraphGL *gl)
 gdouble bt_graph_gl_init_ms(const BtGraphGL *gl)
 {
   return gl ? gl->init_ms : 0.0;
+}
+
+guint bt_graph_gl_last_label_count(const BtGraphGL *gl)
+{
+  return gl ? gl->last_label_count : 0u;
+}
+
+guint bt_graph_gl_last_overlap_count(const BtGraphGL *gl)
+{
+  return gl ? gl->last_overlap_count : 0u;
+}
+
+guint bt_graph_gl_visible_edge_count(const BtGraphGL *gl)
+{
+  return gl ? gl->edge_count : 0u;
 }

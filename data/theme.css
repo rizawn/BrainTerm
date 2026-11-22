@@ -821,6 +821,16 @@ toast {
   color: @bt_text_muted;
 }
 
+.bt-graph-debug {
+  font-family: "JetBrains Mono", "Cascadia Mono", "Consolas", monospace;
+  font-size: 11px;
+  color: @bt_text_muted;
+  background-color: alpha(@bt_surface_2, 0.90);
+  border: 1px solid @bt_border;
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+
 /* ---- Status bar ---------------------------------------------------------- */
 .bt-statusbar {
   min-height: 24px;

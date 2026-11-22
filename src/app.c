@@ -73,6 +73,7 @@ struct BtApp {
 
   gchar *cli_vault;
   gboolean smoke_test;
+  gboolean graph_debug;
 };
 
 /* ----------------------------------------------------- state.ini (§7.5) -- */
@@ -1748,6 +1749,14 @@ static void act_toggle_graph(GSimpleAction *a, GVariant *p, gpointer ud)
   set_graph_visible(app, !app->graph_visible, TRUE);
 }
 
+static void act_toggle_graph_debug(GSimpleAction *a, GVariant *p, gpointer ud)
+{
+  (void)a; (void)p;
+  BtApp *app = ud;
+  if (app->graphview != NULL)
+    bt_graphview_toggle_debug_overlay(app->graphview);
+}
+
 static void act_checkpoint(GSimpleAction *a, GVariant *p, gpointer ud)
 {
   (void)a; (void)p;
@@ -1876,6 +1885,7 @@ static const GActionEntry app_actions[] = {
   {"audit-index", act_audit_index, NULL, NULL, NULL, {0}},
   {"organize-now", act_organize_now, NULL, NULL, NULL, {0}},
   {"toggle-graph", act_toggle_graph, NULL, NULL, NULL, {0}},
+  {"toggle-graph-debug", act_toggle_graph_debug, NULL, NULL, NULL, {0}},
   {"preferences", act_preferences, NULL, NULL, NULL, {0}},
   {"about", act_about, NULL, NULL, NULL, {0}},
   {"quit", act_quit, NULL, NULL, NULL, {0}},
@@ -2091,6 +2101,8 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
     bt_graphview_set_show_ghosts(app->graphview, load_saved_graph_bool("show_ghosts", FALSE));
   }
   bt_graphview_set_prefs_cb(app->graphview, on_graph_prefs_changed, app);
+  if (app->graph_debug)
+    bt_graphview_set_debug_overlay(app->graphview, TRUE);
   app->tabs = bt_termtabs_new(BT_TERMTABS_MAX_DEFAULT, on_term_fullscreen, on_term_status,
                               on_session_ended, app);
   app->sessions_panel = bt_sessionspanel_new(on_session_resume, on_session_rollback, app);
@@ -2298,6 +2310,8 @@ static gint on_handle_local_options(GApplication *gapp, GVariantDict *opts, gpoi
   }
   if (g_variant_dict_contains(opts, "smoke-test"))
     app->smoke_test = TRUE;
+  if (g_variant_dict_contains(opts, "graph-debug"))
+    app->graph_debug = TRUE;
   return -1;
 }
 
@@ -2315,6 +2329,7 @@ static void on_startup(GApplication *gapp, gpointer ud)
   static const gchar *const rescan_accels[] = {"F5", NULL};
   static const gchar *const sidebar_accels[] = {"F9", NULL};
   static const gchar *const graph_accels[] = {"<Primary>g", NULL};
+  static const gchar *const graph_dbg_accels[] = {"<Primary><Shift>f", NULL};
   static const gchar *const term_accels[] = {"<Primary>grave", NULL};
   static const gchar *const quit_accels[] = {"<Primary>q", NULL};
   gtk_application_set_accels_for_action(GTK_APPLICATION(app->adw_app), "app.save-active", save_accels);
@@ -2326,6 +2341,7 @@ static void on_startup(GApplication *gapp, gpointer ud)
   gtk_application_set_accels_for_action(GTK_APPLICATION(app->adw_app), "app.rescan-vault", rescan_accels);
   gtk_application_set_accels_for_action(GTK_APPLICATION(app->adw_app), "app.toggle-sidebar", sidebar_accels);
   gtk_application_set_accels_for_action(GTK_APPLICATION(app->adw_app), "app.toggle-graph", graph_accels);
+  gtk_application_set_accels_for_action(GTK_APPLICATION(app->adw_app), "app.toggle-graph-debug", graph_dbg_accels);
   gtk_application_set_accels_for_action(GTK_APPLICATION(app->adw_app), "app.toggle-terminal", term_accels);
   gtk_application_set_accels_for_action(GTK_APPLICATION(app->adw_app), "app.quit", quit_accels);
 }
@@ -2341,6 +2357,7 @@ BtApp *bt_app_new(void)
   static const GOptionEntry opts[] = {
     {"vault", 'v', 0, G_OPTION_ARG_STRING, NULL, "Open vault directory", "DIR"},
     {"smoke-test", 0, 0, G_OPTION_ARG_NONE, NULL, "Open UI, verify startup, and exit", NULL},
+    {"graph-debug", 0, 0, G_OPTION_ARG_NONE, NULL, "Show Brain Graph frame-time debug overlay", NULL},
     {"version", 'V', 0, G_OPTION_ARG_NONE, NULL, "Print version and build stamp and exit", NULL},
     {NULL, 0, 0, 0, NULL, NULL, NULL},
   };
