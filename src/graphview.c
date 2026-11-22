@@ -11,6 +11,7 @@
 #include "graphview.h"
 #include "graph_state.h"
 #include "theme.h"
+#include "ui/graphgl.h"
 #include "ui/graphview_renderer.h"
 
 #include <math.h>
@@ -620,16 +621,20 @@ void bt_graph_draw_cairo(const BtGraph *g, cairo_t *cr, int width, int height, g
 /* ------------------------------------------- BtGraphView GTK4 widget -- */
 
 struct BtGraphView {
-  GtkWidget *root;    /* GtkStack: "canvas" | "empty" */
-  GtkWidget *overlay; /* GtkOverlay wrapping area + controls + legend */
-  GtkWidget *area;    /* GtkDrawingArea ("bt-graph-area") */
+  GtkWidget *root;         /* GtkStack: "canvas" | "empty" */
+  GtkWidget *overlay;      /* GtkOverlay wrapping canvas_stack + controls + legend */
+  GtkWidget *canvas_stack; /* GtkStack ("bt-graph-area"): "gl" | "cairo" */
+  GtkWidget *cairo_area;   /* GtkDrawingArea fallback */
+  BtGraphGL *gl;           /* GtkGLArea backend */
   GtkWidget *btn_quality;
   GtkWidget *btn_motion;
   GtkWindow *toplevel;
   gulong toplevel_active_sig;
 
   BtGraph *graph;
-  BtGraphRenderer *renderer;
+  BtGraphRenderer *cairo_renderer;
+  BtGraphBackend active_backend;
+  gchar *pending_notice;
   guint8 *nbr_mask;
   guint nbr_mask_cap;
   guint hub_thresh;
@@ -662,6 +667,24 @@ struct BtGraphView {
   gpointer notice_ud;
 };
 
+static void queue_canvas_draw(BtGraphView *gv)
+{
+  if (gv == NULL)
+    return;
+  if (gv->active_backend == BT_GRAPH_BACKEND_GL && gv->gl != NULL && bt_graph_gl_is_ready(gv->gl))
+    bt_graph_gl_queue_render(gv->gl);
+  else if (gv->cairo_area != NULL)
+    gtk_widget_queue_draw(gv->cairo_area);
+}
+
+static void emit_notice(BtGraphView *gv, const gchar *msg)
+{
+  g_free(gv->pending_notice);
+  gv->pending_notice = g_strdup(msg);
+  if (gv->on_notice != NULL && msg != NULL)
+    gv->on_notice(msg, gv->notice_ud);
+}
+
 static void ensure_nbr_mask(BtGraphView *gv, guint n)
 {
   if (n > gv->nbr_mask_cap) {
@@ -679,6 +702,7 @@ static void refresh_neighbor_mask(BtGraphView *gv)
   ensure_nbr_mask(gv, n);
   gint foc = (gv->hover_idx >= 0) ? gv->hover_idx : gv->focus_idx;
   bt_graph_compute_neighbors(gv->graph, foc, gv->nbr_mask, n);
+  bt_graph_gl_mark_state_dirty(gv->gl);
 }
 
 static void compute_fit_camera(BtGraphView *gv, int w, int h, gdouble *out_px, gdouble *out_py,
@@ -730,15 +754,18 @@ static gboolean graph_has_pending_birth(const BtGraph *g)
 
 static gboolean needs_ambient_tick(const BtGraphView *gv)
 {
-  return gv->graph != NULL && gv->graph->nodes->len > 0 && gv->graph->nodes->len <= 1500u &&
-         gv->quality == BT_GRAPH_QUALITY_HIGH && !gv->reduce_motion && gv->window_active;
+  if (gv->graph == NULL || gv->graph->nodes->len == 0)
+    return FALSE;
+  if (gv->quality != BT_GRAPH_QUALITY_HIGH || gv->reduce_motion || !gv->window_active)
+    return FALSE;
+  return gv->active_backend == BT_GRAPH_BACKEND_GL || gv->graph->nodes->len <= 1500u;
 }
 
 static gboolean on_tick(GtkWidget *widget, GdkFrameClock *clock, gpointer ud)
 {
   (void)clock;
   BtGraphView *gv = ud;
-  if (gv->area == NULL || !gtk_widget_get_mapped(widget)) {
+  if (gv->canvas_stack == NULL || !gtk_widget_get_mapped(widget)) {
     gv->tick_id = 0;
     gv->last_tick_us = 0;
     return G_SOURCE_REMOVE;
@@ -804,7 +831,7 @@ static gboolean on_tick(GtkWidget *widget, GdkFrameClock *clock, gpointer ud)
     active = TRUE;
   }
 
-  gtk_widget_queue_draw(gv->area);
+  queue_canvas_draw(gv);
   if (!active) {
     gv->tick_id = 0;
     gv->last_tick_us = 0;
@@ -815,27 +842,25 @@ static gboolean on_tick(GtkWidget *widget, GdkFrameClock *clock, gpointer ud)
 
 static void ensure_tick(BtGraphView *gv)
 {
-  if (gv->area == NULL || gv->tick_id != 0 || !gtk_widget_get_mapped(gv->area))
+  if (gv->canvas_stack == NULL || gv->tick_id != 0 || !gtk_widget_get_mapped(gv->canvas_stack))
     return;
   gv->last_tick_us = g_get_monotonic_time();
-  gv->tick_id = gtk_widget_add_tick_callback(gv->area, on_tick, gv, NULL);
+  gv->tick_id = gtk_widget_add_tick_callback(gv->canvas_stack, on_tick, gv, NULL);
 }
 
 static void stop_tick_if_idle(BtGraphView *gv)
 {
-  if (gv->tick_id == 0 || gv->area == NULL)
+  if (gv->tick_id == 0 || gv->canvas_stack == NULL)
     return;
   if (!needs_ambient_tick(gv) && !gv->animating_cam && !graph_has_pending_birth(gv->graph)) {
-    gtk_widget_remove_tick_callback(gv->area, gv->tick_id);
+    gtk_widget_remove_tick_callback(gv->canvas_stack, gv->tick_id);
     gv->tick_id = 0;
     gv->last_tick_us = 0;
   }
 }
 
-static void on_draw(GtkDrawingArea *area, cairo_t *cr, int w, int h, gpointer ud)
+static void fill_render_state(BtGraphView *gv, int w, int h, int scale, BtGraphRenderState *out)
 {
-  (void)area;
-  BtGraphView *gv = ud;
   if (gv->needs_fit && gv->graph != NULL && gv->graph->nodes->len > 0 && w > 20 && h > 20) {
     compute_fit_camera(gv, w, h, &gv->pan_x, &gv->pan_y, &gv->zoom);
     gv->target_pan_x = gv->pan_x;
@@ -846,34 +871,58 @@ static void on_draw(GtkDrawingArea *area, cairo_t *cr, int w, int h, gpointer ud
   }
 
   guint n = (gv->graph != NULL) ? gv->graph->nodes->len : 0u;
-  BtGraphRenderState st = {
-    .graph = gv->graph,
-    .width = w,
-    .height = h,
-    .scale = gtk_widget_get_scale_factor(gv->area),
-    .pan_x = gv->pan_x,
-    .pan_y = gv->pan_y,
-    .zoom = gv->zoom,
-    .hover_idx = gv->hover_idx,
-    .selected_idx = gv->selected_idx,
-    .focus_idx = gv->focus_idx,
-    .hover_fade = gv->hover_fade,
-    .nbr_mask = gv->nbr_mask,
-    .nbr_mask_len = MIN(n, gv->nbr_mask_cap),
-    .hub_thresh = gv->hub_thresh,
-    .time_sec = gv->time_sec,
-    .quality = gv->quality,
-    .mode = BT_GRAPH_MODE_2D,
-    .reduce_motion = gv->reduce_motion,
-  };
-  if (gv->renderer != NULL && gv->renderer->vt->render_cairo != NULL)
-    gv->renderer->vt->render_cairo(gv->renderer, cr, &st);
+  memset(out, 0, sizeof(*out));
+  out->graph = gv->graph;
+  out->width = w;
+  out->height = h;
+  out->scale = MAX(scale, 1);
+  out->pan_x = gv->pan_x;
+  out->pan_y = gv->pan_y;
+  out->zoom = gv->zoom;
+  out->hover_idx = gv->hover_idx;
+  out->selected_idx = gv->selected_idx;
+  out->focus_idx = gv->focus_idx;
+  out->hover_fade = gv->hover_fade;
+  out->nbr_mask = gv->nbr_mask;
+  out->nbr_mask_len = MIN(n, gv->nbr_mask_cap);
+  out->hub_thresh = gv->hub_thresh;
+  out->time_sec = gv->time_sec;
+  out->quality = gv->quality;
+  out->mode = BT_GRAPH_MODE_2D;
+  out->reduce_motion = gv->reduce_motion;
+}
+
+static void on_gl_fill_state(BtGraphRenderState *out, gpointer ud)
+{
+  BtGraphView *gv = ud;
+  fill_render_state(gv, out->width, out->height, out->scale, out);
+}
+
+static void on_gl_fallback(const gchar *reason, gpointer ud)
+{
+  BtGraphView *gv = ud;
+  gv->active_backend = BT_GRAPH_BACKEND_CAIRO;
+  if (gv->canvas_stack != NULL)
+    gtk_stack_set_visible_child_name(GTK_STACK(gv->canvas_stack), "cairo");
+  gchar *msg = g_strdup_printf("Graph: Cairo fallback (%s)", reason ? reason : "GL unavailable");
+  emit_notice(gv, msg);
+  g_free(msg);
+  queue_canvas_draw(gv);
+}
+
+static void on_cairo_draw(GtkDrawingArea *area, cairo_t *cr, int w, int h, gpointer ud)
+{
+  BtGraphView *gv = ud;
+  BtGraphRenderState st;
+  fill_render_state(gv, w, h, gtk_widget_get_scale_factor(GTK_WIDGET(area)), &st);
+  if (gv->cairo_renderer != NULL && gv->cairo_renderer->vt->render_cairo != NULL)
+    gv->cairo_renderer->vt->render_cairo(gv->cairo_renderer, cr, &st);
 }
 
 static void screen_to_world(BtGraphView *gv, gdouble sx, gdouble sy, gdouble *wx, gdouble *wy)
 {
-  int w = gtk_widget_get_width(gv->area);
-  int h = gtk_widget_get_height(gv->area);
+  int w = gtk_widget_get_width(gv->canvas_stack);
+  int h = gtk_widget_get_height(gv->canvas_stack);
   *wx = (sx - w * 0.5 - gv->pan_x) / gv->zoom;
   *wy = (sy - h * 0.5 - gv->pan_y) / gv->zoom;
 }
@@ -891,6 +940,7 @@ static void on_click_pressed(GtkGestureClick *g, gint n_press, gdouble x, gdoubl
   gint hit = bt_graph_pick(gv->graph, wx, wy, 14.0 / gv->zoom);
   if (hit >= 0) {
     gv->selected_idx = hit;
+    bt_graph_gl_mark_state_dirty(gv->gl);
     const BtGraphNode *nd = g_ptr_array_index(gv->graph->nodes, (guint)hit);
     if (n_press == 2) {
       gv->target_pan_x = -nd->x * gv->zoom;
@@ -902,7 +952,7 @@ static void on_click_pressed(GtkGestureClick *g, gint n_press, gdouble x, gdoubl
     }
     if (n_press == 1 && nd->relpath != NULL && !nd->broken && gv->on_open != NULL)
       gv->on_open(nd->relpath, nd->kind == BT_NODE_GHOST, gv->user_data);
-    gtk_widget_queue_draw(gv->area);
+    queue_canvas_draw(gv);
     return;
   }
   if (n_press != 1)
@@ -944,7 +994,7 @@ static void on_motion(GtkEventControllerMotion *c, gdouble x, gdouble y, gpointe
   if (gv->dragging) {
     gv->pan_x = gv->pan_start_x + (x - gv->drag_start_x);
     gv->pan_y = gv->pan_start_y + (y - gv->drag_start_y);
-    gtk_widget_queue_draw(gv->area);
+    queue_canvas_draw(gv);
     return;
   }
   if (gv->graph != NULL) {
@@ -956,7 +1006,7 @@ static void on_motion(GtkEventControllerMotion *c, gdouble x, gdouble y, gpointe
       refresh_neighbor_mask(gv);
       if (gv->reduce_motion) {
         gv->hover_fade = (hit >= 0) ? 1.0 : 0.0;
-        gtk_widget_queue_draw(gv->area);
+        queue_canvas_draw(gv);
       } else {
         ensure_tick(gv);
       }
@@ -973,7 +1023,7 @@ static void on_motion_leave(GtkEventControllerMotion *c, gpointer ud)
     refresh_neighbor_mask(gv);
     if (gv->reduce_motion) {
       gv->hover_fade = 0.0;
-      gtk_widget_queue_draw(gv->area);
+      queue_canvas_draw(gv);
     } else {
       ensure_tick(gv);
     }
@@ -986,7 +1036,7 @@ static gboolean on_scroll(GtkEventControllerScroll *c, gdouble dx, gdouble dy, g
   BtGraphView *gv = ud;
   gv->animating_cam = FALSE;
   gv->zoom = CLAMP(gv->zoom * (dy < 0 ? 1.12 : 0.89), 0.2, 4.0);
-  gtk_widget_queue_draw(gv->area);
+  queue_canvas_draw(gv);
   return TRUE;
 }
 
@@ -1016,9 +1066,10 @@ static void on_btn_fit(GtkButton *b, gpointer ud)
 {
   (void)b;
   BtGraphView *gv = ud;
-  if (gv->area == NULL)
+  if (gv->canvas_stack == NULL)
     return;
-  compute_fit_camera(gv, gtk_widget_get_width(gv->area), gtk_widget_get_height(gv->area),
+  compute_fit_camera(gv, gtk_widget_get_width(gv->canvas_stack),
+                     gtk_widget_get_height(gv->canvas_stack),
                      &gv->target_pan_x, &gv->target_pan_y, &gv->target_zoom);
   gv->animating_cam = TRUE;
   ensure_tick(gv);
@@ -1077,7 +1128,7 @@ static void on_toplevel_active_notify(GObject *obj, GParamSpec *pspec, gpointer 
     stop_tick_if_idle(gv);
 }
 
-static void on_area_map(GtkWidget *area, gpointer ud)
+static void on_canvas_map(GtkWidget *area, gpointer ud)
 {
   BtGraphView *gv = ud;
   GtkRoot *rt = gtk_widget_get_root(area);
@@ -1092,21 +1143,21 @@ static void on_area_map(GtkWidget *area, gpointer ud)
   }
   if (gv->graph != NULL && (graph_has_pending_birth(gv->graph) || needs_ambient_tick(gv)))
     ensure_tick(gv);
-  gtk_widget_queue_draw(area);
+  queue_canvas_draw(gv);
 }
 
-static void on_area_unmap(GtkWidget *area, gpointer ud)
+static void on_canvas_unmap(GtkWidget *area, gpointer ud)
 {
   (void)area;
   BtGraphView *gv = ud;
-  if (gv->tick_id != 0 && gv->area != NULL) {
-    gtk_widget_remove_tick_callback(gv->area, gv->tick_id);
+  if (gv->tick_id != 0 && gv->canvas_stack != NULL) {
+    gtk_widget_remove_tick_callback(gv->canvas_stack, gv->tick_id);
     gv->tick_id = 0;
     gv->last_tick_us = 0;
   }
 }
 
-static void on_area_destroy(GtkWidget *area, gpointer ud)
+static void on_canvas_destroy(GtkWidget *area, gpointer ud)
 {
   BtGraphView *gv = ud;
   if (gv->tick_id != 0) {
@@ -1118,7 +1169,8 @@ static void on_area_destroy(GtkWidget *area, gpointer ud)
     gv->toplevel_active_sig = 0;
     gv->toplevel = NULL;
   }
-  gv->area = NULL;
+  gv->canvas_stack = NULL;
+  gv->cairo_area = NULL;
   gv->overlay = NULL;
   gv->root = NULL;
   gv->btn_quality = NULL;
@@ -1151,7 +1203,7 @@ BtGraphView *bt_graphview_new(BtGraphOpenNoteFn on_open, BtGraphOpenTermFn on_op
   gv->on_open = on_open;
   gv->on_open_term = on_open_term;
   gv->user_data = user_data;
-  gv->renderer = bt_graph_cairo_renderer_new();
+  gv->cairo_renderer = bt_graph_cairo_renderer_new();
 
   GtkSettings *settings = gtk_settings_get_default();
   if (settings != NULL) {
@@ -1160,40 +1212,62 @@ BtGraphView *bt_graphview_new(BtGraphOpenNoteFn on_open, BtGraphOpenTermFn on_op
     gv->reduce_motion = !anim;
   }
 
-  gv->area = gtk_drawing_area_new();
-  gtk_widget_set_name(gv->area, "bt-graph-area");
-  gtk_widget_set_hexpand(gv->area, TRUE);
-  gtk_widget_set_vexpand(gv->area, TRUE);
-  gtk_widget_set_size_request(gv->area, 200, 160);
-  gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(gv->area), on_draw, gv, NULL);
-  g_signal_connect(gv->area, "map", G_CALLBACK(on_area_map), gv);
-  g_signal_connect(gv->area, "unmap", G_CALLBACK(on_area_unmap), gv);
-  g_signal_connect(gv->area, "destroy", G_CALLBACK(on_area_destroy), gv);
+  const gchar *env_be = g_getenv("BRAINTERM_GRAPH_BACKEND");
+  gboolean force_cairo = (env_be != NULL && g_ascii_strcasecmp(env_be, "cairo") == 0);
+
+  gv->cairo_area = gtk_drawing_area_new();
+  gtk_widget_set_name(gv->cairo_area, "bt-graph-cairo");
+  gtk_widget_set_hexpand(gv->cairo_area, TRUE);
+  gtk_widget_set_vexpand(gv->cairo_area, TRUE);
+  gtk_widget_set_size_request(gv->cairo_area, 200, 160);
+  gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(gv->cairo_area), on_cairo_draw, gv, NULL);
+
+  gv->canvas_stack = gtk_stack_new();
+  gtk_widget_set_name(gv->canvas_stack, "bt-graph-area");
+  gtk_widget_set_hexpand(gv->canvas_stack, TRUE);
+  gtk_widget_set_vexpand(gv->canvas_stack, TRUE);
+  gtk_widget_set_size_request(gv->canvas_stack, 200, 160);
+  gtk_stack_add_named(GTK_STACK(gv->canvas_stack), gv->cairo_area, "cairo");
+
+  if (!force_cairo) {
+    gv->gl = bt_graph_gl_new(on_gl_fill_state, on_gl_fallback, gv);
+    gtk_stack_add_named(GTK_STACK(gv->canvas_stack), bt_graph_gl_widget(gv->gl), "gl");
+    gtk_stack_set_visible_child_name(GTK_STACK(gv->canvas_stack), "gl");
+    gv->active_backend = BT_GRAPH_BACKEND_GL;
+  } else {
+    gtk_stack_set_visible_child_name(GTK_STACK(gv->canvas_stack), "cairo");
+    gv->active_backend = BT_GRAPH_BACKEND_CAIRO;
+    emit_notice(gv, "Graph: Cairo fallback (forced via BRAINTERM_GRAPH_BACKEND=cairo)");
+  }
+
+  g_signal_connect(gv->canvas_stack, "map", G_CALLBACK(on_canvas_map), gv);
+  g_signal_connect(gv->canvas_stack, "unmap", G_CALLBACK(on_canvas_unmap), gv);
+  g_signal_connect(gv->canvas_stack, "destroy", G_CALLBACK(on_canvas_destroy), gv);
 
   GtkGesture *lclick = gtk_gesture_click_new();
   gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(lclick), GDK_BUTTON_PRIMARY);
   g_signal_connect(lclick, "pressed", G_CALLBACK(on_click_pressed), gv);
   g_signal_connect(lclick, "released", G_CALLBACK(on_click_released), gv);
-  gtk_widget_add_controller(gv->area, GTK_EVENT_CONTROLLER(lclick));
+  gtk_widget_add_controller(gv->canvas_stack, GTK_EVENT_CONTROLLER(lclick));
 
   GtkGesture *rclick = gtk_gesture_click_new();
   gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(rclick), GDK_BUTTON_SECONDARY);
   g_signal_connect(rclick, "pressed", G_CALLBACK(on_right_click), gv);
-  gtk_widget_add_controller(gv->area, GTK_EVENT_CONTROLLER(rclick));
+  gtk_widget_add_controller(gv->canvas_stack, GTK_EVENT_CONTROLLER(rclick));
 
   GtkEventController *mot = gtk_event_controller_motion_new();
   g_signal_connect(mot, "motion", G_CALLBACK(on_motion), gv);
   g_signal_connect(mot, "leave", G_CALLBACK(on_motion_leave), gv);
-  gtk_widget_add_controller(gv->area, mot);
+  gtk_widget_add_controller(gv->canvas_stack, mot);
 
   GtkEventController *scr = gtk_event_controller_scroll_new(GTK_EVENT_CONTROLLER_SCROLL_VERTICAL);
   g_signal_connect(scr, "scroll", G_CALLBACK(on_scroll), gv);
-  gtk_widget_add_controller(gv->area, scr);
+  gtk_widget_add_controller(gv->canvas_stack, scr);
 
   gv->overlay = gtk_overlay_new();
   gtk_widget_set_hexpand(gv->overlay, TRUE);
   gtk_widget_set_vexpand(gv->overlay, TRUE);
-  gtk_overlay_set_child(GTK_OVERLAY(gv->overlay), gv->area);
+  gtk_overlay_set_child(GTK_OVERLAY(gv->overlay), gv->canvas_stack);
 
   /* Top-left graph toolbar: Quality (High/Low) & Reduce Motion toggles. */
   GtkWidget *mode_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
@@ -1281,16 +1355,18 @@ void bt_graphview_free(BtGraphView *gv)
 {
   if (gv == NULL)
     return;
-  if (gv->tick_id != 0 && gv->area != NULL) {
-    gtk_widget_remove_tick_callback(gv->area, gv->tick_id);
+  if (gv->tick_id != 0 && gv->canvas_stack != NULL) {
+    gtk_widget_remove_tick_callback(gv->canvas_stack, gv->tick_id);
     gv->tick_id = 0;
   }
   if (gv->toplevel != NULL && gv->toplevel_active_sig != 0) {
     g_signal_handler_disconnect(gv->toplevel, gv->toplevel_active_sig);
     gv->toplevel_active_sig = 0;
   }
-  if (gv->renderer != NULL && gv->renderer->vt->destroy != NULL)
-    gv->renderer->vt->destroy(gv->renderer);
+  if (gv->cairo_renderer != NULL && gv->cairo_renderer->vt->destroy != NULL)
+    gv->cairo_renderer->vt->destroy(gv->cairo_renderer);
+  bt_graph_gl_free(gv->gl);
+  g_free(gv->pending_notice);
   g_free(gv->nbr_mask);
   bt_graph_free(gv->graph);
   g_free(gv);
@@ -1312,6 +1388,7 @@ void bt_graphview_set_graph(BtGraphView *gv, BtGraph *graph, gboolean animate_gr
   gv->hover_fade = 0.0;
   gv->needs_fit = TRUE;
   gv->hub_thresh = bt_graph_hub_degree_threshold(graph);
+  bt_graph_gl_set_graph(gv->gl, graph);
 
   gboolean has_nodes = (gv->graph != NULL && gv->graph->nodes->len > 0);
   if (has_nodes) {
@@ -1332,8 +1409,7 @@ void bt_graphview_set_graph(BtGraphView *gv, BtGraph *graph, gboolean animate_gr
   } else {
     stop_tick_if_idle(gv);
   }
-  if (gv->area != NULL)
-    gtk_widget_queue_draw(gv->area);
+  queue_canvas_draw(gv);
 }
 
 void bt_graphview_set_dark(BtGraphView *gv, gboolean dark)
@@ -1341,8 +1417,7 @@ void bt_graphview_set_dark(BtGraphView *gv, gboolean dark)
   if (gv == NULL)
     return;
   gv->dark_mode = dark;
-  if (gv->area != NULL)
-    gtk_widget_queue_draw(gv->area);
+  queue_canvas_draw(gv);
 }
 
 void bt_graphview_set_quality(BtGraphView *gv, BtGraphQuality quality)
@@ -1355,8 +1430,7 @@ void bt_graphview_set_quality(BtGraphView *gv, BtGraphQuality quality)
     ensure_tick(gv);
   else
     stop_tick_if_idle(gv);
-  if (gv->area != NULL)
-    gtk_widget_queue_draw(gv->area);
+  queue_canvas_draw(gv);
 }
 
 BtGraphQuality bt_graphview_get_quality(const BtGraphView *gv)
@@ -1374,8 +1448,7 @@ void bt_graphview_set_reduce_motion(BtGraphView *gv, gboolean reduce_motion)
     stop_tick_if_idle(gv);
   else if (needs_ambient_tick(gv))
     ensure_tick(gv);
-  if (gv->area != NULL)
-    gtk_widget_queue_draw(gv->area);
+  queue_canvas_draw(gv);
 }
 
 gboolean bt_graphview_get_reduce_motion(const BtGraphView *gv)
@@ -1389,6 +1462,8 @@ void bt_graphview_set_notice_cb(BtGraphView *gv, BtGraphNoticeFn on_notice, gpoi
     return;
   gv->on_notice = on_notice;
   gv->notice_ud = user_data;
+  if (gv->on_notice != NULL && gv->pending_notice != NULL)
+    gv->on_notice(gv->pending_notice, gv->notice_ud);
 }
 
 gboolean bt_graphview_has_graph(const BtGraphView *gv)

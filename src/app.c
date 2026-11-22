@@ -46,6 +46,7 @@ struct BtApp {
   GtkWidget *status_notes_lbl;
   GtkWidget *status_git_box;
   GtkWidget *status_git_lbl;
+  GtkWidget *status_graph_notice;
   BtThemeLoader *themeloader;
 
   BtVault *vault;
@@ -402,6 +403,19 @@ gboolean bt_app_open_vault(BtApp *app, const gchar *path, GError **error)
   show_toast(app, msg, 2);
   g_free(msg);
   return TRUE;
+}
+
+static void on_graph_notice(const gchar *msg, gpointer ud)
+{
+  BtApp *app = ud;
+  if (app == NULL || app->status_graph_notice == NULL)
+    return;
+  if (msg != NULL && msg[0] != '\0') {
+    gtk_label_set_text(GTK_LABEL(app->status_graph_notice), msg);
+    gtk_widget_set_visible(app->status_graph_notice, TRUE);
+  } else {
+    gtk_widget_set_visible(app->status_graph_notice, FALSE);
+  }
 }
 
 static void ensure_view_stack_visible(BtApp *app)
@@ -1537,6 +1551,9 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
   gtk_widget_add_css_class(app->status_vault_lbl, "bt-status-strong");
   GtkWidget *s_sep = gtk_label_new("·");
   app->status_notes_lbl = gtk_label_new("0 notes");
+  app->status_graph_notice = gtk_label_new("");
+  gtk_widget_set_name(app->status_graph_notice, "bt-status-graph-notice");
+  gtk_widget_set_visible(app->status_graph_notice, FALSE);
   GtkWidget *spacer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
   gtk_widget_set_hexpand(spacer, TRUE);
 
@@ -1555,10 +1572,12 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
   gtk_box_append(GTK_BOX(sbar), app->status_vault_lbl);
   gtk_box_append(GTK_BOX(sbar), s_sep);
   gtk_box_append(GTK_BOX(sbar), app->status_notes_lbl);
+  gtk_box_append(GTK_BOX(sbar), app->status_graph_notice);
   gtk_box_append(GTK_BOX(sbar), spacer);
   gtk_box_append(GTK_BOX(sbar), app->status_git_box);
   gtk_box_append(GTK_BOX(sbar), s_sep2);
   gtk_box_append(GTK_BOX(sbar), sb_build);
+  bt_graphview_set_notice_cb(app->graphview, on_graph_notice, app);
 
   GtkWidget *tview = adw_toolbar_view_new();
   adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(tview), header);

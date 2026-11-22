@@ -184,11 +184,19 @@ test('graph_v2', t_graph_v2, suite: 'unit')
 
 bench_graph = executable(
   'bench_graph',
-  ['bench/bench_graph.c', '../src/graphview.c'],
+  ['bench/bench_graph.c', '../src/graphview.c', '../src/ui/graphgl.c', bt_resources],
   include_directories: [test_inc, include_directories('../src')],
-  dependencies: [bt_core_dep, gtk4_dep],
+  dependencies: [bt_core_dep, gtk4_dep, epoxy_dep],
 )
 test('bench_graph_1k', bench_graph, suite: 'bench', is_parallel: false, timeout: 30)
+
+bench_graph_gl = executable(
+  'bench_graph_gl',
+  ['bench/bench_graph_gl.c', '../src/ui/graphgl.c', bt_resources],
+  include_directories: [test_inc, include_directories('../src')],
+  dependencies: [bt_core_dep, gtk4_dep, epoxy_dep],
+)
+test('bench_graph_gl', bench_graph_gl, suite: 'bench', is_parallel: false, timeout: 45)
 
 t_importers = executable(
   'test_importers',
@@ -223,9 +231,9 @@ test(
 
 t_theme = executable(
   'test_theme',
-  ['unit/test_theme.c', '../src/graphview.c'],
+  ['unit/test_theme.c', '../src/graphview.c', '../src/ui/graphgl.c', bt_resources],
   include_directories: [test_inc, include_directories('../src')],
-  dependencies: [bt_core_dep, gtk4_dep, cmocka_dep],
+  dependencies: [bt_core_dep, gtk4_dep, epoxy_dep, cmocka_dep],
 )
 test(
   'theme',
@@ -242,6 +250,7 @@ t_fix_ui = executable(
     '../src/app.c',
     '../src/terminal.c',
     '../src/graphview.c',
+    '../src/ui/graphgl.c',
     '../src/ui/filetree.c',
     '../src/ui/editorpane.c',
     '../src/ui/quickopen.c',
@@ -253,7 +262,7 @@ t_fix_ui = executable(
     bt_build_stamp_h,
   ],
   include_directories: [test_inc, include_directories('../src')],
-  dependencies: [bt_core_dep, gtk4_dep, adw_dep, gtksource_dep, cmocka_dep, m_dep],
+  dependencies: [bt_core_dep, gtk4_dep, adw_dep, epoxy_dep, gtksource_dep, cmocka_dep, m_dep],
 )
 test(
   'fix_ui',
