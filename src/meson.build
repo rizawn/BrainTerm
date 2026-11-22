@@ -15,6 +15,7 @@ core_sources = files(
   'watcher.c',
   'organizer.c',
   'graph.c',
+  'graph_state.c',
   'importer.c',
   'embed.c',
   'theme.c',

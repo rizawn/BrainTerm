@@ -29,6 +29,14 @@ typedef enum {
 #define BT_COL_WARNING        0xFBBF24u
 #define BT_COL_DANGER         0xF87171u
 
+/* Brain Graph v2 role tokens (mirrored in data/theme.css). */
+#define BT_COL_GRAPH_BG          0x0B0C10u
+#define BT_COL_GRAPH_VIGNETTE    0x06070Au
+#define BT_COL_GRAPH_NODE_GLOW   0x9E91FAu
+#define BT_COL_GRAPH_EDGE_DIM    0x6E778Au
+#define BT_COL_GRAPH_EDGE_ACTIVE 0xA79BFAu
+#define BT_COL_GRAPH_DUST        0x7A8296u
+
 /* Alpha tokens. */
 #define BT_ALPHA_ACCENT_SOFT  0.14
 #define BT_ALPHA_ACCENT_SEL   0.30
@@ -50,6 +58,7 @@ typedef enum {
 
 /* Split a 0x00RRGGBB token into 0..1 channels. */
 void bt_theme_unpack(guint32 rgb, gdouble *r, gdouble *g, gdouble *b);
+void bt_theme_unpack_f(guint32 rgb, float *r, float *g, float *b);
 
 /* WCAG 2.x relative luminance and contrast ratio (1..21). */
 gdouble bt_theme_luminance(guint32 rgb);

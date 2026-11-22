@@ -14,6 +14,16 @@ void bt_theme_unpack(guint32 rgb, gdouble *r, gdouble *g, gdouble *b)
     *b = (gdouble)(rgb & 0xFFu) / 255.0;
 }
 
+void bt_theme_unpack_f(guint32 rgb, float *r, float *g, float *b)
+{
+  if (r != NULL)
+    *r = (float)((rgb >> 16) & 0xFFu) / 255.0f;
+  if (g != NULL)
+    *g = (float)((rgb >> 8) & 0xFFu) / 255.0f;
+  if (b != NULL)
+    *b = (float)(rgb & 0xFFu) / 255.0f;
+}
+
 static gdouble lin(gdouble c)
 {
   return c <= 0.03928 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4);

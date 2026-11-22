@@ -74,6 +74,12 @@ static void test_token_parity(void **state)
   assert_int_equal(css_token(css, "bt_success"), BT_COL_SUCCESS);
   assert_int_equal(css_token(css, "bt_warning"), BT_COL_WARNING);
   assert_int_equal(css_token(css, "bt_danger"), BT_COL_DANGER);
+  assert_int_equal(css_token(css, "bt_graph_bg"), BT_COL_GRAPH_BG);
+  assert_int_equal(css_token(css, "bt_graph_vignette"), BT_COL_GRAPH_VIGNETTE);
+  assert_int_equal(css_token(css, "bt_graph_node_glow"), BT_COL_GRAPH_NODE_GLOW);
+  assert_int_equal(css_token(css, "bt_graph_edge_dim"), BT_COL_GRAPH_EDGE_DIM);
+  assert_int_equal(css_token(css, "bt_graph_edge_active"), BT_COL_GRAPH_EDGE_ACTIVE);
+  assert_int_equal(css_token(css, "bt_graph_dust"), BT_COL_GRAPH_DUST);
   assert_non_null(strstr(css, "alpha(#8B7CF6, 0.14)")); /* accent-soft = 14% */
   g_free(css);
 }

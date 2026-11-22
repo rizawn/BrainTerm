@@ -21,6 +21,12 @@
 @define-color bt_success        #4ADE80;
 @define-color bt_warning        #FBBF24;
 @define-color bt_danger         #F87171;
+@define-color bt_graph_bg          #0B0C10;
+@define-color bt_graph_vignette    #06070A;
+@define-color bt_graph_node_glow   #9E91FA;
+@define-color bt_graph_edge_dim    #6E778A;
+@define-color bt_graph_edge_active #A79BFA;
+@define-color bt_graph_dust        #7A8296;
 
 /* ---- Re-point libadwaita named colors at our tokens ---------------------- */
 @define-color accent_color            @bt_accent;

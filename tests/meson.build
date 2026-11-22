@@ -174,6 +174,14 @@ t_graph = executable(
 )
 test('graph', t_graph, suite: 'unit')
 
+t_graph_v2 = executable(
+  'test_graph_v2',
+  'unit/test_graph_v2.c',
+  include_directories: test_inc,
+  dependencies: [bt_core_dep, cmocka_dep],
+)
+test('graph_v2', t_graph_v2, suite: 'unit')
+
 bench_graph = executable(
   'bench_graph',
   ['bench/bench_graph.c', '../src/graphview.c'],
