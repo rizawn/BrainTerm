@@ -124,10 +124,102 @@ static void test_l2_1_incremental_500_seeded_edits(void **state)
   bt_editorpane_free(pane);
 }
 
+typedef struct {
+  guint calls;
+  gchar *last_target;
+} ClickSpy;
+
+static void on_spy_link(const gchar *target, gpointer ud)
+{
+  ClickSpy *s = ud;
+  s->calls++;
+  g_free(s->last_target);
+  s->last_target = g_strdup(target);
+}
+
+static void test_l2_2_click_and_gesture_rules(void **state)
+{
+  (void)state;
+  if (!gtk_init_check()) {
+    skip();
+    return;
+  }
+
+  ClickSpy spy = {0};
+  BtEditorPane *pane = bt_editorpane_new(NULL, on_spy_link, NULL, &spy);
+  const char *doc = "Intro text here. Click [[target-note]] or placeholder [[{{tpl}}]] end.\n";
+  bt_editorpane_load(pane, "note.md", doc, strlen(doc));
+
+  const GArray *spans = bt_editorpane_link_spans(pane);
+  assert_int_equal(spans->len, 2);
+  const BtLinkSpan *sp_ok = &g_array_index(spans, BtLinkSpan, 0);
+  const BtLinkSpan *sp_tpl = &g_array_index(spans, BtLinkSpan, 1);
+  gsize hit_off = sp_ok->target_start + 2;
+
+  /* Caret starts at 0 (outside link). Single plain click opens and preserves caret at 0. */
+  assert_true(bt_editorpane_simulate_click(pane, hit_off, GDK_BUTTON_PRIMARY, 1, 0.0, 0.0, 0));
+  assert_int_equal(spy.calls, 1);
+  assert_string_equal(spy.last_target, "target-note");
+  assert_int_equal(bt_editorpane_caret_byte_offset(pane), 0);
+
+  /* Placeholder link never opens on click. */
+  assert_false(bt_editorpane_simulate_click(pane, sp_tpl->target_start + 1, GDK_BUTTON_PRIMARY, 1, 0.0, 0.0, 0));
+  assert_int_equal(spy.calls, 1);
+
+  /* Drag beyond threshold does not open. */
+  bt_editorpane_set_caret_byte_offset(pane, 0);
+  assert_false(bt_editorpane_simulate_click(pane, hit_off, GDK_BUTTON_PRIMARY, 1, 40.0, 0.0, 0));
+  assert_int_equal(spy.calls, 1);
+
+  /* Double-click and triple-click never open. */
+  bt_editorpane_set_caret_byte_offset(pane, 0);
+  assert_false(bt_editorpane_simulate_click(pane, hit_off, GDK_BUTTON_PRIMARY, 2, 0.0, 0.0, 0));
+  bt_editorpane_set_caret_byte_offset(pane, 0);
+  assert_false(bt_editorpane_simulate_click(pane, hit_off, GDK_BUTTON_PRIMARY, 3, 0.0, 0.0, 0));
+  assert_int_equal(spy.calls, 1);
+
+  /* Active selection blocks click. */
+  GtkTextView *tv = GTK_TEXT_VIEW(bt_editorpane_view_widget(pane));
+  GtkTextBuffer *buf = gtk_text_view_get_buffer(tv);
+  GtkTextIter s0, s1;
+  gtk_text_buffer_get_iter_at_offset(buf, &s0, 0);
+  gtk_text_buffer_get_iter_at_offset(buf, &s1, 5);
+  gtk_text_buffer_select_range(buf, &s0, &s1);
+  assert_false(bt_editorpane_simulate_click(pane, hit_off, GDK_BUTTON_PRIMARY, 1, 0.0, 0.0, 0));
+  gtk_text_buffer_place_cursor(buf, &s0);
+  assert_int_equal(spy.calls, 1);
+
+  /* Alt+Click places caret inside link without opening. */
+  assert_false(bt_editorpane_simulate_click(pane, hit_off, GDK_BUTTON_PRIMARY, 1, 0.0, 0.0, GDK_ALT_MASK));
+  assert_int_equal(spy.calls, 1);
+  assert_int_equal(bt_editorpane_caret_byte_offset(pane), hit_off);
+
+  /* Caret-inside rule: clicking inside link when caret is already inside does not open. */
+  assert_false(bt_editorpane_simulate_click(pane, hit_off + 2, GDK_BUTTON_PRIMARY, 1, 0.0, 0.0, 0));
+  assert_int_equal(spy.calls, 1);
+
+  /* Mode ctrl_click: plain click outside fails, Ctrl+Click opens, Middle-click opens. */
+  bt_editorpane_set_caret_byte_offset(pane, 0);
+  bt_editorpane_set_links_open_on_click(pane, FALSE);
+  assert_false(bt_editorpane_simulate_click(pane, hit_off, GDK_BUTTON_PRIMARY, 1, 0.0, 0.0, 0));
+  assert_int_equal(spy.calls, 1);
+  bt_editorpane_set_caret_byte_offset(pane, 0);
+  assert_true(bt_editorpane_simulate_click(pane, hit_off, GDK_BUTTON_PRIMARY, 1, 0.0, 0.0, GDK_CONTROL_MASK));
+  assert_int_equal(spy.calls, 2);
+  assert_int_equal(bt_editorpane_caret_byte_offset(pane), 0);
+  assert_true(bt_editorpane_simulate_click(pane, hit_off, GDK_BUTTON_MIDDLE, 1, 0.0, 0.0, 0));
+  assert_int_equal(spy.calls, 3);
+
+  printf("BT_TEST_L2_2 click_rules_passed=1 spy_calls=%u\n", spy.calls);
+  g_free(spy.last_target);
+  bt_editorpane_free(pane);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
     cmocka_unit_test(test_l2_1_incremental_500_seeded_edits),
+    cmocka_unit_test(test_l2_2_click_and_gesture_rules),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

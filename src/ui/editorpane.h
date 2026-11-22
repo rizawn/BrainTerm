@@ -25,6 +25,8 @@ void bt_editorpane_show_conflict(BtEditorPane *pane, gboolean deleted);
 void bt_editorpane_hide_conflict(BtEditorPane *pane);
 void bt_editorpane_set_dark(BtEditorPane *pane, gboolean dark);
 void bt_editorpane_set_line_numbers(BtEditorPane *pane, gboolean show);
+void bt_editorpane_set_links_open_on_click(BtEditorPane *pane, gboolean open_on_click);
+gboolean bt_editorpane_get_links_open_on_click(const BtEditorPane *pane);
 gchar *bt_editorpane_buffer_hash(const BtEditorPane *pane);
 void bt_editorpane_free(BtEditorPane *pane);
 
@@ -48,6 +50,11 @@ void bt_editorpane_mark_saved(BtEditorPane *pane);
 /* Inspection & incremental link model helpers (L2 / Group H). */
 const GArray *bt_editorpane_link_spans(const BtEditorPane *pane);
 gboolean bt_editorpane_link_at_offset(const BtEditorPane *pane, gsize byte_offset, BtLinkSpan *out_span);
+gsize bt_editorpane_caret_byte_offset(const BtEditorPane *pane);
+void bt_editorpane_set_caret_byte_offset(BtEditorPane *pane, gsize byte_offset);
+gboolean bt_editorpane_simulate_click(BtEditorPane *pane, gsize target_byte_offset, guint button,
+                                      gint n_press, gdouble drag_dx, gdouble drag_dy,
+                                      GdkModifierType mods);
 gboolean bt_editorpane_range_has_emphasis_tag(const BtEditorPane *pane, gsize byte_start, gsize byte_end);
 gboolean bt_editorpane_offset_has_tag_name(const BtEditorPane *pane, gsize byte_offset, const gchar *tag_name);
 const gchar *bt_editorpane_language_id(const BtEditorPane *pane);

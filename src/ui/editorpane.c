@@ -64,6 +64,20 @@ struct BtEditorPane {
   gsize pending_del_bytes;
   gint pending_del_nl;
   gboolean pending_del_structural;
+
+  /* Click gesture & ADR-016 state (L2-2). */
+  gboolean links_open_on_click;
+  gboolean press_active;
+  guint press_button;
+  gint press_n_press;
+  gdouble press_x;
+  gdouble press_y;
+  GdkModifierType press_mods;
+  gboolean press_had_sel;
+  gsize press_caret_byte;
+  gboolean press_has_span;
+  gsize press_span_start;
+  gsize press_span_end;
 };
 
 /* ----------------------------------------------------- autosave & dirty -- */
@@ -905,41 +919,187 @@ static void on_decor_draw(GtkDrawingArea *area, cairo_t *cr, int w, int h, gpoin
 
 /* ----------------------------------------------------- wiki-link click -- */
 
-static void on_editor_click(GtkGestureClick *gesture, gint n_press, gdouble x, gdouble y,
-                            gpointer ud)
+static gboolean raw_target_is_placeholder(const char *raw_target)
 {
-  BtEditorPane *pane = ud;
-  if (n_press != 1 || pane->on_link == NULL || pane->relpath == NULL)
-    return;
-  GdkEventSequence *seq = gtk_gesture_single_get_current_sequence(GTK_GESTURE_SINGLE(gesture));
-  GdkEvent *ev = gtk_gesture_get_last_event(GTK_GESTURE(gesture), seq);
-  if (ev == NULL)
-    return;
-  GdkModifierType state = gdk_event_get_modifier_state(ev);
-  if ((state & GDK_CONTROL_MASK) == 0)
-    return;
+  if (raw_target == NULL)
+    return FALSE;
+  const char *open = strstr(raw_target, "{{");
+  if (open == NULL)
+    return FALSE;
+  const char *p = open + 2;
+  while (*p != '\0' && *p != '}' && *p != '\r' && *p != '\n')
+    p++;
+  return p[0] == '}' && p[1] == '}';
+}
 
+static gsize caret_byte_in_buffer(const BtEditorPane *pane)
+{
+  if (pane == NULL || pane->buffer == NULL)
+    return 0;
+  GtkTextBuffer *buf = GTK_TEXT_BUFFER(pane->buffer);
+  GtkTextIter it;
+  gtk_text_buffer_get_iter_at_mark(buf, &it, gtk_text_buffer_get_insert(buf));
+  return iter_byte_in_buffer(buf, &it);
+}
+
+static void place_caret_byte_in_buffer(BtEditorPane *pane, gsize byte_off)
+{
+  if (pane == NULL || pane->buffer == NULL)
+    return;
+  GtkTextBuffer *buf = GTK_TEXT_BUFFER(pane->buffer);
+  GtkTextIter s, e, target;
+  gtk_text_buffer_get_bounds(buf, &s, &e);
+  g_autofree gchar *txt = gtk_text_buffer_get_text(buf, &s, &e, TRUE);
+  gsize total = strlen(txt);
+  if (byte_off > total)
+    byte_off = total;
+  gint char_off = (gint)g_utf8_strlen(txt, (gssize)byte_off);
+  gtk_text_buffer_get_iter_at_offset(buf, &target, char_off);
+  gtk_text_buffer_place_cursor(buf, &target);
+}
+
+static gboolean hit_test_link_at_coords(const BtEditorPane *pane, gdouble x, gdouble y,
+                                        BtLinkSpan *out_span)
+{
+  if (pane == NULL || pane->view == NULL || pane->link_spans == NULL)
+    return FALSE;
   gint bx = 0, by = 0;
   gtk_text_view_window_to_buffer_coords(GTK_TEXT_VIEW(pane->view), GTK_TEXT_WINDOW_WIDGET,
                                         (gint)x, (gint)y, &bx, &by);
   GtkTextIter iter;
-  if (!gtk_text_view_get_iter_at_location(GTK_TEXT_VIEW(pane->view), &iter, bx, by))
+  gint trailing = 0;
+  if (!gtk_text_view_get_iter_at_position(GTK_TEXT_VIEW(pane->view), &iter, &trailing, bx, by))
+    return FALSE;
+  if (gtk_text_iter_ends_line(&iter))
+    return FALSE;
+
+  GdkRectangle ch_rect;
+  gtk_text_view_get_iter_location(GTK_TEXT_VIEW(pane->view), &iter, &ch_rect);
+  if (by < ch_rect.y || by > ch_rect.y + ch_rect.height)
+    return FALSE;
+  if (bx < ch_rect.x - 1 || bx > ch_rect.x + MAX(ch_rect.width, 4) + 2)
+    return FALSE;
+
+  gsize byte_off = iter_byte_in_buffer(GTK_TEXT_BUFFER(pane->buffer), &iter);
+  BtLinkSpan hit;
+  if (!bt_editorpane_link_at_offset(pane, byte_off, &hit))
+    return FALSE;
+  if (raw_target_is_placeholder(hit.raw_target))
+    return FALSE;
+  if (out_span != NULL)
+    *out_span = hit;
+  return TRUE;
+}
+
+static gboolean evaluate_and_fire_link_click(BtEditorPane *pane, guint button, gint n_press,
+                                             gdouble press_x, gdouble press_y,
+                                             gdouble rel_x, gdouble rel_y,
+                                             gboolean press_had_sel, GdkModifierType mods,
+                                             gsize pre_caret_byte, const BtLinkSpan *span)
+{
+  if (pane == NULL || pane->relpath == NULL || span == NULL)
+    return FALSE;
+  if (button != GDK_BUTTON_PRIMARY && button != GDK_BUTTON_MIDDLE)
+    return FALSE;
+  if (n_press != 1)
+    return FALSE;
+  if (pane->view != NULL &&
+      gtk_drag_check_threshold(GTK_WIDGET(pane->view), (gint)press_x, (gint)press_y,
+                               (gint)rel_x, (gint)rel_y)) {
+    return FALSE;
+  }
+  GtkTextBuffer *buf = GTK_TEXT_BUFFER(pane->buffer);
+  if (press_had_sel || gtk_text_buffer_get_has_selection(buf))
+    return FALSE;
+  if ((mods & GDK_ALT_MASK) != 0)
+    return FALSE;
+  if (raw_target_is_placeholder(span->raw_target))
+    return FALSE;
+
+  /* Caret-inside rule (ADR-016): do not open if caret was already inside this span. */
+  if (pre_caret_byte > span->start && pre_caret_byte < span->end)
+    return FALSE;
+
+  /* Setting links_open_on_click: Ctrl+Click opens in both modes; plain click only when enabled. */
+  if (button == GDK_BUTTON_PRIMARY && !pane->links_open_on_click &&
+      (mods & GDK_CONTROL_MASK) == 0) {
+    return FALSE;
+  }
+
+  /* Consume click without moving the caret in the source note (ADR-016). */
+  place_caret_byte_in_buffer(pane, pre_caret_byte);
+  if (pane->on_link != NULL && span->raw_target != NULL)
+    pane->on_link(span->raw_target, pane->user_data);
+  return TRUE;
+}
+
+static void on_editor_pressed(GtkGestureClick *gesture, gint n_press, gdouble x, gdouble y,
+                              gpointer ud)
+{
+  BtEditorPane *pane = ud;
+  pane->press_active = FALSE;
+  pane->press_has_span = FALSE;
+  if (pane->relpath == NULL || pane->buffer == NULL)
     return;
 
-  GtkTextIter line_start = iter, line_end = iter;
-  gtk_text_iter_set_line_offset(&line_start, 0);
-  if (!gtk_text_iter_ends_line(&line_end))
-    gtk_text_iter_forward_to_line_end(&line_end);
+  guint button = gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(gesture));
+  if (button != GDK_BUTTON_PRIMARY && button != GDK_BUTTON_MIDDLE)
+    return;
 
-  gchar *line = gtk_text_buffer_get_text(GTK_TEXT_BUFFER(pane->buffer), &line_start, &line_end,
-                                         FALSE);
-  gint line_byte_off = gtk_text_iter_get_line_index(&iter);
-  gchar *target = bt_wikilink_at(line, (gsize)MAX(line_byte_off, 0));
-  g_free(line);
-  if (target != NULL) {
-    pane->on_link(target, pane->user_data);
-    g_free(target);
+  GdkEvent *ev = gtk_event_controller_get_current_event(GTK_EVENT_CONTROLLER(gesture));
+  pane->press_active = TRUE;
+  pane->press_button = button;
+  pane->press_n_press = n_press;
+  pane->press_x = x;
+  pane->press_y = y;
+  pane->press_mods = ev ? gdk_event_get_modifier_state(ev) : gtk_event_controller_get_current_event_state(GTK_EVENT_CONTROLLER(gesture));
+  pane->press_had_sel = gtk_text_buffer_get_has_selection(GTK_TEXT_BUFFER(pane->buffer));
+  pane->press_caret_byte = caret_byte_in_buffer(pane);
+
+  BtLinkSpan sp;
+  if (hit_test_link_at_coords(pane, x, y, &sp)) {
+    pane->press_has_span = TRUE;
+    pane->press_span_start = sp.start;
+    pane->press_span_end = sp.end;
   }
+}
+
+static void on_editor_released(GtkGestureClick *gesture, gint n_press, gdouble x, gdouble y,
+                               gpointer ud)
+{
+  BtEditorPane *pane = ud;
+  gboolean was_active = pane->press_active;
+  pane->press_active = FALSE;
+  if (!was_active || !pane->press_has_span)
+    return;
+
+  guint button = gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(gesture));
+  GdkEvent *ev = gtk_event_controller_get_current_event(GTK_EVENT_CONTROLLER(gesture));
+  GdkModifierType rel_mods =
+      (ev ? gdk_event_get_modifier_state(ev)
+          : gtk_event_controller_get_current_event_state(GTK_EVENT_CONTROLLER(gesture))) |
+      pane->press_mods;
+
+  BtLinkSpan rel_sp;
+  if (!hit_test_link_at_coords(pane, x, y, &rel_sp))
+    return;
+  if (rel_sp.start != pane->press_span_start || rel_sp.end != pane->press_span_end)
+    return;
+
+  gint eff_press = MAX(n_press, pane->press_n_press);
+  if (evaluate_and_fire_link_click(pane, button, eff_press, pane->press_x, pane->press_y,
+                                   x, y, pane->press_had_sel, rel_mods,
+                                   pane->press_caret_byte, &rel_sp)) {
+    gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+  }
+}
+
+static void on_editor_stopped(GtkGestureClick *gesture, gpointer ud)
+{
+  (void)gesture;
+  BtEditorPane *pane = ud;
+  pane->press_active = FALSE;
+  pane->press_has_span = FALSE;
 }
 
 /* ------------------------------------------- language & scheme loading -- */
@@ -1102,6 +1262,7 @@ BtEditorPane *bt_editorpane_new(BtEditorSaveFn on_save, BtEditorLinkFn on_link,
   pane->on_dirty = on_dirty;
   pane->user_data = user_data;
   pane->cur_margin = BT_COLUMN_MIN_PAD;
+  pane->links_open_on_click = TRUE;
 
   pane->buffer = gtk_source_buffer_new(NULL);
   configure_language(pane->buffer);
@@ -1131,8 +1292,11 @@ BtEditorPane *bt_editorpane_new(BtEditorSaveFn on_save, BtEditorLinkFn on_link,
   gtk_widget_set_hexpand(GTK_WIDGET(pane->view), TRUE);
 
   GtkGesture *click = gtk_gesture_click_new();
-  gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), GDK_BUTTON_PRIMARY);
-  g_signal_connect(click, "pressed", G_CALLBACK(on_editor_click), pane);
+  gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), 0);
+  gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(click), GTK_PHASE_CAPTURE);
+  g_signal_connect(click, "pressed", G_CALLBACK(on_editor_pressed), pane);
+  g_signal_connect(click, "released", G_CALLBACK(on_editor_released), pane);
+  g_signal_connect(click, "stopped", G_CALLBACK(on_editor_stopped), pane);
   gtk_widget_add_controller(GTK_WIDGET(pane->view), GTK_EVENT_CONTROLLER(click));
 
   pane->scrolled = gtk_scrolled_window_new();
@@ -1248,6 +1412,17 @@ void bt_editorpane_set_line_numbers(BtEditorPane *pane, gboolean show)
     gtk_source_view_set_show_line_numbers(pane->view, show);
     update_column_margins(pane);
   }
+}
+
+void bt_editorpane_set_links_open_on_click(BtEditorPane *pane, gboolean open_on_click)
+{
+  if (pane != NULL)
+    pane->links_open_on_click = open_on_click;
+}
+
+gboolean bt_editorpane_get_links_open_on_click(const BtEditorPane *pane)
+{
+  return pane ? pane->links_open_on_click : TRUE;
 }
 
 gchar *bt_editorpane_buffer_hash(const BtEditorPane *pane)
@@ -1440,6 +1615,38 @@ gboolean bt_editorpane_link_at_offset(const BtEditorPane *pane, gsize byte_offse
   if (pane == NULL || pane->link_spans == NULL)
     return FALSE;
   return bt_link_span_at(pane->link_spans, byte_offset, out_span);
+}
+
+gsize bt_editorpane_caret_byte_offset(const BtEditorPane *pane)
+{
+  return caret_byte_in_buffer(pane);
+}
+
+void bt_editorpane_set_caret_byte_offset(BtEditorPane *pane, gsize byte_offset)
+{
+  place_caret_byte_in_buffer(pane, byte_offset);
+}
+
+gboolean bt_editorpane_simulate_click(BtEditorPane *pane, gsize target_byte_offset, guint button,
+                                      gint n_press, gdouble drag_dx, gdouble drag_dy,
+                                      GdkModifierType mods)
+{
+  if (pane == NULL || pane->buffer == NULL || pane->relpath == NULL)
+    return FALSE;
+  BtLinkSpan sp;
+  if (!bt_editorpane_link_at_offset(pane, target_byte_offset, &sp))
+    return FALSE;
+
+  gsize pre_caret = caret_byte_in_buffer(pane);
+  gboolean had_sel = gtk_text_buffer_get_has_selection(GTK_TEXT_BUFFER(pane->buffer));
+  gboolean opened = evaluate_and_fire_link_click(pane, button, n_press,
+                                                 100.0, 100.0, 100.0 + drag_dx, 100.0 + drag_dy,
+                                                 had_sel, mods, pre_caret, &sp);
+  if (!opened && button == GDK_BUTTON_PRIMARY) {
+    /* Non-activating primary clicks move the caret like normal GtkTextView clicks. */
+    place_caret_byte_in_buffer(pane, target_byte_offset);
+  }
+  return opened;
 }
 
 const gchar *bt_editorpane_language_id(const BtEditorPane *pane)
