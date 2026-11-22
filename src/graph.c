@@ -170,7 +170,8 @@ BtGraph *bt_graph_build(const BtVault *vault, BtIndex *index, const BtSessionSto
             bt_link_resolution_free(lres);
             continue;
           }
-        } else if (lres != NULL && lres->status == BT_LINK_EXTERNAL) {
+        } else if (lres != NULL &&
+                   (lres->status == BT_LINK_EXTERNAL || lres->status == BT_LINK_PLACEHOLDER)) {
           bt_link_resolution_free(lres);
           continue;
         }

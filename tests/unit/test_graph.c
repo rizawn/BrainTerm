@@ -105,7 +105,7 @@ static void test_graph_ghost_equivalence_with_resolver(void **state)
   bt_test_put(root, "sub/MathStats.md",
               "---\nid: bt-ms\ntitle: \"Math Stats\"\ncreated: 2026-11-23T00:00:00Z\nsource: human\n---\n"
               "| 01 | [[chapter-01/01-intro.md]] | intro |\n"
-              "Alias link [[Boot Alias]], missing [[missing-one]], missing2 [[sub/missing-two]].\n"
+              "Alias link [[Boot Alias]], missing [[missing-one]], missing2 [[sub/missing-two]], template [[{{source-1}}]].\n"
               "Asset [[assets/doc.pdf]] and math $[[math_ignored]]$.\n");
   bt_test_put(root, "sub/chapter-01/01-intro.md",
               "---\nid: bt-c1\ntitle: \"Intro\"\ncreated: 2026-11-23T00:00:00Z\nsource: human\n---\n"
@@ -157,6 +157,7 @@ static void test_graph_ghost_equivalence_with_resolver(void **state)
   assert_int_equal(unresolved_count, 2);
   assert_int_equal(g->ghost_node_count, 2);
   assert_false(g_hash_table_contains(ghost_labels, "math_ignored"));
+  assert_false(g_hash_table_contains(ghost_labels, "{{source-1}}"));
 
   g_hash_table_destroy(ghost_labels);
   bt_index_snapshot_free(snap);

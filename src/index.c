@@ -729,12 +729,25 @@ static void re_resolve_all_in_db(sqlite3 *db, const BtVault *vault)
   }
 
   sqlite3_stmt *upd = NULL;
+  sqlite3_stmt *del = NULL;
+  sqlite3_prepare_v2(db, "DELETE FROM link_resolutions WHERE id=?1;", -1, &del, NULL);
   if (sqlite3_prepare_v2(
           db, "UPDATE link_resolutions SET resolved_path=?1, status=?2, kind=?3 WHERE id=?4;",
           -1, &upd, NULL) == SQLITE_OK) {
     for (guint i = 0; i < rows->len; i++) {
       PendingLR *p = g_ptr_array_index(rows, i);
       BtLinkResolution *res = bt_link_resolve(snap, p->src_path, p->raw_target);
+      if (res != NULL && res->status == BT_LINK_PLACEHOLDER) {
+        if (del != NULL) {
+          sqlite3_reset(del);
+          sqlite3_bind_int64(del, 1, p->rowid);
+          sqlite3_step(del);
+        }
+        bt_link_resolution_free(res);
+        g_free(p->src_path);
+        g_free(p->raw_target);
+        continue;
+      }
       const char *status_str = res ? bt_link_status_name(res->status) : "unresolved";
       const char *kind_str = res ? bt_link_kind_name(res->kind) : "note";
       sqlite3_reset(upd);
@@ -758,6 +771,7 @@ static void re_resolve_all_in_db(sqlite3 *db, const BtVault *vault)
       g_free(p->raw_target);
     }
   }
+  sqlite3_finalize(del);
   g_ptr_array_unref(rows);
   bt_index_snapshot_free(snap);
 }

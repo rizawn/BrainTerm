@@ -1314,6 +1314,23 @@ BtLinkResolution *bt_link_resolve(const BtIndexSnapshot *idx, const char *source
   if (*lead_trim == '\0')
     return NULL; /* Empty non-link (R31) */
 
+  /* P-3: Template placeholder matching \{\{[^}]*\}\} is PLACEHOLDER, not UNRESOLVED. */
+  if (!looks_like_url) {
+    const char *open = strstr(lead_trim, "{{");
+    if (open != NULL) {
+      const char *p = open + 2;
+      while (*p != '\0' && *p != '}' && *p != '\r' && *p != '\n')
+        p++;
+      if (p[0] == '}' && p[1] == '}') {
+        BtLinkResolution *r = g_new0(BtLinkResolution, 1);
+        r->status = BT_LINK_PLACEHOLDER;
+        r->kind = BT_LINK_KIND_NOTE;
+        r->display = g_strdup(alias_part ? alias_part : lead_trim);
+        return r;
+      }
+    }
+  }
+
   /* Windows UNC / device prefixes before scheme check. */
   if (g_str_has_prefix(lead_trim, "\\\\") || g_str_has_prefix(lead_trim, "//"))
     return make_blocked(BT_LINK_BLOCK_UNSAFE_PATH, BT_LINK_KIND_NOTE,
@@ -1670,12 +1687,13 @@ const char *bt_link_block_reason_message(BtLinkBlockReason reason)
 const char *bt_link_status_name(BtLinkStatus status)
 {
   switch (status) {
-  case BT_LINK_RESOLVED:   return "resolved";
-  case BT_LINK_AMBIGUOUS:  return "ambiguous";
-  case BT_LINK_UNRESOLVED: return "unresolved";
-  case BT_LINK_EXTERNAL:   return "external";
+  case BT_LINK_RESOLVED:    return "resolved";
+  case BT_LINK_AMBIGUOUS:   return "ambiguous";
+  case BT_LINK_UNRESOLVED:  return "unresolved";
+  case BT_LINK_EXTERNAL:    return "external";
+  case BT_LINK_PLACEHOLDER: return "placeholder";
   case BT_LINK_BLOCKED:
-  default:                 return "blocked";
+  default:                  return "blocked";
   }
 }
 
@@ -1851,7 +1869,7 @@ int bt_link_selftest_cli(const char *vault_dir)
   guint notes_with_links = 0;
   guint total_links = 0;
   guint by_syntax[4] = {0};
-  guint by_status[5] = {0};
+  guint by_status[6] = {0};
   guint by_kind[5] = {0};
   guint notes_with_math = 0;
   guint math_inline = 0;
@@ -1924,10 +1942,10 @@ int bt_link_selftest_cli(const char *vault_dir)
   printf("by_syntax: wikilink=%u markdown=%u bare_url=%u frontmatter=%u\n",
          by_syntax[BT_LINK_SYNTAX_WIKILINK], by_syntax[BT_LINK_SYNTAX_MARKDOWN],
          by_syntax[BT_LINK_SYNTAX_BARE_URL], by_syntax[BT_LINK_SYNTAX_FRONTMATTER]);
-  printf("by_status: RESOLVED=%u AMBIGUOUS=%u UNRESOLVED=%u EXTERNAL=%u BLOCKED=%u\n",
+  printf("by_status: RESOLVED=%u AMBIGUOUS=%u UNRESOLVED=%u PLACEHOLDER=%u EXTERNAL=%u BLOCKED=%u\n",
          by_status[BT_LINK_RESOLVED], by_status[BT_LINK_AMBIGUOUS],
-         by_status[BT_LINK_UNRESOLVED], by_status[BT_LINK_EXTERNAL],
-         by_status[BT_LINK_BLOCKED]);
+         by_status[BT_LINK_UNRESOLVED], by_status[BT_LINK_PLACEHOLDER],
+         by_status[BT_LINK_EXTERNAL], by_status[BT_LINK_BLOCKED]);
   printf("by_kind: note=%u file=%u dir=%u url=%u same_note=%u\n",
          by_kind[BT_LINK_KIND_NOTE], by_kind[BT_LINK_KIND_FILE],
          by_kind[BT_LINK_KIND_DIR], by_kind[BT_LINK_KIND_URL],

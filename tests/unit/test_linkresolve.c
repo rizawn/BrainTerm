@@ -132,6 +132,9 @@ static void test_group_r_resolver_table(void **state)
     { "R35", "welcome.md", "projects//conpty.md", FALSE, BT_LINK_RESOLVED, BT_LINK_KIND_NOTE, BT_LINK_BLOCK_NONE, "projects/conpty.md", NULL, NULL, NULL, NULL },
     { "R36", "welcome.md", "ConPTY Notes", FALSE, BT_LINK_RESOLVED, BT_LINK_KIND_NOTE, BT_LINK_BLOCK_NONE, "projects/conpty.md", NULL, NULL, NULL, NULL },
     { "R37", "welcome.md", "Bootstrap Notes", FALSE, BT_LINK_RESOLVED, BT_LINK_KIND_NOTE, BT_LINK_BLOCK_NONE, "statistical-statistics-notes/chapter-13-empirical/02-bootstrap.md", NULL, NULL, NULL, NULL },
+    { "P3A", "welcome.md", "{{source-1}}", FALSE, BT_LINK_PLACEHOLDER, BT_LINK_KIND_NOTE, BT_LINK_BLOCK_NONE, NULL, NULL, NULL, "{{source-1}}", NULL },
+    { "P3B", "welcome.md", "{{related-note}}|Related", FALSE, BT_LINK_PLACEHOLDER, BT_LINK_KIND_NOTE, BT_LINK_BLOCK_NONE, NULL, NULL, NULL, "Related", NULL },
+    { "P3C", "welcome.md", "{{}}", FALSE, BT_LINK_PLACEHOLDER, BT_LINK_KIND_NOTE, BT_LINK_BLOCK_NONE, NULL, NULL, NULL, "{{}}", NULL },
   };
 
   for (gsize i = 0; i < G_N_ELEMENTS(rows); i++) {
@@ -250,8 +253,9 @@ static void test_group_p_parser(void **state)
       "- Item [[in_list]] and [[adj1]][[adj2]]\r\n"
       "> Quote [[in_quote]]\r\n"
       "| Col1 | [[in_table]] | [[a\\|b]] |\r\n"
-      "`[[not_inline_code]]` and $[[not_math_link]]$\r\n"
-      "```\r\n[[not_fenced]]\r\nhttps://not.in.code\r\n```\r\n"
+      "`[[not_inline_code]]` and $[[not_math_link]]$ and `[[{{code_placeholder}}]]`\r\n"
+      "```\r\n[[not_fenced]]\r\n[[{{fenced_placeholder}}]]\r\nhttps://not.in.code\r\n```\r\n"
+      "Template placeholder [[{{source-1}}]] outside code.\r\n"
       "Nested [[a [b] c]] ignored.\r\n"
       "[Wiki](https://en.wikipedia.org/wiki/Bootstrap_(statistics)) and [sp](<my note.md>)\r\n"
       "See https://example.org/page_(x), or https://example.org/end.\r\n"
@@ -267,6 +271,7 @@ static void test_group_p_parser(void **state)
     "in_quote",
     "in_table",
     "a\\|b",
+    "{{source-1}}",
     "https://en.wikipedia.org/wiki/Bootstrap_(statistics)",
     "my note.md",
     "https://example.org/page_(x)",

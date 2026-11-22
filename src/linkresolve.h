@@ -21,6 +21,7 @@ typedef enum {
   BT_LINK_UNRESOLVED = 2,
   BT_LINK_EXTERNAL = 3,
   BT_LINK_BLOCKED = 4,
+  BT_LINK_PLACEHOLDER = 5,
 } BtLinkStatus;
 
 typedef enum {
