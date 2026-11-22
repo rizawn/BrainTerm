@@ -1444,7 +1444,7 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
   gtk_paned_set_shrink_start_child(GTK_PANED(app->right_paned), FALSE);
   gtk_paned_set_shrink_end_child(GTK_PANED(app->right_paned), FALSE);
 
-  /* Collapsible notes sidebar card */
+  /* Collapsible notes sidebar card: header (vault name + new note + collapse) + tree */
   GtkWidget *sb_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
   gtk_widget_set_name(sb_box, "bt-sidebar");
   gtk_widget_add_css_class(sb_box, "bt-card");
@@ -1452,11 +1452,29 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
   gtk_widget_set_overflow(sb_box, GTK_OVERFLOW_HIDDEN);
   gtk_widget_set_margin_start(sb_box, 8);
   gtk_widget_set_margin_bottom(sb_box, 8);
+
+  GtkWidget *sb_hdr = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+  gtk_widget_add_css_class(sb_hdr, "bt-sidebar-header");
   app->sidebar_vault_lbl = gtk_label_new("Vault");
   gtk_label_set_xalign(GTK_LABEL(app->sidebar_vault_lbl), 0.0f);
-  gtk_widget_add_css_class(app->sidebar_vault_lbl, "bt-sidebar-header");
+  gtk_label_set_ellipsize(GTK_LABEL(app->sidebar_vault_lbl), PANGO_ELLIPSIZE_END);
+  gtk_widget_set_hexpand(app->sidebar_vault_lbl, TRUE);
   gtk_widget_add_css_class(app->sidebar_vault_lbl, "bt-vault-name");
-  gtk_box_append(GTK_BOX(sb_box), app->sidebar_vault_lbl);
+
+  GtkWidget *sb_new = gtk_button_new_from_icon_name("bt-plus-symbolic");
+  gtk_widget_add_css_class(sb_new, "bt-iconbtn");
+  gtk_widget_set_tooltip_text(sb_new, "New Note");
+  gtk_actionable_set_action_name(GTK_ACTIONABLE(sb_new), "app.new-note");
+
+  GtkWidget *sb_col = gtk_button_new_from_icon_name("bt-sidebar-symbolic");
+  gtk_widget_add_css_class(sb_col, "bt-iconbtn");
+  gtk_widget_set_tooltip_text(sb_col, "Collapse Sidebar (F9)");
+  gtk_actionable_set_action_name(GTK_ACTIONABLE(sb_col), "app.toggle-sidebar");
+
+  gtk_box_append(GTK_BOX(sb_hdr), app->sidebar_vault_lbl);
+  gtk_box_append(GTK_BOX(sb_hdr), sb_new);
+  gtk_box_append(GTK_BOX(sb_hdr), sb_col);
+  gtk_box_append(GTK_BOX(sb_box), sb_hdr);
   gtk_box_append(GTK_BOX(sb_box), bt_filetree_widget(app->tree));
 
   app->split_view = ADW_OVERLAY_SPLIT_VIEW(adw_overlay_split_view_new());

@@ -51,6 +51,7 @@ static BtTreeItem *bt_tree_item_new(const gchar *name, const gchar *relpath, gbo
 /* ----------------------------------------------------------- BtFileTree */
 
 struct BtFileTree {
+  GtkWidget *stack;
   GtkWidget *scrolled;
   GtkWidget *list_view;
   GListStore *root_store;
@@ -61,6 +62,16 @@ struct BtFileTree {
   gpointer user_data;
   gboolean suppress_select;
 };
+
+static gboolean is_special_agent_file(const gchar *name)
+{
+  if (name == NULL)
+    return FALSE;
+  return g_ascii_strcasecmp(name, "AGENTS.md") == 0 ||
+         g_ascii_strcasecmp(name, "CLAUDE.md") == 0 ||
+         g_ascii_strcasecmp(name, "GEMINI.md") == 0 ||
+         g_ascii_strcasecmp(name, "CODEX.md") == 0;
+}
 
 static GListModel *create_child_model(gpointer item, gpointer user_data)
 {
@@ -89,13 +100,20 @@ static void on_factory_setup(GtkListItemFactory *factory, GtkListItem *list_item
 {
   (void)factory;
   GtkWidget *expander = gtk_tree_expander_new();
-  GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+  GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
   GtkWidget *icon = gtk_image_new();
+  gtk_image_set_pixel_size(GTK_IMAGE(icon), 16);
   GtkWidget *label = gtk_label_new(NULL);
   gtk_label_set_xalign(GTK_LABEL(label), 0.0f);
   gtk_label_set_ellipsize(GTK_LABEL(label), PANGO_ELLIPSIZE_END);
+  gtk_widget_set_hexpand(label, TRUE);
+  GtkWidget *badge = gtk_label_new("agent");
+  gtk_widget_add_css_class(badge, "bt-badge");
+  gtk_widget_set_valign(badge, GTK_ALIGN_CENTER);
+  gtk_widget_set_visible(badge, FALSE);
   gtk_box_append(GTK_BOX(box), icon);
   gtk_box_append(GTK_BOX(box), label);
+  gtk_box_append(GTK_BOX(box), badge);
   g_object_set_data(G_OBJECT(box), "bt-tree", ud);
   GtkGesture *rclick = gtk_gesture_click_new();
   gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(rclick), GDK_BUTTON_SECONDARY);
@@ -117,11 +135,24 @@ static void on_factory_bind(GtkListItemFactory *factory, GtkListItem *list_item,
   GtkWidget *box = gtk_tree_expander_get_child(expander);
   GtkWidget *icon = gtk_widget_get_first_child(box);
   GtkWidget *label = gtk_widget_get_next_sibling(icon);
+  GtkWidget *badge = gtk_widget_get_next_sibling(label);
 
   g_object_set_data_full(G_OBJECT(box), "bt-relpath", g_strdup(item->relpath), g_free);
-  gtk_image_set_from_icon_name(GTK_IMAGE(icon),
-                               item->is_dir ? "folder-symbolic" : "text-x-generic-symbolic");
+  gtk_widget_remove_css_class(icon, "bt-icon-folder");
+  gtk_widget_remove_css_class(icon, "bt-icon-special");
+
+  gboolean special = !item->is_dir && is_special_agent_file(item->name);
+  if (item->is_dir) {
+    gtk_image_set_from_icon_name(GTK_IMAGE(icon), "bt-folder-symbolic");
+    gtk_widget_add_css_class(icon, "bt-icon-folder");
+  } else if (special) {
+    gtk_image_set_from_icon_name(GTK_IMAGE(icon), "bt-agent-symbolic");
+    gtk_widget_add_css_class(icon, "bt-icon-special");
+  } else {
+    gtk_image_set_from_icon_name(GTK_IMAGE(icon), "bt-note-symbolic");
+  }
   gtk_label_set_text(GTK_LABEL(label), item->name);
+  gtk_widget_set_visible(badge, special);
   g_object_unref(item);
 }
 
@@ -191,6 +222,30 @@ BtFileTree *bt_filetree_new(BtFileTreeSelectFn on_select, BtFileTreeOpenTermFn o
   gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(tree->scrolled), tree->list_view);
   gtk_widget_set_size_request(tree->scrolled, 190, -1);
 
+  GtkWidget *empty = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+  gtk_widget_add_css_class(empty, "bt-empty");
+  gtk_widget_set_halign(empty, GTK_ALIGN_CENTER);
+  gtk_widget_set_valign(empty, GTK_ALIGN_CENTER);
+  gtk_widget_set_margin_start(empty, 16);
+  gtk_widget_set_margin_end(empty, 16);
+  GtkWidget *eico = gtk_image_new_from_icon_name("bt-folder-symbolic");
+  gtk_image_set_pixel_size(GTK_IMAGE(eico), 32);
+  GtkWidget *etitle = gtk_label_new("No notes in folder");
+  gtk_widget_add_css_class(etitle, "bt-empty-title");
+  GtkWidget *esub = gtk_label_new("Create a note or open a vault");
+  gtk_label_set_wrap(GTK_LABEL(esub), TRUE);
+  gtk_label_set_justify(GTK_LABEL(esub), GTK_JUSTIFY_CENTER);
+  gtk_box_append(GTK_BOX(empty), eico);
+  gtk_box_append(GTK_BOX(empty), etitle);
+  gtk_box_append(GTK_BOX(empty), esub);
+
+  tree->stack = gtk_stack_new();
+  gtk_widget_set_hexpand(tree->stack, TRUE);
+  gtk_widget_set_vexpand(tree->stack, TRUE);
+  gtk_stack_add_named(GTK_STACK(tree->stack), tree->scrolled, "list");
+  gtk_stack_add_named(GTK_STACK(tree->stack), empty, "empty");
+  gtk_stack_set_visible_child_name(GTK_STACK(tree->stack), "empty");
+
   return tree;
 }
 
@@ -206,7 +261,7 @@ void bt_filetree_free(BtFileTree *tree)
 
 GtkWidget *bt_filetree_widget(BtFileTree *tree)
 {
-  return tree->scrolled;
+  return tree->stack;
 }
 
 static gint compare_items(gconstpointer a, gconstpointer b, gpointer ud)
@@ -238,11 +293,17 @@ void bt_filetree_populate(BtFileTree *tree, const BtVault *vault)
   g_list_store_remove_all(tree->root_store);
 
   if (vault == NULL) {
+    gtk_stack_set_visible_child_name(GTK_STACK(tree->stack), "empty");
     tree->suppress_select = FALSE;
     return;
   }
 
   const GPtrArray *notes = vault_notes(vault);
+  if (notes->len == 0) {
+    gtk_stack_set_visible_child_name(GTK_STACK(tree->stack), "empty");
+    tree->suppress_select = FALSE;
+    return;
+  }
   /* Map dir relpath -> GListStore* (borrowed from tree items). */
   GHashTable *dirs = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
 
@@ -280,6 +341,7 @@ void bt_filetree_populate(BtFileTree *tree, const BtVault *vault)
 
   g_hash_table_destroy(dirs);
   sort_store_recursive(tree->root_store);
+  gtk_stack_set_visible_child_name(GTK_STACK(tree->stack), "list");
   tree->suppress_select = FALSE;
 }
 
