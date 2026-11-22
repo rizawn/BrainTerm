@@ -52,6 +52,8 @@ struct BtApp {
   GtkWidget *status_git_box;
   GtkWidget *status_git_lbl;
   GtkWidget *status_graph_notice;
+  GtkWidget *status_notice_lbl;
+  gchar *last_statusbar_notice;
   BtThemeLoader *themeloader;
 
   BtVault *vault;
@@ -83,6 +85,7 @@ struct BtApp {
   guint capture_settle_left;
   gboolean capture_applied;
   gboolean capture_failed;
+  gboolean fail_next_save_for_test;
 };
 
 /* ----------------------------------------------------- state.ini (§7.5) -- */
@@ -338,6 +341,59 @@ void bt_app_set_status(BtApp *app, const gchar *message)
   show_toast(app, message, 2);
 }
 
+void bt_app_set_statusbar_notice(BtApp *app, const gchar *message)
+{
+  if (app == NULL)
+    return;
+  g_free(app->last_statusbar_notice);
+  app->last_statusbar_notice = g_strdup(message ? message : "");
+  if (app->status_notice_lbl != NULL) {
+    if (message != NULL && message[0] != '\0') {
+      gtk_label_set_text(GTK_LABEL(app->status_notice_lbl), message);
+      gtk_widget_set_visible(app->status_notice_lbl, TRUE);
+    } else {
+      gtk_label_set_text(GTK_LABEL(app->status_notice_lbl), "");
+      gtk_widget_set_visible(app->status_notice_lbl, FALSE);
+    }
+  }
+}
+
+const gchar *bt_app_last_statusbar_notice(const BtApp *app)
+{
+  return app ? app->last_statusbar_notice : NULL;
+}
+
+void bt_app_set_fail_next_save_for_test(BtApp *app, gboolean fail)
+{
+  if (app != NULL)
+    app->fail_next_save_for_test = fail;
+}
+
+const gchar *bt_app_active_note(const BtApp *app)
+{
+  return (app && app->editor) ? bt_editorpane_relpath(app->editor) : NULL;
+}
+
+gpointer bt_app_editor(const BtApp *app)
+{
+  return app ? app->editor : NULL;
+}
+
+void bt_app_set_test_mode(BtApp *app, gboolean enabled)
+{
+  if (app != NULL)
+    app->smoke_test = enabled;
+}
+
+void bt_app_prepare_ui_for_test(BtApp *app)
+{
+  if (app == NULL || app->adw_app == NULL)
+    return;
+  app->smoke_test = TRUE;
+  g_application_register(G_APPLICATION(app->adw_app), NULL, NULL);
+  g_application_activate(G_APPLICATION(app->adw_app));
+}
+
 void bt_app_show_error(BtApp *app, const gchar *title, const gchar *detail)
 {
   if (app == NULL || app->window == NULL || app->smoke_test) {
@@ -425,7 +481,7 @@ gboolean bt_app_open_vault(BtApp *app, const gchar *path, GError **error)
     bt_filetree_populate(app->tree, app->vault);
   refresh_graph(app, !app->smoke_test);
 
-  if (app->tabs != NULL && app->capture_dir == NULL) {
+  if (app->tabs != NULL && app->capture_dir == NULL && !app->smoke_test) {
     GError *terr = NULL;
     const BtSession *sess = bt_sessions_add(app->sessions, "shell", vault_root(app->vault), "",
                                             NULL, NULL, NULL);
@@ -571,8 +627,13 @@ gboolean bt_app_open_note(BtApp *app, const gchar *relpath, GError **error)
     adw_view_stack_set_visible_child_name(app->view_stack, "editor");
   if (app->editor != NULL && g_strcmp0(bt_editorpane_relpath(app->editor), relpath) == 0)
     return TRUE;
-  if (app->editor != NULL && bt_editorpane_is_dirty(app->editor))
-    bt_editorpane_flush_save(app->editor);
+  if (app->editor != NULL && bt_editorpane_is_dirty(app->editor)) {
+    if (!bt_editorpane_flush_save(app->editor)) {
+      g_set_error(error, BT_ERROR, BT_ERROR_IO, "Save failed — navigation aborted");
+      bt_app_set_statusbar_notice(app, "Save failed — navigation aborted");
+      return FALSE;
+    }
+  }
 
   gchar *text = NULL;
   gsize len = 0;
@@ -624,10 +685,11 @@ gboolean bt_app_open_or_create_wikilink(BtApp *app, const gchar *target, GError 
 
 gboolean bt_app_save_active(BtApp *app, GError **error)
 {
-  (void)error;
   g_return_val_if_fail(app != NULL, FALSE);
-  if (app->editor != NULL)
-    bt_editorpane_flush_save(app->editor);
+  if (app->editor != NULL && !bt_editorpane_flush_save(app->editor)) {
+    g_set_error(error, BT_ERROR, BT_ERROR_IO, "Save failed");
+    return FALSE;
+  }
   return TRUE;
 }
 
@@ -724,11 +786,16 @@ static void on_tree_open_term(const gchar *rel_dir, gpointer ud)
   set_term_visible(app, TRUE);
 }
 
-static void on_editor_save(const gchar *relpath, const gchar *text, gsize length, gpointer ud)
+static gboolean on_editor_save(const gchar *relpath, const gchar *text, gsize length, gpointer ud)
 {
   BtApp *app = ud;
   if (app->vault == NULL)
-    return;
+    return FALSE;
+  if (app->fail_next_save_for_test) {
+    app->fail_next_save_for_test = FALSE;
+    bt_app_set_statusbar_notice(app, "Save failed — kept in buffer");
+    return FALSE;
+  }
   GError *err = NULL;
   if (vault_atomic_write(app->vault, relpath, text, length, NULL, &err)) {
     bt_editorpane_mark_saved(app->editor);
@@ -739,7 +806,11 @@ static void on_editor_save(const gchar *relpath, const gchar *text, gsize length
     gchar *msg = g_strdup_printf("Saved — %s", relpath);
     show_toast(app, msg, 2);
     g_free(msg);
+    return TRUE;
   } else {
+    gchar *emsg = g_strdup_printf("Save failed: %s", err ? err->message : "io error");
+    bt_app_set_statusbar_notice(app, emsg);
+    g_free(emsg);
     if (app->toast_overlay != NULL && !app->smoke_test) {
       AdwToast *t = adw_toast_new("Save FAILED — kept in buffer");
       adw_toast_set_button_label(t, "Retry");
@@ -747,6 +818,7 @@ static void on_editor_save(const gchar *relpath, const gchar *text, gsize length
       adw_toast_overlay_add_toast(app->toast_overlay, t);
     }
     g_clear_error(&err);
+    return FALSE;
   }
 }
 
@@ -2309,6 +2381,10 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
   app->status_graph_notice = gtk_label_new("");
   gtk_widget_set_name(app->status_graph_notice, "bt-status-graph-notice");
   gtk_widget_set_visible(app->status_graph_notice, FALSE);
+  app->status_notice_lbl = gtk_label_new("");
+  gtk_widget_set_name(app->status_notice_lbl, "bt-status-notice");
+  gtk_widget_add_css_class(app->status_notice_lbl, "dim-label");
+  gtk_widget_set_visible(app->status_notice_lbl, FALSE);
   GtkWidget *spacer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
   gtk_widget_set_hexpand(spacer, TRUE);
 
@@ -2328,6 +2404,7 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
   gtk_box_append(GTK_BOX(sbar), s_sep);
   gtk_box_append(GTK_BOX(sbar), app->status_notes_lbl);
   gtk_box_append(GTK_BOX(sbar), app->status_graph_notice);
+  gtk_box_append(GTK_BOX(sbar), app->status_notice_lbl);
   gtk_box_append(GTK_BOX(sbar), spacer);
   gtk_box_append(GTK_BOX(sbar), app->status_git_box);
   gtk_box_append(GTK_BOX(sbar), s_sep2);
@@ -2372,8 +2449,10 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
     gtk_widget_set_visible(left_card, FALSE);
     gtk_widget_set_visible(app->term_card, FALSE);
   }
-  if (app->smoke_test)
+  if (app->smoke_test && app->cli_vault != NULL)
     g_timeout_add(250, on_smoke_idle, app);
+  else if (app->smoke_test)
+    ; /* Unit test mode via bt_app_prepare_ui_for_test */
   else if (app->capture_dir != NULL)
     g_timeout_add(60, on_capture_poll, app);
 }
@@ -2509,6 +2588,7 @@ void bt_app_free(BtApp *app)
   g_free(app->cli_vault);
   g_free(app->capture_dir);
   g_free(app->capture_state);
+  g_free(app->last_statusbar_notice);
   g_clear_object(&app->adw_app);
   g_free(app);
   bt_checkpoint_shutdown();

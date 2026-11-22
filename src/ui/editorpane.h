@@ -10,8 +10,8 @@ G_BEGIN_DECLS
 
 typedef struct BtEditorPane BtEditorPane;
 
-typedef void (*BtEditorSaveFn)(const gchar *relpath, const gchar *text, gsize length,
-                               gpointer user_data);
+typedef gboolean (*BtEditorSaveFn)(const gchar *relpath, const gchar *text, gsize length,
+                                   gpointer user_data);
 typedef void (*BtEditorLinkFn)(const gchar *target, gpointer user_data);
 typedef void (*BtEditorDirtyFn)(gboolean dirty, gpointer user_data);
 typedef void (*BtEditorDiffFn)(const gchar *relpath, gpointer user_data);
@@ -43,8 +43,8 @@ const gchar *bt_editorpane_relpath(const BtEditorPane *pane);
 gboolean bt_editorpane_is_dirty(const BtEditorPane *pane);
 const gchar *bt_editorpane_scheme_id(const BtEditorPane *pane);
 
-/* Triggers an immediate save if a note is open (cancels autosave timer). */
-void bt_editorpane_flush_save(BtEditorPane *pane);
+/* Triggers an immediate save if a note is open (cancels autosave timer). Returns FALSE on save error. */
+gboolean bt_editorpane_flush_save(BtEditorPane *pane);
 
 /* Called by BtApp after vault_atomic_write succeeds. */
 void bt_editorpane_mark_saved(BtEditorPane *pane);

@@ -214,9 +214,25 @@ test(
 
 t_editor_links = executable(
   'test_editor_links',
-  ['unit/test_editor_links.c', '../src/ui/editorpane.c', '../src/ui/themeload.c', bt_resources],
+  [
+    'unit/test_editor_links.c',
+    '../src/app.c',
+    '../src/terminal.c',
+    '../src/graphview.c',
+    '../src/ui/graphgl.c',
+    '../src/ui/graphcapture.c',
+    '../src/ui/filetree.c',
+    '../src/ui/editorpane.c',
+    '../src/ui/quickopen.c',
+    '../src/ui/termtabs.c',
+    '../src/ui/sessionspanel.c',
+    '../src/ui/askbar.c',
+    '../src/ui/themeload.c',
+    bt_resources,
+    bt_build_stamp_h,
+  ],
   include_directories: [test_inc, include_directories('../src')],
-  dependencies: [bt_core_dep, bt_math_dep, gtk4_dep, gtksource_dep, cmocka_dep],
+  dependencies: [bt_core_dep, bt_math_dep, gtk4_dep, adw_dep, epoxy_dep, gtksource_dep, cmocka_dep, m_dep],
 )
 test(
   'editor_links',

@@ -36,6 +36,13 @@ gboolean bt_app_save_active(BtApp *app, GError **error);
 
 void bt_app_show_error(BtApp *app, const gchar *title, const gchar *detail);
 void bt_app_set_status(BtApp *app, const gchar *message);
+void bt_app_set_statusbar_notice(BtApp *app, const gchar *message);
+const gchar *bt_app_last_statusbar_notice(const BtApp *app);
+void bt_app_set_fail_next_save_for_test(BtApp *app, gboolean fail);
+const gchar *bt_app_active_note(const BtApp *app);
+gpointer bt_app_editor(const BtApp *app);
+void bt_app_set_test_mode(BtApp *app, gboolean enabled);
+void bt_app_prepare_ui_for_test(BtApp *app);
 
 G_END_DECLS
 

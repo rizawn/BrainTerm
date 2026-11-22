@@ -106,15 +106,16 @@ static void cancel_autosave(BtEditorPane *pane)
   }
 }
 
-static void emit_save(BtEditorPane *pane)
+static gboolean emit_save(BtEditorPane *pane)
 {
   if (pane->relpath == NULL || pane->on_save == NULL)
-    return;
+    return TRUE;
   GtkTextIter start, end;
   gtk_text_buffer_get_bounds(GTK_TEXT_BUFFER(pane->buffer), &start, &end);
   gchar *text = gtk_text_buffer_get_text(GTK_TEXT_BUFFER(pane->buffer), &start, &end, TRUE);
-  pane->on_save(pane->relpath, text, strlen(text), pane->user_data);
+  gboolean ok = pane->on_save(pane->relpath, text, strlen(text), pane->user_data);
   g_free(text);
+  return ok;
 }
 
 static gboolean on_autosave_timeout(gpointer ud)
@@ -1378,7 +1379,7 @@ static void clear_hover_state(BtEditorPane *pane)
     gtk_text_buffer_get_bounds(GTK_TEXT_BUFFER(pane->buffer), &s, &e);
     gtk_text_buffer_remove_tag(GTK_TEXT_BUFFER(pane->buffer), pane->t_link_hover, &s, &e);
   }
-  if (pane->view != NULL)
+  if (pane->view != NULL && GTK_IS_WIDGET(pane->view))
     gtk_widget_set_cursor_from_name(GTK_WIDGET(pane->view), "text");
 }
 
@@ -1748,6 +1749,7 @@ BtEditorPane *bt_editorpane_new(BtEditorSaveFn on_save, BtEditorLinkFn on_link,
   g_signal_connect_after(pane->buffer, "delete-range", G_CALLBACK(on_delete_range_after), pane);
 
   pane->view = GTK_SOURCE_VIEW(gtk_source_view_new_with_buffer(pane->buffer));
+  g_object_add_weak_pointer(G_OBJECT(pane->view), (gpointer *)&pane->view);
   gtk_widget_set_name(GTK_WIDGET(pane->view), "bt-editor-view");
   gtk_widget_add_css_class(GTK_WIDGET(pane->view), "bt-editor");
   gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(pane->view), GTK_WRAP_WORD_CHAR);
@@ -1944,6 +1946,8 @@ void bt_editorpane_free(BtEditorPane *pane)
 {
   if (pane == NULL)
     return;
+  if (pane->view != NULL)
+    g_object_remove_weak_pointer(G_OBJECT(pane->view), (gpointer *)&pane->view);
   clear_hover_state(pane);
   cancel_autosave(pane);
   g_clear_pointer(&pane->link_spans, g_array_unref);
@@ -2029,12 +2033,12 @@ const gchar *bt_editorpane_scheme_id(const BtEditorPane *pane)
   return sc ? gtk_source_style_scheme_get_id(sc) : "none";
 }
 
-void bt_editorpane_flush_save(BtEditorPane *pane)
+gboolean bt_editorpane_flush_save(BtEditorPane *pane)
 {
   if (pane == NULL || pane->relpath == NULL)
-    return;
+    return TRUE;
   cancel_autosave(pane);
-  emit_save(pane);
+  return emit_save(pane);
 }
 
 void bt_editorpane_mark_saved(BtEditorPane *pane)

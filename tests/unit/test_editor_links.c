@@ -5,12 +5,16 @@
 #include <stdint.h>
 #include <cmocka.h>
 
+#include <adwaita.h>
 #include <gtk/gtk.h>
 #include <stdio.h>
 #include <string.h>
 
+#include "app.h"
 #include "linkresolve.h"
+#include "testutil.h"
 #include "ui/editorpane.h"
+#include "vault.h"
 
 static gchar *pane_buffer_text(const BtEditorPane *pane)
 {
@@ -296,12 +300,70 @@ static void test_l2_3_hover_styles_and_tooltips(void **state)
   bt_index_snapshot_free(snap);
 }
 
+static void test_l2_5_flush_before_navigation(void **state)
+{
+  (void)state;
+  if (!gtk_init_check()) {
+    skip();
+    return;
+  }
+  adw_init();
+
+  gchar *root = g_dir_make_tmp("bt-l25-XXXXXX", NULL);
+  gchar *cfg = g_dir_make_tmp("bt-cfg25-XXXXXX", NULL);
+  g_setenv("BT_CONFIG_DIR", cfg, TRUE);
+  bt_test_put(root, "a.md", "# A\nOriginal text.\n");
+  bt_test_put(root, "b.md", "# B\nSecond note.\n");
+
+  BtApp *app = bt_app_new();
+  bt_app_prepare_ui_for_test(app);
+  assert_true(bt_app_open_vault(app, root, NULL));
+  assert_true(bt_app_open_note(app, "a.md", NULL));
+  assert_string_equal(bt_app_active_note(app), "a.md");
+
+  BtEditorPane *ed = bt_app_editor(app);
+  GtkTextView *tv = GTK_TEXT_VIEW(bt_editorpane_view_widget(ed));
+  GtkTextBuffer *buf = gtk_text_view_get_buffer(tv);
+  GtkTextIter end_it;
+  gtk_text_buffer_get_end_iter(buf, &end_it);
+  gtk_text_buffer_insert(buf, &end_it, "Unsaved line.\n", -1);
+  assert_true(bt_editorpane_is_dirty(ed));
+
+  /* Inject write failure -> navigation to b.md MUST abort and keep a.md open & dirty. */
+  bt_app_set_fail_next_save_for_test(app, TRUE);
+  GError *nav_err = NULL;
+  assert_false(bt_app_open_note(app, "b.md", &nav_err));
+  assert_non_null(nav_err);
+  g_clear_error(&nav_err);
+  assert_string_equal(bt_app_active_note(app), "a.md");
+  assert_true(bt_editorpane_is_dirty(ed));
+  assert_non_null(strstr(bt_app_last_statusbar_notice(app), "Save failed"));
+
+  /* Now allow write -> navigating to b.md flushes a.md atomically to disk first. */
+  assert_true(bt_app_open_note(app, "b.md", NULL));
+  assert_string_equal(bt_app_active_note(app), "b.md");
+  g_autofree gchar *disk_a = NULL;
+  g_autofree gchar *path_a = g_build_filename(root, "a.md", NULL);
+  assert_true(g_file_get_contents(path_a, &disk_a, NULL, NULL));
+  assert_non_null(strstr(disk_a, "Unsaved line."));
+
+  printf("BT_TEST_L2_5 flush_blocks_on_error=1 flushed_on_success=1\n");
+  GtkWindow *win = bt_app_window(app);
+  if (win) gtk_window_destroy(win);
+  bt_app_free(app);
+  bt_test_rm_rf(root);
+  bt_test_rm_rf(cfg);
+  g_free(root);
+  g_free(cfg);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
     cmocka_unit_test(test_l2_1_incremental_500_seeded_edits),
     cmocka_unit_test(test_l2_2_click_and_gesture_rules),
     cmocka_unit_test(test_l2_3_hover_styles_and_tooltips),
+    cmocka_unit_test(test_l2_5_flush_before_navigation),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }
