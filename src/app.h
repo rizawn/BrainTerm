@@ -25,6 +25,11 @@ gboolean bt_app_save_last_vault(const gchar *vault_path, GError **error);
 const gchar *bt_app_resolve_page_name(const gchar *saved);
 gchar *bt_app_load_saved_page(void);
 void bt_app_save_page(const gchar *page);
+gboolean bt_app_load_links_open_on_click(void);
+gboolean bt_app_save_links_open_on_click(gboolean enabled, GError **error);
+void bt_app_set_links_open_on_click(BtApp *app, gboolean enabled, gboolean persist);
+gboolean bt_app_get_links_open_on_click(const BtApp *app);
+gpointer bt_app_application(const BtApp *app);
 
 /* Accessors used by UI panes. */
 BtVault *bt_app_vault(const BtApp *app);

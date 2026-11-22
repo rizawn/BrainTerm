@@ -684,6 +684,110 @@ static void test_l2_6_nav_history_5_jumps_and_deleted_skip(void **state)
   g_free(cfg);
 }
 
+static void test_l2_7_settings_persistence(void **state)
+{
+  (void)state;
+  if (!gtk_init_check()) {
+    skip();
+    return;
+  }
+  adw_init();
+
+  gchar *root = g_dir_make_tmp("bt-l27-XXXXXX", NULL);
+  gchar *cfg = g_dir_make_tmp("bt-cfg27-XXXXXX", NULL);
+  g_setenv("BT_CONFIG_DIR", cfg, TRUE);
+  const gchar *a_txt = "# A\nGo to [[b]] now.\n";
+  bt_test_put(root, "a.md", a_txt);
+  bt_test_put(root, "b.md", "# B\nTarget note.\n");
+
+  /* Default when state.ini does not exist yet is TRUE. */
+  assert_true(bt_app_load_links_open_on_click());
+
+  BtApp *app1 = bt_app_new();
+  bt_app_prepare_ui_for_test(app1);
+  assert_true(bt_app_open_vault(app1, root, NULL));
+  assert_true(bt_app_open_note(app1, "a.md", NULL));
+
+  BtEditorPane *ed1 = (BtEditorPane *)bt_app_editor(app1);
+  assert_true(bt_app_get_links_open_on_click(app1));
+  assert_true(bt_editorpane_get_links_open_on_click(ed1));
+
+  /* Toggle menu action to FALSE -> persists [editor] links_open_on_click = false. */
+  GActionMap *amap1 = G_ACTION_MAP(bt_app_application(app1));
+  GAction *act1 = g_action_map_lookup_action(amap1, "links-single-click");
+  assert_non_null(act1);
+  g_action_change_state(act1, g_variant_new_boolean(FALSE));
+  assert_false(bt_app_get_links_open_on_click(app1));
+  assert_false(bt_editorpane_get_links_open_on_click(ed1));
+  assert_false(bt_app_load_links_open_on_click());
+
+  g_autofree gchar *ini_path = bt_app_state_file_path();
+  g_autofree gchar *ini_raw = NULL;
+  assert_true(g_file_get_contents(ini_path, &ini_raw, NULL, NULL));
+  assert_non_null(strstr(ini_raw, "[editor]"));
+  assert_non_null(strstr(ini_raw, "links_open_on_click=false"));
+
+  /* With single-click disabled, bare click on [[b]] stays on a.md; Ctrl+Click opens b.md. */
+  gsize off_b = (gsize)(strstr(a_txt, "[[b]]") + 2 - a_txt);
+  bt_editorpane_set_caret_byte_offset(ed1, 0);
+  assert_false(bt_editorpane_simulate_click(ed1, off_b, 1, 1, 0.0, 0.0, 0));
+  assert_string_equal(bt_app_active_note(app1), "a.md");
+  bt_editorpane_set_caret_byte_offset(ed1, 0);
+  assert_true(bt_editorpane_simulate_click(ed1, off_b, 1, 1, 0.0, 0.0, GDK_CONTROL_MASK));
+  assert_string_equal(bt_app_active_note(app1), "b.md");
+
+  GtkWindow *w1 = bt_app_window(app1);
+  if (w1) gtk_window_destroy(w1);
+  bt_app_free(app1);
+
+  /* Restart app with same config dir -> loads FALSE on startup. */
+  BtApp *app2 = bt_app_new();
+  bt_app_prepare_ui_for_test(app2);
+  assert_true(bt_app_open_vault(app2, root, NULL));
+  assert_true(bt_app_open_note(app2, "a.md", NULL));
+  BtEditorPane *ed2 = (BtEditorPane *)bt_app_editor(app2);
+  assert_false(bt_app_get_links_open_on_click(app2));
+  assert_false(bt_editorpane_get_links_open_on_click(ed2));
+
+  GAction *act2 = g_action_map_lookup_action(G_ACTION_MAP(bt_app_application(app2)),
+                                             "links-single-click");
+  assert_non_null(act2);
+  GVariant *st2 = g_action_get_state(act2);
+  assert_false(g_variant_get_boolean(st2));
+  g_variant_unref(st2);
+
+  bt_editorpane_set_caret_byte_offset(ed2, 0);
+  assert_false(bt_editorpane_simulate_click(ed2, off_b, 1, 1, 0.0, 0.0, 0));
+  assert_string_equal(bt_app_active_note(app2), "a.md");
+
+  /* Re-enable single-click, persist, and confirm on 3rd app instance. */
+  g_action_change_state(act2, g_variant_new_boolean(TRUE));
+  assert_true(bt_app_load_links_open_on_click());
+  GtkWindow *w2 = bt_app_window(app2);
+  if (w2) gtk_window_destroy(w2);
+  bt_app_free(app2);
+
+  BtApp *app3 = bt_app_new();
+  bt_app_prepare_ui_for_test(app3);
+  assert_true(bt_app_open_vault(app3, root, NULL));
+  assert_true(bt_app_open_note(app3, "a.md", NULL));
+  BtEditorPane *ed3 = (BtEditorPane *)bt_app_editor(app3);
+  assert_true(bt_app_get_links_open_on_click(app3));
+  assert_true(bt_editorpane_get_links_open_on_click(ed3));
+  bt_editorpane_set_caret_byte_offset(ed3, 0);
+  assert_true(bt_editorpane_simulate_click(ed3, off_b, 1, 1, 0.0, 0.0, 0));
+  assert_string_equal(bt_app_active_note(app3), "b.md");
+
+  printf("BT_TEST_L2_7 settings_persisted=1 restart_verified=1\n");
+  GtkWindow *w3 = bt_app_window(app3);
+  if (w3) gtk_window_destroy(w3);
+  bt_app_free(app3);
+  bt_test_rm_rf(root);
+  bt_test_rm_rf(cfg);
+  g_free(root);
+  g_free(cfg);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -694,6 +798,7 @@ int main(void)
     cmocka_unit_test(test_l2_4_dispatcher_and_launcher_mock),
     cmocka_unit_test(test_l2_8_unresolved_click_does_not_call_stub_writer),
     cmocka_unit_test(test_l2_6_nav_history_5_jumps_and_deleted_skip),
+    cmocka_unit_test(test_l2_7_settings_persistence),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

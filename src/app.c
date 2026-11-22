@@ -100,6 +100,7 @@ struct BtApp {
 
   BtNavHistory *nav;
   gboolean nav_replaying;
+  gboolean links_open_on_click;
 };
 
 /* ----------------------------------------------------- state.ini (§7.5) -- */
@@ -255,6 +256,55 @@ static BtUiScheme load_saved_scheme(void)
 static void save_scheme(BtUiScheme sc)
 {
   save_state_str("ui", "scheme", bt_scheme_to_string(sc), NULL);
+}
+
+gboolean bt_app_load_links_open_on_click(void)
+{
+  gchar *path = bt_app_state_file_path();
+  GKeyFile *kf = g_key_file_new();
+  gboolean val = TRUE; /* ADR-016 default: single-click opens links */
+  if (g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL)) {
+    gchar *v = g_key_file_get_string(kf, "editor", "links_open_on_click", NULL);
+    if (v != NULL) {
+      val = (g_strcmp0(v, "0") != 0 && g_ascii_strcasecmp(v, "false") != 0);
+      g_free(v);
+    }
+  }
+  g_key_file_unref(kf);
+  g_free(path);
+  return val;
+}
+
+gboolean bt_app_save_links_open_on_click(gboolean enabled, GError **error)
+{
+  return save_state_str("editor", "links_open_on_click", enabled ? "true" : "false", error);
+}
+
+void bt_app_set_links_open_on_click(BtApp *app, gboolean enabled, gboolean persist)
+{
+  if (app == NULL)
+    return;
+  app->links_open_on_click = enabled ? TRUE : FALSE;
+  if (app->editor != NULL)
+    bt_editorpane_set_links_open_on_click(app->editor, app->links_open_on_click);
+  if (app->adw_app != NULL) {
+    GAction *act = g_action_map_lookup_action(G_ACTION_MAP(app->adw_app), "links-single-click");
+    if (act != NULL && G_IS_SIMPLE_ACTION(act))
+      g_simple_action_set_state(G_SIMPLE_ACTION(act),
+                                g_variant_new_boolean(app->links_open_on_click));
+  }
+  if (persist)
+    bt_app_save_links_open_on_click(app->links_open_on_click, NULL);
+}
+
+gboolean bt_app_get_links_open_on_click(const BtApp *app)
+{
+  return app ? app->links_open_on_click : TRUE;
+}
+
+gpointer bt_app_application(const BtApp *app)
+{
+  return app ? app->adw_app : NULL;
 }
 
 /* ------------------------------------------- Ink theme runtime switch -- */
@@ -2354,6 +2404,14 @@ static void act_nav_forward(GSimpleAction *a, GVariant *p, gpointer ud)
   bt_app_navigate_forward((BtApp *)ud);
 }
 
+static void act_links_single_click_state(GSimpleAction *a, GVariant *value, gpointer ud)
+{
+  (void)a;
+  BtApp *app = ud;
+  gboolean en = g_variant_get_boolean(value);
+  bt_app_set_links_open_on_click(app, en, TRUE);
+}
+
 static void act_checkpoint(GSimpleAction *a, GVariant *p, gpointer ud)
 {
   (void)a; (void)p;
@@ -2485,6 +2543,7 @@ static const GActionEntry app_actions[] = {
   {"toggle-graph-debug", act_toggle_graph_debug, NULL, NULL, NULL, {0}},
   {"nav-back", act_nav_back, NULL, NULL, NULL, {0}},
   {"nav-forward", act_nav_forward, NULL, NULL, NULL, {0}},
+  {"links-single-click", NULL, NULL, "true", act_links_single_click_state, {0}},
   {"preferences", act_preferences, NULL, NULL, NULL, {0}},
   {"about", act_about, NULL, NULL, NULL, {0}},
   {"quit", act_quit, NULL, NULL, NULL, {0}},
@@ -2645,6 +2704,7 @@ static GMenu *build_primary_menu(void)
   g_menu_append_section(m, NULL, G_MENU_MODEL(s2));
 
   GMenu *s3 = g_menu_new();
+  g_menu_append(s3, "Open links with single click", "app.links-single-click");
   g_menu_append(s3, "Preferences", "app.preferences");
   g_menu_append(s3, "About BrainTerm", "app.about");
   g_menu_append_section(m, NULL, G_MENU_MODEL(s3));
@@ -2782,6 +2842,10 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
   bt_filetree_set_action_cb(app->tree, on_tree_action, app);
   app->editor = bt_editorpane_new(on_editor_save, on_editor_link, on_editor_dirty, app);
   bt_editorpane_set_conflict_cbs(app->editor, on_editor_conflict_diff, on_editor_conflict_reload);
+  if (app->capture_dir == NULL)
+    bt_app_set_links_open_on_click(app, bt_app_load_links_open_on_click(), FALSE);
+  else
+    bt_app_set_links_open_on_click(app, TRUE, FALSE);
   app->graphview = bt_graphview_new(on_graph_open_note, on_tree_open_term, app);
   bt_graphview_set_rename_cb(app->graphview, on_graph_rename_note, app);
   if (!app->smoke_test && app->capture_dir == NULL) {
@@ -3092,6 +3156,7 @@ BtApp *bt_app_new(void)
   BtApp *app = g_new0(BtApp, 1);
   bt_agents_detect(&app->agents);
   app->nav = bt_nav_history_new();
+  app->links_open_on_click = TRUE;
   app->scheme = BT_SCHEME_DARK;
   app->confirm_external_urls = TRUE;
   app->adw_app = adw_application_new("local.brainterm.App", G_APPLICATION_NON_UNIQUE);

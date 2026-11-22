@@ -1847,6 +1847,7 @@ BtEditorPane *bt_editorpane_new(BtEditorSaveFn on_save, BtEditorLinkFn on_link,
   g_signal_connect(pane->view, "query-tooltip", G_CALLBACK(on_editor_query_tooltip), pane);
 
   pane->scrolled = gtk_scrolled_window_new();
+  g_object_add_weak_pointer(G_OBJECT(pane->scrolled), (gpointer *)&pane->scrolled);
   gtk_widget_set_name(pane->scrolled, "bt-editor-scrolled");
   gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(pane->scrolled), GTK_WIDGET(pane->view));
   gtk_widget_set_vexpand(pane->scrolled, TRUE);
@@ -2172,6 +2173,8 @@ void bt_editorpane_free(BtEditorPane *pane)
     return;
   if (pane->view != NULL)
     g_object_remove_weak_pointer(G_OBJECT(pane->view), (gpointer *)&pane->view);
+  if (pane->scrolled != NULL)
+    g_object_remove_weak_pointer(G_OBJECT(pane->scrolled), (gpointer *)&pane->scrolled);
   clear_anchor_flash(pane);
   clear_hover_state(pane);
   cancel_autosave(pane);
@@ -2421,7 +2424,8 @@ void bt_editorpane_set_scroll_y(BtEditorPane *pane, gdouble scroll_y)
   pane->tracked_scroll_y = scroll_y;
   pane->pending_scroll_y = scroll_y;
   pane->has_pending_scroll = TRUE;
-  if (!apply_pending_scroll(pane) && pane->scroll_idle_id == 0)
+  if (!apply_pending_scroll(pane) && pane->scroll_idle_id == 0 &&
+      pane->view != NULL && gtk_widget_get_realized(GTK_WIDGET(pane->view)))
     pane->scroll_idle_id = g_idle_add(on_scroll_idle, pane);
 }
 
