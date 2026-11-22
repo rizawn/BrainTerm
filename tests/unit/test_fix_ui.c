@@ -328,11 +328,11 @@ static void test_dual_pane_editor_and_graph(void **state)
     skip();
 
   GtkWidget *win = adw_application_window_new(NULL);
-  gtk_window_set_default_size(GTK_WINDOW(win), 1024, 700);
+  gtk_window_set_default_size(GTK_WINDOW(win), 1000, 680);
 
   BtEditorPane *ed = bt_editorpane_new(NULL, NULL, NULL, NULL);
   BtGraphView *gv = bt_graphview_new(NULL, NULL, NULL);
-  static const gchar note[] = "# Dual Pane\nEditor left, Graph right.\n";
+  static const gchar note[] = "# Dual Pane\nEditor left, Graph right.\n\n## AI draft\nProposed summary.\n";
   bt_editorpane_load(ed, "dual.md", note, strlen(note));
 
   AdwViewStack *stack = ADW_VIEW_STACK(adw_view_stack_new());

@@ -41,6 +41,10 @@ struct BtApp {
   GtkWidget *seg_editor;
   GtkWidget *seg_sessions;
   GtkWidget *seg_graph;
+  GtkWidget *status_vault_lbl;
+  GtkWidget *status_notes_lbl;
+  GtkWidget *status_git_box;
+  GtkWidget *status_git_lbl;
   BtThemeLoader *themeloader;
 
   BtVault *vault;
@@ -59,6 +63,7 @@ struct BtApp {
   gboolean syncing_nav;
   gboolean term_fullscreen;
   gboolean allow_launch_without_checkpoint; /* R10: FALSE by default */
+  gchar last_checkpoint_oid[BT_OID_HEX_LEN];
 
   gchar *cli_vault;
   gboolean smoke_test;
@@ -223,6 +228,33 @@ static void install_theme(BtApp *app)
 
 /* ----------------------------------------------------------- UI helpers -- */
 
+static void update_statusbar(BtApp *app)
+{
+  if (app->status_vault_lbl == NULL)
+    return;
+  if (app->vault != NULL) {
+    g_autofree gchar *base = g_path_get_basename(vault_root(app->vault));
+    gtk_label_set_text(GTK_LABEL(app->status_vault_lbl), base);
+    g_autofree gchar *nc = g_strdup_printf("%u notes", vault_notes(app->vault)->len);
+    gtk_label_set_text(GTK_LABEL(app->status_notes_lbl), nc);
+  } else {
+    gtk_label_set_text(GTK_LABEL(app->status_vault_lbl), "No vault");
+    gtk_label_set_text(GTK_LABEL(app->status_notes_lbl), "0 notes");
+  }
+  if (app->status_git_lbl != NULL && app->status_git_box != NULL) {
+    gtk_widget_remove_css_class(app->status_git_box, "bt-status-ok");
+    if (app->last_checkpoint_oid[0] != '\0') {
+      g_autofree gchar *gs = g_strdup_printf("checkpoint %.8s", app->last_checkpoint_oid);
+      gtk_label_set_text(GTK_LABEL(app->status_git_lbl), gs);
+      gtk_widget_add_css_class(app->status_git_box, "bt-status-ok");
+    } else if (app->vault != NULL) {
+      gtk_label_set_text(GTK_LABEL(app->status_git_lbl), "checkpoint ready");
+    } else {
+      gtk_label_set_text(GTK_LABEL(app->status_git_lbl), "no git checkpoint");
+    }
+  }
+}
+
 static void update_header(BtApp *app)
 {
   if (app->win_title == NULL)
@@ -247,6 +279,7 @@ static void update_header(BtApp *app)
     if (app->sidebar_vault_lbl != NULL)
       gtk_label_set_text(GTK_LABEL(app->sidebar_vault_lbl), "Vault");
   }
+  update_statusbar(app);
 }
 
 static void show_toast(BtApp *app, const gchar *msg, guint timeout_s)
@@ -320,6 +353,7 @@ gboolean bt_app_open_vault(BtApp *app, const gchar *path, GError **error)
   if (app->vault != NULL)
     vault_free(app->vault);
   app->vault = v;
+  app->last_checkpoint_oid[0] = '\0';
 
   if (!app->smoke_test) {
     gboolean differs = FALSE;
@@ -576,6 +610,8 @@ static void launch_agent(BtApp *app, BtAgentKind kind)
     g_clear_error(&err);
   } else {
     g_free(cmsg);
+    g_strlcpy(app->last_checkpoint_oid, oid, sizeof(app->last_checkpoint_oid));
+    update_statusbar(app);
     show_toast(app, "Checkpoint saved", 2);
   }
 
@@ -1047,6 +1083,8 @@ static void act_checkpoint(GSimpleAction *a, GVariant *p, gpointer ud)
   gchar oid[BT_OID_HEX_LEN] = {0};
   GError *err = NULL;
   if (bt_checkpoint_take(vault_root(app->vault), "bt-manual checkpoint", oid, &err)) {
+    g_strlcpy(app->last_checkpoint_oid, oid, sizeof(app->last_checkpoint_oid));
+    update_statusbar(app);
     gchar *msg = g_strdup_printf("Checkpoint %.8s", oid);
     show_toast(app, msg, 2);
     g_free(msg);
@@ -1487,9 +1525,38 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
   app->toast_overlay = ADW_TOAST_OVERLAY(adw_toast_overlay_new());
   adw_toast_overlay_set_child(app->toast_overlay, GTK_WIDGET(app->split_view));
 
+  /* Slim 24px bottom status bar: vault name, note count, git checkpoint status */
+  GtkWidget *sbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+  gtk_widget_set_name(sbar, "bt-statusbar");
+  gtk_widget_add_css_class(sbar, "bt-statusbar");
+
+  GtkWidget *sv_ico = gtk_image_new_from_icon_name("bt-folder-symbolic");
+  gtk_image_set_pixel_size(GTK_IMAGE(sv_ico), 12);
+  app->status_vault_lbl = gtk_label_new("No vault");
+  gtk_widget_add_css_class(app->status_vault_lbl, "bt-status-strong");
+  GtkWidget *s_sep = gtk_label_new("·");
+  app->status_notes_lbl = gtk_label_new("0 notes");
+  GtkWidget *spacer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+  gtk_widget_set_hexpand(spacer, TRUE);
+
+  app->status_git_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+  GtkWidget *sg_ico = gtk_image_new_from_icon_name("bt-git-symbolic");
+  gtk_image_set_pixel_size(GTK_IMAGE(sg_ico), 12);
+  app->status_git_lbl = gtk_label_new("no git checkpoint");
+  gtk_box_append(GTK_BOX(app->status_git_box), sg_ico);
+  gtk_box_append(GTK_BOX(app->status_git_box), app->status_git_lbl);
+
+  gtk_box_append(GTK_BOX(sbar), sv_ico);
+  gtk_box_append(GTK_BOX(sbar), app->status_vault_lbl);
+  gtk_box_append(GTK_BOX(sbar), s_sep);
+  gtk_box_append(GTK_BOX(sbar), app->status_notes_lbl);
+  gtk_box_append(GTK_BOX(sbar), spacer);
+  gtk_box_append(GTK_BOX(sbar), app->status_git_box);
+
   GtkWidget *tview = adw_toolbar_view_new();
   adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(tview), header);
   adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(tview), GTK_WIDGET(app->toast_overlay));
+  adw_toolbar_view_add_bottom_bar(ADW_TOOLBAR_VIEW(tview), sbar);
   adw_application_window_set_content(ADW_APPLICATION_WINDOW(app->window), tview);
 
   /* Apply persisted scheme (dark-first default) before presenting. */

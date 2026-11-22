@@ -134,3 +134,17 @@ Key observations from probe + remote-CWD run (`lang=none` from `%TEMP%`):
 3. **`src/ui/filetree.c` & `src/ui/sessionspanel.c`**: Set `hexpand`/`vexpand` on `tree->scrolled` (`bt-filetree` expands from `259x58` to `259x717`) and `bt-sessions-box` + its scrolled container.
 4. **`src/app.c` & `src/app.h`**: Set explicit `hexpand`/`vexpand` on `view_stack` and `right_paned` (`shrink_* = FALSE`), set explicit startup page via `bt_app_resolve_page_name()` + `bt_app_load_saved_page()` (`[ui] page` in `state.ini` with defensive fallback to `"editor"` for missing/obsolete values), persist valid page switches and queue graph redraw on `"notify::visible-child-name"`, and switch `view_stack` to `"editor"` (clearing `term_fullscreen`) before the already-open early return in `bt_app_open_note()`.
 5. **`src/graphview.c` (`bt_graph_draw_cairo`)**: Hoisted `cairo_stroke(cr)` out of the 3,000-edge loop into a single batched stroke pass so 1k-node / 3k-edge frames stay cleanly inside the 16.6 ms / 60 fps budget even under `-O0` debug builds.
+
+---
+
+## Dusk UI Redesign — 2026-11-22
+
+### 18. Supersedes monochrome Ink with "Dusk" dark theme (`data/theme.css`, `src/theme.h`)
+Replaces `data/bt-ink.css` and the grayscale-only `test_ink_theme` gate with a calm dark surface hierarchy (`#0E0F12` base, `#15171C` surface-1 cards, `#1B1E24` surface-2, `#262A32` / `#343944` borders, `#E6E8EC` / `#9AA1AD` / `#666D79` text) and `#8B7CF6` violet accent (+ `#4ADE80` / `#FBBF24` / `#F87171` status tokens). `tests/unit/test_theme.c` enforces exact `theme.css` ↔ `theme.h` parity, zero CSS parse errors, and WCAG AA contrast (`>= 4.5:1`). `BRAINTERM_CSS_DEV=<path>` enables live hot-reloading via `GFileMonitor`.
+
+### 19. Stray vertical line & lone square node in Brain Graph (`src/graphview.c`)
+- **Stray vertical line**: Intentional leftover from an earlier "spine guide line" (`cairo_move_to(0, -240); cairo_line_to(0, 260)`) that bisected the canvas unconditionally even with few notes. Removed and replaced with a faint dot grid across the `surface-1` canvas.
+- **Lone square node**: `src/graph.c` intentionally creates a `BT_NODE_SESSION` square at `y = +260` for each recorded terminal/agent session in `.bt/sessions.json` (which starts with 1 shell session on vault open). Kept the data model untouched (UI-layer-only rule) and redesigned session nodes as rounded bordered badges sitting beneath a short horizontal `"sessions"` dock divider so they read as intentional session indicators rather than a stray artifact.
+
+### 20. Font bundling & symbolic icons (`src/ui/themeload.c`, `scripts/gen_icons.py`)
+Bundled OFL-licensed `InterVariable.ttf` and `JetBrainsMono-{Regular,Bold}.ttf` under `data/fonts/` (registered via `AddFontResourceExW(..., FR_PRIVATE, 0)` on Windows and `FcConfigAppFontAddFile` + `PangoFc` on Linux/Unix, with CSS/Pango fallback to `Segoe UI Variable` / `Cascadia Mono` / `Consolas`), plus 16 Lucide-style filled-outline symbolic SVGs compiled into `brainterm.gresource.xml`.
