@@ -1,5 +1,6 @@
 /* graph.c — Brain Graph model + deterministic spine/brainstem/cortex layout. */
 #include "graph.h"
+#include "linkresolve.h"
 #include "noteutil.h"
 
 #include <math.h>
@@ -64,6 +65,8 @@ BtGraph *bt_graph_build(const BtVault *vault, BtIndex *index, const BtSessionSto
   GHashTable *id_map = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
   GHashTable *path_map = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
   GHashTable *stem_map = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+  GHashTable *node_rel_map = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+  BtIndexSnapshot *snap = vault ? bt_index_snapshot_from_vault(vault) : bt_index_snapshot_new();
 
   /* 1. Every indexed note is ALWAYS one node (§6.C2 invariant). */
   GPtrArray *notes = bt_index_list_notes(index, NULL);
@@ -75,6 +78,10 @@ BtGraph *bt_graph_build(const BtVault *vault, BtIndex *index, const BtSessionSto
     g->note_node_count++;
 
     g_hash_table_insert(path_map, g_ascii_strdown(r->path, -1), GUINT_TO_POINTER(idx + 1));
+    g_hash_table_insert(node_rel_map, g_strdup(r->id), g_strdup(r->path));
+    if (vault == NULL)
+      bt_index_snapshot_add_entry(snap, r->path, FALSE, (r->title && r->title[0]) ? r->title : NULL,
+                                  NULL);
     gchar *base = g_path_get_basename(r->path);
     gsize bl = strlen(base);
     if (bl > 3 && g_ascii_strcasecmp(base + bl - 3, ".md") == 0)
@@ -113,6 +120,7 @@ BtGraph *bt_graph_build(const BtVault *vault, BtIndex *index, const BtSessionSto
     }
   }
   g_clear_pointer(&notes, g_ptr_array_unref);
+  bt_index_snapshot_finalize(snap);
 
   /* 2. Edges + Tag nodes + Ghost nodes. */
   GPtrArray *edges = bt_index_list_edges(index, NULL);
@@ -145,42 +153,56 @@ BtGraph *bt_graph_build(const BtVault *vault, BtIndex *index, const BtSessionSto
         continue;
       dst_idx = GPOINTER_TO_UINT(dp) - 1;
     } else {
-      /* link edge: resolve by id, relpath, or stem; else create ghost node! */
+      /* link edge: share bt_link_resolve() with editor so ghost iff UNRESOLVED (§A.5). */
       ek = BT_EDGE_LINK;
       gpointer dp = g_hash_table_lookup(id_map, er->dst);
       if (dp == NULL) {
-        gchar *low = g_ascii_strdown(er->dst, -1);
-        gchar *low_md = g_str_has_suffix(low, ".md") ? g_strdup(low) : g_strconcat(low, ".md", NULL);
-        dp = g_hash_table_lookup(path_map, low_md);
-        if (dp == NULL)
-          dp = g_hash_table_lookup(stem_map, low);
-        g_free(low_md);
-        g_free(low);
-      }
-      if (dp != NULL) {
-        dst_idx = GPOINTER_TO_UINT(dp) - 1;
-      } else {
-        gchar *gid = g_strdup_printf("ghost:%s", er->dst);
-        gpointer gp = g_hash_table_lookup(id_map, gid);
-        if (gp == NULL) {
-          gchar *new_rel = bt_wikilink_new_note_path(er->dst);
-          gboolean broken = TRUE;
-          if (vault != NULL && new_rel != NULL) {
-            gchar *chk = vault_resolve(vault, new_rel, NULL);
-            broken = (chk == NULL);
-            g_free(chk);
+        const gchar *src_rel = g_hash_table_lookup(node_rel_map, er->src);
+        BtLinkResolution *lres = bt_link_resolve(snap, src_rel, er->dst);
+        if (lres != NULL &&
+            (lres->status == BT_LINK_RESOLVED || lres->status == BT_LINK_AMBIGUOUS)) {
+          if (lres->kind == BT_LINK_KIND_NOTE && lres->path != NULL) {
+            gchar *low_p = g_ascii_strdown(lres->path, -1);
+            dp = g_hash_table_lookup(path_map, low_p);
+            g_free(low_p);
+          } else {
+            /* Existing non-note file, directory, or same-note anchor: not a ghost note. */
+            bt_link_resolution_free(lres);
+            continue;
           }
-          dst_idx = add_node(g, id_map, gid, er->dst, broken ? NULL : new_rel, NULL, BT_NODE_GHOST,
-                             0);
-          BtGraphNode *gn = g_ptr_array_index(g->nodes, dst_idx);
-          gn->broken = broken;
-          gn->radius = 5.5;
-          g->ghost_node_count++;
-          g_free(new_rel);
-        } else {
-          dst_idx = GPOINTER_TO_UINT(gp) - 1;
+        } else if (lres != NULL && lres->status == BT_LINK_EXTERNAL) {
+          bt_link_resolution_free(lres);
+          continue;
         }
-        g_free(gid);
+
+        if (dp != NULL) {
+          dst_idx = GPOINTER_TO_UINT(dp) - 1;
+        } else {
+          gboolean broken = (lres != NULL && lres->status == BT_LINK_BLOCKED);
+          gchar *gid = g_strdup_printf("ghost:%s", er->dst);
+          gpointer gp = g_hash_table_lookup(id_map, gid);
+          if (gp == NULL) {
+            gchar *new_rel = broken ? NULL : bt_wikilink_new_note_path(er->dst);
+            if (!broken && vault != NULL && new_rel != NULL) {
+              gchar *chk = vault_resolve(vault, new_rel, NULL);
+              broken = (chk == NULL);
+              g_free(chk);
+            }
+            dst_idx = add_node(g, id_map, gid, er->dst, broken ? NULL : new_rel, NULL,
+                               BT_NODE_GHOST, 0);
+            BtGraphNode *gn = g_ptr_array_index(g->nodes, dst_idx);
+            gn->broken = broken;
+            gn->radius = 5.5;
+            g->ghost_node_count++;
+            g_free(new_rel);
+          } else {
+            dst_idx = GPOINTER_TO_UINT(gp) - 1;
+          }
+          g_free(gid);
+        }
+        bt_link_resolution_free(lres);
+      } else {
+        dst_idx = GPOINTER_TO_UINT(dp) - 1;
       }
     }
 
@@ -227,6 +249,8 @@ BtGraph *bt_graph_build(const BtVault *vault, BtIndex *index, const BtSessionSto
       n->radius = 7.0;
   }
 
+  bt_index_snapshot_free(snap);
+  g_hash_table_destroy(node_rel_map);
   g_hash_table_destroy(id_map);
   g_hash_table_destroy(path_map);
   g_hash_table_destroy(stem_map);

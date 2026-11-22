@@ -13,7 +13,7 @@
 
 G_BEGIN_DECLS
 
-#define BT_SCHEMA_VERSION 1
+#define BT_SCHEMA_VERSION 2
 
 typedef struct BtIndex BtIndex;
 
@@ -52,10 +52,21 @@ typedef struct {
   gdouble weight;
 } BtEdgeRow;
 
+typedef struct {
+  gchar *src_note_id;
+  gchar *src_path;
+  gchar *raw_target;
+  gchar *resolved_path; /* NULL when unresolved/external/blocked */
+  gchar *status;        /* "resolved" | "ambiguous" | "unresolved" | "external" | "blocked" */
+  gchar *kind;          /* "note" | "file" | "dir" | "url" | "same_note" */
+  gint line_no;
+} BtLinkResRow;
+
 void bt_search_hit_free(gpointer hit);
 void bt_note_row_free(gpointer row);
 void bt_tag_row_free(gpointer row);
 void bt_edge_row_free(gpointer row);
+void bt_link_res_row_free(gpointer row);
 
 /* Opens vault/.bt/index.db on a dedicated single-writer thread (ADR-007).
  * Checks PRAGMA integrity_check (R2: if corrupt, deletes DB and sets
@@ -97,6 +108,7 @@ gboolean bt_index_session_end(BtIndex *idx, const gchar *id, gint64 ended, GErro
 GPtrArray *bt_index_list_notes(BtIndex *idx, GError **error);
 GPtrArray *bt_index_list_tags(BtIndex *idx, const gchar *note_id, GError **error);
 GPtrArray *bt_index_list_edges(BtIndex *idx, GError **error);
+GPtrArray *bt_index_list_link_resolutions(BtIndex *idx, const gchar *src_note_id, GError **error);
 gchar *bt_index_get_body_hash(BtIndex *idx, const gchar *relpath);
 
 /* Tag governance helpers (M6 human lock). */

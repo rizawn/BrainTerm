@@ -1,6 +1,7 @@
 /* index.c — SQLite L1 cache + FTS5 triggers + ADR-007 single-writer thread. */
 #include "index.h"
 #include "frontmatter.h"
+#include "linkresolve.h"
 #include "mdparse.h"
 #include "sessions.h"
 
@@ -68,6 +69,22 @@ static const char *const MIGRATION_0001_SQL =
     "  INSERT INTO notes_fts(rowid, title, body) VALUES (new.rowid, new.title, new.body);\n"
     "END;\n";
 
+/* Embedded migrations/0002_links_resolution.sql. */
+static const char *const MIGRATION_0002_SQL =
+    "CREATE TABLE link_resolutions(\n"
+    "  id INTEGER PRIMARY KEY AUTOINCREMENT,\n"
+    "  src_note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,\n"
+    "  src_path TEXT NOT NULL,\n"
+    "  raw_target TEXT NOT NULL,\n"
+    "  resolved_path TEXT,\n"
+    "  status TEXT NOT NULL CHECK(status IN ('resolved','ambiguous','unresolved','external','blocked')),\n"
+    "  kind TEXT NOT NULL CHECK(kind IN ('note','file','dir','url','same_note')),\n"
+    "  line_no INTEGER NOT NULL DEFAULT 1\n"
+    ");\n"
+    "CREATE INDEX idx_link_res_src ON link_resolutions(src_note_id);\n"
+    "CREATE INDEX idx_link_res_status ON link_resolutions(status);\n"
+    "CREATE INDEX idx_link_res_resolved ON link_resolutions(resolved_path);\n";
+
 void bt_search_hit_free(gpointer hit)
 {
   BtSearchHit *h = hit;
@@ -108,6 +125,19 @@ void bt_edge_row_free(gpointer row)
   if (!r) return;
   g_free(r->src);
   g_free(r->dst);
+  g_free(r->kind);
+  g_free(r);
+}
+
+void bt_link_res_row_free(gpointer row)
+{
+  BtLinkResRow *r = row;
+  if (!r) return;
+  g_free(r->src_note_id);
+  g_free(r->src_path);
+  g_free(r->raw_target);
+  g_free(r->resolved_path);
+  g_free(r->status);
   g_free(r->kind);
   g_free(r);
 }
@@ -275,8 +305,19 @@ static void job_open(sqlite3 *unused, gpointer ud)
   if (!idx->readonly && ver < BT_SCHEMA_VERSION) {
     if (!exec_sql(idx->db, "BEGIN IMMEDIATE;", c->error))
       return;
-    if (!exec_sql(idx->db, MIGRATION_0001_SQL, c->error) ||
-        !exec_sql(idx->db, "PRAGMA user_version=1; COMMIT;", c->error)) {
+    if (ver < 1) {
+      if (!exec_sql(idx->db, MIGRATION_0001_SQL, c->error)) {
+        sqlite3_exec(idx->db, "ROLLBACK;", NULL, NULL, NULL);
+        return;
+      }
+    }
+    if (ver < 2) {
+      if (!exec_sql(idx->db, MIGRATION_0002_SQL, c->error)) {
+        sqlite3_exec(idx->db, "ROLLBACK;", NULL, NULL, NULL);
+        return;
+      }
+    }
+    if (!exec_sql(idx->db, "PRAGMA user_version=2; COMMIT;", c->error)) {
       sqlite3_exec(idx->db, "ROLLBACK;", NULL, NULL, NULL);
       return;
     }
@@ -508,6 +549,12 @@ static gboolean upsert_in_db(sqlite3 *db, const gchar *relpath, const gchar *raw
     sqlite3_step(st);
     sqlite3_finalize(st);
   }
+  if (sqlite3_prepare_v2(db, "DELETE FROM link_resolutions WHERE src_note_id=?1;", -1, &st, NULL) ==
+      SQLITE_OK) {
+    sqlite3_bind_text(st, 1, note_id, -1, SQLITE_TRANSIENT);
+    sqlite3_step(st);
+    sqlite3_finalize(st);
+  }
 
   sqlite3_stmt *tins = NULL;
   sqlite3_stmt *eins = NULL;
@@ -565,7 +612,7 @@ static gboolean upsert_in_db(sqlite3 *db, const gchar *relpath, const gchar *raw
     sqlite3_step(eins);
   }
 
-  /* Link edges from both frontmatter links and MD4C body wiki-links. */
+  /* Link edges from frontmatter links + shared link scanner (excludes code & math spans). */
   for (guint i = 0; i < fm->links->len; i++) {
     const gchar *lnk = g_ptr_array_index(fm->links, i);
     gchar *clean = g_strdup(lnk);
@@ -582,15 +629,39 @@ static gboolean upsert_in_db(sqlite3 *db, const gchar *relpath, const gchar *raw
     sqlite3_step(eins);
     g_free(clean);
   }
-  for (guint i = 0; i < ex->wikilinks->len; i++) {
-    const gchar *lnk = g_ptr_array_index(ex->wikilinks, i);
-    sqlite3_reset(eins);
-    sqlite3_bind_text(eins, 1, note_id, -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(eins, 2, lnk, -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(eins, 3, "link", -1, SQLITE_STATIC);
-    sqlite3_bind_double(eins, 4, 1.0);
-    sqlite3_step(eins);
+
+  GArray *lspans = bt_link_scan(raw, raw_len);
+  sqlite3_stmt *lr_ins = NULL;
+  sqlite3_prepare_v2(
+      db,
+      "INSERT INTO link_resolutions(src_note_id, src_path, raw_target, resolved_path, status, kind, line_no) "
+      "VALUES(?1,?2,?3,NULL,'unresolved','note',?4);",
+      -1, &lr_ins, NULL);
+  for (guint i = 0; i < lspans->len; i++) {
+    const BtLinkSpan *sp = &g_array_index(lspans, BtLinkSpan, i);
+    if (lr_ins != NULL) {
+      sqlite3_reset(lr_ins);
+      sqlite3_bind_text(lr_ins, 1, note_id, -1, SQLITE_TRANSIENT);
+      sqlite3_bind_text(lr_ins, 2, relpath, -1, SQLITE_TRANSIENT);
+      sqlite3_bind_text(lr_ins, 3, sp->raw_target, -1, SQLITE_TRANSIENT);
+      sqlite3_bind_int(lr_ins, 4, (int)sp->line_no);
+      sqlite3_step(lr_ins);
+    }
+    if (sp->syntax == BT_LINK_SYNTAX_WIKILINK ||
+        (sp->syntax == BT_LINK_SYNTAX_MARKDOWN &&
+         g_ascii_strncasecmp(sp->raw_target, "http://", 7) != 0 &&
+         g_ascii_strncasecmp(sp->raw_target, "https://", 8) != 0 &&
+         g_ascii_strncasecmp(sp->raw_target, "mailto:", 7) != 0)) {
+      sqlite3_reset(eins);
+      sqlite3_bind_text(eins, 1, note_id, -1, SQLITE_TRANSIENT);
+      sqlite3_bind_text(eins, 2, sp->raw_target, -1, SQLITE_TRANSIENT);
+      sqlite3_bind_text(eins, 3, "link", -1, SQLITE_STATIC);
+      sqlite3_bind_double(eins, 4, 1.0);
+      sqlite3_step(eins);
+    }
   }
+  sqlite3_finalize(lr_ins);
+  g_array_unref(lspans);
 
   sqlite3_finalize(tins);
   sqlite3_finalize(eins);
@@ -612,12 +683,93 @@ fail:
   return FALSE;
 }
 
+static BtIndexSnapshot *snapshot_from_db_notes(sqlite3 *db)
+{
+  BtIndexSnapshot *snap = bt_index_snapshot_new();
+  sqlite3_stmt *st = NULL;
+  if (sqlite3_prepare_v2(db, "SELECT path, title FROM notes;", -1, &st, NULL) == SQLITE_OK) {
+    while (sqlite3_step(st) == SQLITE_ROW) {
+      const char *p = (const char *)sqlite3_column_text(st, 0);
+      const char *t = (const char *)sqlite3_column_text(st, 1);
+      if (p != NULL && p[0] != '\0')
+        bt_index_snapshot_add_entry(snap, p, FALSE, (t && t[0]) ? t : NULL, NULL);
+    }
+    sqlite3_finalize(st);
+  }
+  bt_index_snapshot_finalize(snap);
+  return snap;
+}
+
+static void re_resolve_all_in_db(sqlite3 *db, const BtVault *vault)
+{
+  BtIndexSnapshot *snap = vault ? bt_index_snapshot_from_vault(vault) : snapshot_from_db_notes(db);
+  if (snap == NULL)
+    return;
+
+  typedef struct {
+    sqlite3_int64 rowid;
+    gchar *src_path;
+    gchar *raw_target;
+  } PendingLR;
+  GPtrArray *rows = g_ptr_array_new_with_free_func(g_free);
+
+  sqlite3_stmt *sel = NULL;
+  if (sqlite3_prepare_v2(db, "SELECT id, src_path, raw_target FROM link_resolutions;", -1, &sel, NULL) ==
+      SQLITE_OK) {
+    while (sqlite3_step(sel) == SQLITE_ROW) {
+      PendingLR *p = g_new0(PendingLR, 1);
+      p->rowid = sqlite3_column_int64(sel, 0);
+      const char *sp = (const char *)sqlite3_column_text(sel, 1);
+      const char *rt = (const char *)sqlite3_column_text(sel, 2);
+      p->src_path = g_strdup(sp ? sp : "");
+      p->raw_target = g_strdup(rt ? rt : "");
+      g_ptr_array_add(rows, p);
+    }
+    sqlite3_finalize(sel);
+  }
+
+  sqlite3_stmt *upd = NULL;
+  if (sqlite3_prepare_v2(
+          db, "UPDATE link_resolutions SET resolved_path=?1, status=?2, kind=?3 WHERE id=?4;",
+          -1, &upd, NULL) == SQLITE_OK) {
+    for (guint i = 0; i < rows->len; i++) {
+      PendingLR *p = g_ptr_array_index(rows, i);
+      BtLinkResolution *res = bt_link_resolve(snap, p->src_path, p->raw_target);
+      const char *status_str = res ? bt_link_status_name(res->status) : "unresolved";
+      const char *kind_str = res ? bt_link_kind_name(res->kind) : "note";
+      sqlite3_reset(upd);
+      if (res != NULL && res->path != NULL)
+        sqlite3_bind_text(upd, 1, res->path, -1, SQLITE_TRANSIENT);
+      else
+        sqlite3_bind_null(upd, 1);
+      sqlite3_bind_text(upd, 2, status_str, -1, SQLITE_STATIC);
+      sqlite3_bind_text(upd, 3, kind_str, -1, SQLITE_STATIC);
+      sqlite3_bind_int64(upd, 4, p->rowid);
+      sqlite3_step(upd);
+      bt_link_resolution_free(res);
+      g_free(p->src_path);
+      g_free(p->raw_target);
+    }
+    sqlite3_finalize(upd);
+  } else {
+    for (guint i = 0; i < rows->len; i++) {
+      PendingLR *p = g_ptr_array_index(rows, i);
+      g_free(p->src_path);
+      g_free(p->raw_target);
+    }
+  }
+  g_ptr_array_unref(rows);
+  bt_index_snapshot_free(snap);
+}
+
 static void job_upsert(sqlite3 *db, gpointer ud)
 {
   UpsertCtx *c = ud;
   if (!exec_sql(db, "BEGIN IMMEDIATE;", c->error))
     return;
   c->ok = upsert_in_db(db, c->relpath, c->raw, c->raw_len, c->skipped, c->error);
+  if (c->ok && !(c->skipped != NULL && *c->skipped))
+    re_resolve_all_in_db(db, c->vault);
   if (c->ok)
     c->ok = exec_sql(db, "COMMIT;", c->error);
   else
@@ -656,6 +808,8 @@ static void job_delete_path(sqlite3 *db, gpointer ud)
     c->ok = sqlite3_step(st) == SQLITE_DONE;
     sqlite3_finalize(st);
   }
+  if (c->ok)
+    re_resolve_all_in_db(db, NULL);
 }
 
 gboolean bt_index_delete_path(BtIndex *idx, const gchar *relpath, GError **error)
@@ -674,7 +828,7 @@ typedef struct {
 static void job_rebuild(sqlite3 *db, gpointer ud)
 {
   RebuildCtx *c = ud;
-  if (!exec_sql(db, "BEGIN IMMEDIATE; DELETE FROM edges; DELETE FROM tags; DELETE FROM notes;",
+  if (!exec_sql(db, "BEGIN IMMEDIATE; DELETE FROM link_resolutions; DELETE FROM edges; DELETE FROM tags; DELETE FROM notes;",
                 c->error))
     return;
 
@@ -692,6 +846,7 @@ static void job_rebuild(sqlite3 *db, gpointer ud)
       return;
     }
   }
+  re_resolve_all_in_db(db, c->vault);
   c->ok = exec_sql(db, "COMMIT;", c->error);
 }
 
@@ -1048,6 +1203,43 @@ GPtrArray *bt_index_list_edges(BtIndex *idx, GError **error)
   (void)error;
   ListCtx c = {0};
   run_on_writer(idx, job_list_edges, &c);
+  return c.out;
+}
+
+static void job_list_link_resolutions(sqlite3 *db, gpointer ud)
+{
+  ListCtx *c = ud;
+  c->out = g_ptr_array_new_with_free_func(bt_link_res_row_free);
+  sqlite3_stmt *st = NULL;
+  const char *sql = c->arg
+      ? "SELECT src_note_id, src_path, raw_target, resolved_path, status, kind, line_no "
+        "FROM link_resolutions WHERE src_note_id=?1 ORDER BY line_no, id;"
+      : "SELECT src_note_id, src_path, raw_target, resolved_path, status, kind, line_no "
+        "FROM link_resolutions ORDER BY src_path, line_no, id;";
+  if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) == SQLITE_OK) {
+    if (c->arg != NULL)
+      sqlite3_bind_text(st, 1, c->arg, -1, SQLITE_TRANSIENT);
+    while (sqlite3_step(st) == SQLITE_ROW) {
+      BtLinkResRow *r = g_new0(BtLinkResRow, 1);
+      r->src_note_id = g_strdup((const char *)sqlite3_column_text(st, 0));
+      r->src_path = g_strdup((const char *)sqlite3_column_text(st, 1));
+      r->raw_target = g_strdup((const char *)sqlite3_column_text(st, 2));
+      const char *rp = (const char *)sqlite3_column_text(st, 3);
+      r->resolved_path = rp ? g_strdup(rp) : NULL;
+      r->status = g_strdup((const char *)sqlite3_column_text(st, 4));
+      r->kind = g_strdup((const char *)sqlite3_column_text(st, 5));
+      r->line_no = sqlite3_column_int(st, 6);
+      g_ptr_array_add(c->out, r);
+    }
+    sqlite3_finalize(st);
+  }
+}
+
+GPtrArray *bt_index_list_link_resolutions(BtIndex *idx, const gchar *src_note_id, GError **error)
+{
+  (void)error;
+  ListCtx c = {.arg = src_note_id};
+  run_on_writer(idx, job_list_link_resolutions, &c);
   return c.out;
 }
 

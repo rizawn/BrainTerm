@@ -14,6 +14,7 @@
 
 #include "graph.h"
 #include "index.h"
+#include "linkresolve.h"
 #include "sessions.h"
 #include "testutil.h"
 #include "vault.h"
@@ -97,10 +98,80 @@ static void test_graph_invariant_ghosts_layout_and_filters(void **state)
   g_free(root);
 }
 
+static void test_graph_ghost_equivalence_with_resolver(void **state)
+{
+  (void)state;
+  gchar *root = g_dir_make_tmp("bt-graph-eq-XXXXXX", NULL);
+  bt_test_put(root, "sub/MathStats.md",
+              "---\nid: bt-ms\ntitle: \"Math Stats\"\ncreated: 2026-11-23T00:00:00Z\nsource: human\n---\n"
+              "| 01 | [[chapter-01/01-intro.md]] | intro |\n"
+              "Alias link [[Boot Alias]], missing [[missing-one]], missing2 [[sub/missing-two]].\n"
+              "Asset [[assets/doc.pdf]] and math $[[math_ignored]]$.\n");
+  bt_test_put(root, "sub/chapter-01/01-intro.md",
+              "---\nid: bt-c1\ntitle: \"Intro\"\ncreated: 2026-11-23T00:00:00Z\nsource: human\n---\n"
+              "Back to [[Math Stats]].\n");
+  bt_test_put(root, "sub/chapter-13/02-boot.md",
+              "---\nid: bt-boot\ntitle: \"Bootstrap\"\ncreated: 2026-11-23T00:00:00Z\nsource: human\naliases: [\"Boot Alias\"]\n---\n"
+              "Body.\n");
+  bt_test_put(root, "assets/doc.pdf", "%PDF-1.4 dummy");
+
+  BtVault *v = vault_open(root, NULL, NULL);
+  BtIndex *idx = bt_index_open(root, NULL, NULL);
+  assert_true(bt_index_rebuild(idx, v, NULL));
+
+  BtGraph *g = bt_graph_build(v, idx, NULL);
+  BtIndexSnapshot *snap = bt_index_snapshot_from_vault(v);
+
+  /* Collect all ghost node labels built by graph.c */
+  GHashTable *ghost_labels = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+  for (guint i = 0; i < g->nodes->len; i++) {
+    const BtGraphNode *nd = g_ptr_array_index(g->nodes, i);
+    if (nd->kind == BT_NODE_GHOST)
+      g_hash_table_add(ghost_labels, g_strdup(nd->label));
+  }
+
+  /* Verify 1-to-1 equivalence: link in vault produces ghost iff resolver == BT_LINK_UNRESOLVED. */
+  const GPtrArray *notes = vault_notes(v);
+  guint unresolved_count = 0;
+  for (guint ni = 0; ni < notes->len; ni++) {
+    const gchar *rel = g_ptr_array_index(notes, ni);
+    g_autofree gchar *raw = NULL;
+    gsize rlen = 0;
+    assert_true(vault_read(v, rel, &raw, &rlen, NULL));
+    GArray *spans = bt_link_scan(raw, rlen);
+    for (guint si = 0; si < spans->len; si++) {
+      const BtLinkSpan *sp = &g_array_index(spans, BtLinkSpan, si);
+      BtLinkResolution *res = bt_link_resolve(snap, rel, sp->raw_target);
+      gboolean is_unresolved = (res != NULL && res->status == BT_LINK_UNRESOLVED);
+      gboolean in_ghosts = g_hash_table_contains(ghost_labels, sp->raw_target);
+      if (is_unresolved != in_ghosts) {
+        fail_msg("Equivalence mismatch for %s -> %s: unresolved=%d in_ghosts=%d",
+                 rel, sp->raw_target, is_unresolved, in_ghosts);
+      }
+      if (is_unresolved)
+        unresolved_count++;
+      bt_link_resolution_free(res);
+    }
+    g_array_unref(spans);
+  }
+  assert_int_equal(unresolved_count, 2);
+  assert_int_equal(g->ghost_node_count, 2);
+  assert_false(g_hash_table_contains(ghost_labels, "math_ignored"));
+
+  g_hash_table_destroy(ghost_labels);
+  bt_index_snapshot_free(snap);
+  bt_graph_free(g);
+  bt_index_close(idx);
+  vault_free(v);
+  bt_test_rm_rf(root);
+  g_free(root);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
     cmocka_unit_test(test_graph_invariant_ghosts_layout_and_filters),
+    cmocka_unit_test(test_graph_ghost_equivalence_with_resolver),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }
