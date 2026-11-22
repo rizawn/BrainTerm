@@ -330,6 +330,28 @@ static void test_label_placement_no_overlap_and_caps(void **state)
   assert_int_equal(out[12].degree, 14u);
 }
 
+static void test_cursor_anchored_zoom(void **state)
+{
+  (void)state;
+  const gdouble vp_w = 1000.0, vp_h = 700.0;
+  gdouble pan_x = 42.0, pan_y = -18.0, zoom = 1.0;
+  /* Suppose a node is at world (wx, wy) = (120.0, -75.0) */
+  const gdouble wx = 120.0, wy = -75.0;
+  gdouble mx = vp_w * 0.5 + pan_x + wx * zoom;
+  gdouble my = vp_h * 0.5 + pan_y + wy * zoom;
+
+  /* Scroll in 5 steps and back out 3 steps on that node */
+  for (int i = 0; i < 5; i++)
+    bt_graph_zoom_at_point(&pan_x, &pan_y, &zoom, zoom * 1.12, mx, my, vp_w, vp_h);
+  for (int i = 0; i < 3; i++)
+    bt_graph_zoom_at_point(&pan_x, &pan_y, &zoom, zoom * 0.89, mx, my, vp_w, vp_h);
+
+  gdouble after_sx = vp_w * 0.5 + pan_x + wx * zoom;
+  gdouble after_sy = vp_h * 0.5 + pan_y + wy * zoom;
+  assert_true(fabs(after_sx - mx) < 1e-6);
+  assert_true(fabs(after_sy - my) < 1e-6);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -339,6 +361,7 @@ int main(void)
     cmocka_unit_test(test_label_visibility_rules),
     cmocka_unit_test(test_3d_layout_deterministic_and_bounded),
     cmocka_unit_test(test_label_placement_no_overlap_and_caps),
+    cmocka_unit_test(test_cursor_anchored_zoom),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

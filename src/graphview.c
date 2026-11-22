@@ -762,6 +762,8 @@ struct BtGraphView {
 
   gboolean dragging;
   gboolean drag_moved;
+  gboolean has_mouse;
+  gdouble last_mouse_x, last_mouse_y;
   gdouble drag_start_x, drag_start_y;
   gdouble pan_start_x, pan_start_y;
   gdouble yaw_start, pitch_start;
@@ -1356,6 +1358,9 @@ static void on_motion(GtkEventControllerMotion *c, gdouble x, gdouble y, gpointe
 {
   (void)c;
   BtGraphView *gv = ud;
+  gv->has_mouse = TRUE;
+  gv->last_mouse_x = x;
+  gv->last_mouse_y = y;
   if (gv->dragging) {
     if (hypot(x - gv->drag_start_x, y - gv->drag_start_y) > 4.0)
       gv->drag_moved = TRUE;
@@ -1389,6 +1394,7 @@ static void on_motion_leave(GtkEventControllerMotion *c, gpointer ud)
 {
   (void)c;
   BtGraphView *gv = ud;
+  gv->has_mouse = FALSE;
   if (gv->hover_idx != -1) {
     gv->hover_idx = -1;
     refresh_neighbor_mask(gv);
@@ -1411,7 +1417,12 @@ static gboolean on_scroll(GtkEventControllerScroll *c, gdouble dx, gdouble dy, g
     gv->user_interacted_3d = TRUE;
     gv->dist3d = CLAMP(gv->dist3d * (dy < 0 ? 0.90 : 1.11), 1.35, 5.5);
   } else {
-    gv->zoom = CLAMP(gv->zoom * (dy < 0 ? 1.12 : 0.89), 0.2, 4.0);
+    gdouble vp_w = (gdouble)gtk_widget_get_width(gv->canvas_stack);
+    gdouble vp_h = (gdouble)gtk_widget_get_height(gv->canvas_stack);
+    gdouble mx = gv->has_mouse ? gv->last_mouse_x : (vp_w * 0.5);
+    gdouble my = gv->has_mouse ? gv->last_mouse_y : (vp_h * 0.5);
+    gdouble nz = gv->zoom * (dy < 0 ? 1.12 : 0.89);
+    bt_graph_zoom_at_point(&gv->pan_x, &gv->pan_y, &gv->zoom, nz, mx, my, vp_w, vp_h);
   }
   queue_canvas_draw(gv);
   return TRUE;

@@ -90,6 +90,10 @@ typedef struct {
 /* Sub-linear screen-space core radius matching graph_node.vert.glsl (max 14 px). */
 gdouble bt_graph_screen_core_radius(gdouble base_radius, gdouble zoom);
 
+/* Cursor-anchored 2D zoom: adjusts pan so the world point under (mouse_x, mouse_y) stays fixed. */
+void bt_graph_zoom_at_point(gdouble *pan_x, gdouble *pan_y, gdouble *zoom, gdouble new_zoom,
+                            gdouble mouse_x, gdouble mouse_y, gdouble vp_w, gdouble vp_h);
+
 /* Default visible label cap at a given zoom (20 at zoom 1.0). */
 guint bt_graph_label_cap_for_zoom(gdouble zoom);
 

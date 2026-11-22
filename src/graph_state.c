@@ -161,6 +161,19 @@ gdouble bt_graph_screen_core_radius(gdouble base_radius, gdouble zoom)
   return CLAMP(base_radius * pow(MAX(zoom, 0.05), 0.35), 2.2, 14.0);
 }
 
+void bt_graph_zoom_at_point(gdouble *pan_x, gdouble *pan_y, gdouble *zoom, gdouble new_zoom,
+                            gdouble mouse_x, gdouble mouse_y, gdouble vp_w, gdouble vp_h)
+{
+  if (pan_x == NULL || pan_y == NULL || zoom == NULL || *zoom <= 1e-6)
+    return;
+  gdouble old_zoom = *zoom;
+  gdouble clamped = CLAMP(new_zoom, 0.2, 4.0);
+  gdouble factor = 1.0 - (clamped / old_zoom);
+  *pan_x += (mouse_x - vp_w * 0.5 - *pan_x) * factor;
+  *pan_y += (mouse_y - vp_h * 0.5 - *pan_y) * factor;
+  *zoom = clamped;
+}
+
 guint bt_graph_label_cap_for_zoom(gdouble zoom)
 {
   int cap = (int)llround(20.0 * CLAMP(zoom, 0.5, 2.5));
