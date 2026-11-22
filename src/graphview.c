@@ -716,8 +716,10 @@ struct BtGraphView {
   GtkWidget *canvas_stack; /* GtkStack ("bt-graph-area"): "gl" | "cairo" */
   GtkWidget *cairo_area;   /* GtkDrawingArea fallback */
   BtGraphGL *gl;           /* GtkGLArea backend */
-  GtkWidget *btn_mode;
-  GtkWidget *btn_quality;
+  GtkWidget *btn_2d;
+  GtkWidget *btn_3d;
+  GtkWidget *btn_q_low;
+  GtkWidget *btn_q_high;
   GtkWidget *btn_pulse;
   GtkWidget *btn_motion;
   GtkWidget *btn_tags;
@@ -1514,28 +1516,39 @@ static void on_btn_reset(GtkButton *b, gpointer ud)
 static void sync_toolbar_buttons(BtGraphView *gv)
 {
   gboolean gl_ok = (gv->active_backend == BT_GRAPH_BACKEND_GL);
-  if (gv->btn_mode != NULL) {
-    gboolean is3d = gl_ok && (gv->mode == BT_GRAPH_MODE_3D);
-    gtk_button_set_label(GTK_BUTTON(gv->btn_mode), is3d ? "3D" : "2D");
-    gtk_widget_set_sensitive(gv->btn_mode, gl_ok);
-    gtk_widget_set_tooltip_text(
-        gv->btn_mode, gl_ok ? "Toggle 2D planar / 3D cortex orbit view"
-                            : "3D orbit view requires OpenGL (running Cairo fallback)");
-    if (is3d)
-      gtk_widget_add_css_class(gv->btn_mode, "bt-pill-active");
+  gboolean is3d = gl_ok && (gv->mode == BT_GRAPH_MODE_3D);
+  if (gv->btn_2d != NULL) {
+    if (!is3d)
+      gtk_widget_add_css_class(gv->btn_2d, "bt-pill-active");
     else
-      gtk_widget_remove_css_class(gv->btn_mode, "bt-pill-active");
+      gtk_widget_remove_css_class(gv->btn_2d, "bt-pill-active");
   }
-  if (gv->btn_quality != NULL) {
-    gboolean hi = (gv->quality == BT_GRAPH_QUALITY_HIGH);
-    gtk_button_set_label(GTK_BUTTON(gv->btn_quality), hi ? "High" : "Low");
-    if (hi)
-      gtk_widget_add_css_class(gv->btn_quality, "bt-pill-active");
+  if (gv->btn_3d != NULL) {
+    gtk_widget_set_sensitive(gv->btn_3d, gl_ok);
+    gtk_widget_set_tooltip_text(
+        gv->btn_3d, gl_ok ? "3D cortex orbit view (drag to orbit, scroll to dolly)"
+                          : "3D orbit view requires OpenGL (running Cairo fallback)");
+    if (is3d)
+      gtk_widget_add_css_class(gv->btn_3d, "bt-pill-active");
     else
-      gtk_widget_remove_css_class(gv->btn_quality, "bt-pill-active");
+      gtk_widget_remove_css_class(gv->btn_3d, "bt-pill-active");
+  }
+  gboolean hi = (gv->quality == BT_GRAPH_QUALITY_HIGH);
+  if (gv->btn_q_low != NULL) {
+    if (!hi)
+      gtk_widget_add_css_class(gv->btn_q_low, "bt-pill-active");
+    else
+      gtk_widget_remove_css_class(gv->btn_q_low, "bt-pill-active");
+  }
+  if (gv->btn_q_high != NULL) {
+    if (hi)
+      gtk_widget_add_css_class(gv->btn_q_high, "bt-pill-active");
+    else
+      gtk_widget_remove_css_class(gv->btn_q_high, "bt-pill-active");
   }
   if (gv->btn_pulse != NULL) {
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(gv->btn_pulse), gv->pulse_enabled);
+    gtk_widget_set_visible(gv->btn_pulse, gl_ok && gv->selected_idx >= 0);
     gtk_widget_set_sensitive(gv->btn_pulse, gl_ok && !gv->reduce_motion);
   }
   if (gv->btn_motion != NULL) {
@@ -1633,19 +1646,28 @@ static void apply_kind_visibility(BtGraphView *gv, gboolean upload_gl)
   update_hover_readout(gv);
 }
 
-static void on_btn_mode_clicked(GtkButton *b, gpointer ud)
+static void on_btn_2d_clicked(GtkButton *b, gpointer ud)
 {
   (void)b;
-  BtGraphView *gv = ud;
-  bt_graphview_set_mode(gv, gv->mode == BT_GRAPH_MODE_3D ? BT_GRAPH_MODE_2D : BT_GRAPH_MODE_3D);
+  bt_graphview_set_mode(ud, BT_GRAPH_MODE_2D);
 }
 
-static void on_btn_quality_clicked(GtkButton *b, gpointer ud)
+static void on_btn_3d_clicked(GtkButton *b, gpointer ud)
 {
   (void)b;
-  BtGraphView *gv = ud;
-  bt_graphview_set_quality(gv, gv->quality == BT_GRAPH_QUALITY_HIGH ? BT_GRAPH_QUALITY_LOW
-                                                                    : BT_GRAPH_QUALITY_HIGH);
+  bt_graphview_set_mode(ud, BT_GRAPH_MODE_3D);
+}
+
+static void on_btn_q_low_clicked(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  bt_graphview_set_quality(ud, BT_GRAPH_QUALITY_LOW);
+}
+
+static void on_btn_q_high_clicked(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  bt_graphview_set_quality(ud, BT_GRAPH_QUALITY_HIGH);
 }
 
 static void on_btn_pulse_toggled(GtkToggleButton *b, gpointer ud)
@@ -1778,7 +1800,7 @@ static void on_gctx_toggle_mode(GtkButton *b, gpointer ud)
   (void)b;
   BtGraphView *gv = ud;
   dismiss_ctx_popover(gv);
-  on_btn_mode_clicked(NULL, gv);
+  bt_graphview_set_mode(gv, gv->mode == BT_GRAPH_MODE_3D ? BT_GRAPH_MODE_2D : BT_GRAPH_MODE_3D);
 }
 
 static GtkWidget *make_gctx_btn(const gchar *label, const gchar *accel, GCallback cb,
@@ -1932,8 +1954,10 @@ static void on_canvas_destroy(GtkWidget *area, gpointer ud)
   gv->cairo_area = NULL;
   gv->overlay = NULL;
   gv->root = NULL;
-  gv->btn_mode = NULL;
-  gv->btn_quality = NULL;
+  gv->btn_2d = NULL;
+  gv->btn_3d = NULL;
+  gv->btn_q_low = NULL;
+  gv->btn_q_high = NULL;
   gv->btn_pulse = NULL;
   gv->btn_motion = NULL;
   gv->btn_tags = NULL;
@@ -2049,7 +2073,7 @@ BtGraphView *bt_graphview_new(BtGraphOpenNoteFn on_open, BtGraphOpenTermFn on_op
   gtk_widget_set_vexpand(gv->overlay, TRUE);
   gtk_overlay_set_child(GTK_OVERLAY(gv->overlay), gv->canvas_stack);
 
-  /* Top-left graph toolbar: 2D/3D, Quality (High/Low), Pulse, Reduce Motion. */
+  /* Top-left graph toolbar: View: 2D | 3D, Quality: Low | High, Tags, Ghosts, Pulse, Reduce motion. */
   GtkWidget *mode_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
   gtk_widget_set_name(mode_bar, "bt-graph-toolbar");
   gtk_widget_add_css_class(mode_bar, "bt-graph-controls");
@@ -2058,26 +2082,47 @@ BtGraphView *bt_graphview_new(BtGraphOpenNoteFn on_open, BtGraphOpenTermFn on_op
   gtk_widget_set_margin_top(mode_bar, 10);
   gtk_widget_set_margin_start(mode_bar, 10);
 
-  gv->btn_mode = gtk_button_new_with_label("2D");
-  gtk_widget_add_css_class(gv->btn_mode, "bt-graph-pill");
-  g_signal_connect(gv->btn_mode, "clicked", G_CALLBACK(on_btn_mode_clicked), gv);
+  GtkWidget *lbl_view = gtk_label_new("View:");
+  gtk_widget_add_css_class(lbl_view, "bt-graph-toolbar-lbl");
+  gv->btn_2d = gtk_button_new_with_label("2D");
+  gtk_widget_add_css_class(gv->btn_2d, "bt-graph-pill");
+  gtk_widget_set_tooltip_text(gv->btn_2d, "Flat 2D planar graph view (drag to pan, scroll to zoom)");
+  g_signal_connect(gv->btn_2d, "clicked", G_CALLBACK(on_btn_2d_clicked), gv);
 
-  gv->btn_quality = gtk_button_new_with_label("High");
-  gtk_widget_add_css_class(gv->btn_quality, "bt-graph-pill");
-  gtk_widget_set_tooltip_text(gv->btn_quality,
-                              "Quality: High (bloom, curved additive edges, dust) / Low (fast)");
-  g_signal_connect(gv->btn_quality, "clicked", G_CALLBACK(on_btn_quality_clicked), gv);
+  gv->btn_3d = gtk_button_new_with_label("3D");
+  gtk_widget_add_css_class(gv->btn_3d, "bt-graph-pill");
+  g_signal_connect(gv->btn_3d, "clicked", G_CALLBACK(on_btn_3d_clicked), gv);
+
+  GtkWidget *sep1 = gtk_separator_new(GTK_ORIENTATION_VERTICAL);
+  gtk_widget_add_css_class(sep1, "bt-graph-toolbar-sep");
+
+  GtkWidget *lbl_qual = gtk_label_new("Quality:");
+  gtk_widget_add_css_class(lbl_qual, "bt-graph-toolbar-lbl");
+  gv->btn_q_low = gtk_button_new_with_label("Low");
+  gtk_widget_add_css_class(gv->btn_q_low, "bt-graph-pill");
+  gtk_widget_set_tooltip_text(gv->btn_q_low,
+                              "Low quality: faster rendering without bloom or curved edges");
+  g_signal_connect(gv->btn_q_low, "clicked", G_CALLBACK(on_btn_q_low_clicked), gv);
+
+  gv->btn_q_high = gtk_button_new_with_label("High");
+  gtk_widget_add_css_class(gv->btn_q_high, "bt-graph-pill");
+  gtk_widget_set_tooltip_text(gv->btn_q_high,
+                              "High quality: bloom glow, curved additive edges, and ambient dust");
+  g_signal_connect(gv->btn_q_high, "clicked", G_CALLBACK(on_btn_q_high_clicked), gv);
+
+  GtkWidget *sep2 = gtk_separator_new(GTK_ORIENTATION_VERTICAL);
+  gtk_widget_add_css_class(sep2, "bt-graph-toolbar-sep");
 
   gv->btn_pulse = gtk_toggle_button_new_with_label("Pulse");
   gtk_widget_add_css_class(gv->btn_pulse, "bt-graph-pill");
   gtk_widget_set_tooltip_text(gv->btn_pulse,
-                              "Subtle light ripples along edges from the selected node");
+                              "Animate subtle light ripples along edges from the selected node");
   g_signal_connect(gv->btn_pulse, "toggled", G_CALLBACK(on_btn_pulse_toggled), gv);
 
   gv->btn_motion = gtk_toggle_button_new_with_label("Reduce motion");
   gtk_widget_add_css_class(gv->btn_motion, "bt-graph-pill");
   gtk_widget_set_tooltip_text(gv->btn_motion,
-                              "Reduce motion: stops dust, pulses, and 3D idle rotation");
+                              "Reduce motion: disables dust drift, pulses, and 3D idle rotation");
   g_signal_connect(gv->btn_motion, "toggled", G_CALLBACK(on_btn_motion_toggled), gv);
 
   gv->btn_tags = gtk_toggle_button_new_with_label("Tags");
@@ -2091,8 +2136,14 @@ BtGraphView *bt_graphview_new(BtGraphOpenNoteFn on_open, BtGraphOpenTermFn on_op
                               "Show or hide unresolved [[wiki-link]] ghost nodes");
   g_signal_connect(gv->btn_ghosts, "toggled", G_CALLBACK(on_btn_ghosts_toggled), gv);
 
-  gtk_box_append(GTK_BOX(mode_bar), gv->btn_mode);
-  gtk_box_append(GTK_BOX(mode_bar), gv->btn_quality);
+  gtk_box_append(GTK_BOX(mode_bar), lbl_view);
+  gtk_box_append(GTK_BOX(mode_bar), gv->btn_2d);
+  gtk_box_append(GTK_BOX(mode_bar), gv->btn_3d);
+  gtk_box_append(GTK_BOX(mode_bar), sep1);
+  gtk_box_append(GTK_BOX(mode_bar), lbl_qual);
+  gtk_box_append(GTK_BOX(mode_bar), gv->btn_q_low);
+  gtk_box_append(GTK_BOX(mode_bar), gv->btn_q_high);
+  gtk_box_append(GTK_BOX(mode_bar), sep2);
   gtk_box_append(GTK_BOX(mode_bar), gv->btn_tags);
   gtk_box_append(GTK_BOX(mode_bar), gv->btn_ghosts);
   gtk_box_append(GTK_BOX(mode_bar), gv->btn_pulse);
@@ -2210,6 +2261,7 @@ void bt_graphview_set_graph(BtGraphView *gv, BtGraph *graph, gboolean animate_gr
   gv->hover_fade = 0.0;
   gv->needs_fit = TRUE;
   apply_kind_visibility(gv, FALSE);
+  sync_toolbar_buttons(gv);
   bt_graph_gl_set_graph(gv->gl, graph);
   schedule_layout3d_worker(gv);
 

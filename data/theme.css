@@ -794,6 +794,19 @@ toast {
   color: @bt_accent;
 }
 
+.bt-graph-toolbar-lbl {
+  font-size: 11px;
+  font-weight: 500;
+  color: @bt_text_muted;
+  padding: 0 4px 0 6px;
+}
+
+.bt-graph-toolbar-sep {
+  min-width: 1px;
+  background-color: @bt_border;
+  margin: 4px 3px;
+}
+
 .bt-graph-legend {
   background-color: alpha(@bt_surface_2, 0.92);
   border: 1px solid @bt_border;

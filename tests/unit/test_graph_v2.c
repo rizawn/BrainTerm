@@ -220,12 +220,14 @@ static void test_label_visibility_rules(void **state)
   gdouble a_leaf_idle = bt_graph_label_alpha(leaf, BT_NBR_NONE, FALSE, FALSE, thresh, 1.0, FALSE, 0.0, 60);
   assert_true(a_leaf_idle <= 0.001);
 
-  /* Hub visible at zoom 1.0, dimmed to 25% when another node is hovered, hidden when zoomed far out */
+  /* Hub visible at zoom 1.0, suppressed when dimmed below 40% during hover, hidden when far out */
   gdouble a_hub_idle = bt_graph_label_alpha(hub, BT_NBR_NONE, FALSE, FALSE, thresh, 1.0, FALSE, 0.0, 60);
+  gdouble a_hub_mid = bt_graph_label_alpha(hub, BT_NBR_NONE, FALSE, FALSE, thresh, 1.0, TRUE, 0.4, 60);
   gdouble a_hub_dim = bt_graph_label_alpha(hub, BT_NBR_NONE, FALSE, FALSE, thresh, 1.0, TRUE, 1.0, 60);
   gdouble a_hub_far = bt_graph_label_alpha(hub, BT_NBR_NONE, FALSE, FALSE, thresh, 0.35, FALSE, 0.0, 60);
   assert_true(a_hub_idle > 0.70);
-  assert_true(fabs(a_hub_dim - a_hub_idle * 0.25) < 0.02);
+  assert_true(a_hub_mid >= 0.40);
+  assert_true(a_hub_dim <= 0.001);
   assert_true(a_hub_far <= 0.001);
 
   free_sample_graph(g);

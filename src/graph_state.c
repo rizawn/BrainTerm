@@ -145,13 +145,17 @@ gdouble bt_graph_label_alpha(const BtGraphNode *nd, guint8 nbr_state, gboolean i
   gdouble zoom_fade = CLAMP((zoom - 0.45) / 0.45, 0.0, 1.0);
   if (total_nodes <= 32u) {
     if (nd->kind == BT_NODE_HUMAN_NOTE || nd->kind == BT_NODE_AI_NOTE ||
-        nd->degree >= hub_thresh)
-      return 0.78 * zoom_fade * dim;
+        nd->degree >= hub_thresh) {
+      gdouble a = 0.78 * zoom_fade * dim;
+      return (has_focus && a < 0.40) ? 0.0 : a;
+    }
     return 0.0;
   }
 
-  if (nd->degree >= hub_thresh && hub_thresh > 0u)
-    return 0.78 * zoom_fade * dim;
+  if (nd->degree >= hub_thresh && hub_thresh > 0u) {
+    gdouble a = 0.78 * zoom_fade * dim;
+    return (has_focus && a < 0.40) ? 0.0 : a;
+  }
 
   return 0.0;
 }
