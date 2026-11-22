@@ -1,8 +1,9 @@
-/* graphgl.c — OpenGL 3.3 Core / GLES 3.0 Brain Graph v2 backend (Step 2):
- *   - Instanced quads for glowing nodes (analytic halo + bright core + hover ring).
- *   - Instanced curved/straight additive ribbon strips for edges.
- *   - GPU-animated drifting dust particles (zero per-frame CPU upload).
- *   - Cached Pango RGBA label atlas rebuilt only on graph or scale change.
+/* graphgl.c — OpenGL 3.3 Core / GLES 3.0 Brain Graph v2 backend (Steps 2–3):
+ *   - Instanced quads for glowing nodes (2D & 3D orbit projection).
+ *   - Instanced curved/straight additive edges (+ optional selected-node pulse).
+ *   - GPU-animated drifting dust sprites (zero CPU per-frame upload).
+ *   - Half-resolution two-pass Gaussian bloom FBO (High quality, auto-downgrade if FBO fails).
+ *   - Cached Pango RGBA label atlas rendered crisp after bloom composite.
  *   - Zero per-frame heap allocations; automatic Cairo fallback on any GL/shader error. */
 #include "ui/graphgl.h"
 #include "theme.h"
@@ -31,6 +32,11 @@ typedef struct {
 } EdgeInst;
 
 typedef struct {
+  float ax, ay, az;
+  float bx, by, bz;
+} Edge3DInst;
+
+typedef struct {
   float x, y, radius, kind;
   float r, g, b, vis;
 } NodeInst;
@@ -54,9 +60,15 @@ struct BtGraphGL {
   gpointer user_data;
 
   const BtGraph *graph; /* borrowed from BtGraphView */
+  BtGraphVec3 *pts3d;   /* owned snapshot copied on bt_graph_gl_set_layout3d */
+  guint pts3d_count;
+
   gboolean gl_ready;
   gboolean gl_failed;
+  gboolean bloom_supported;
+  gboolean bloom_ready;
   gboolean graph_dirty;
+  gboolean layout3d_dirty;
   gboolean state_dirty;
   gboolean atlas_dirty;
   gint atlas_scale;
@@ -66,35 +78,50 @@ struct BtGraphGL {
   gchar version_str[128];
   gdouble init_ms;
 
-  /* Shader programs */
+  /* Core shader programs */
   GLuint prog_bg;
   GLuint prog_dust;
   GLuint prog_edge;
   GLuint prog_node;
   GLuint prog_label;
 
+  /* Bloom post-process programs */
+  GLuint prog_extract;
+  GLuint prog_blur;
+  GLuint prog_composite;
+
   /* Cached uniform locations */
   GLint u_bg_col, u_bg_vig;
   GLint u_dust_vp, u_dust_time, u_dust_scale, u_dust_col, u_dust_int;
   GLint u_edge_vp, u_edge_pan, u_edge_zoom, u_edge_scale, u_edge_bt;
-  GLint u_edge_foc, u_edge_hf, u_edge_segs, u_edge_curved;
+  GLint u_edge_foc, u_edge_sel, u_edge_hf, u_edge_segs, u_edge_curved;
   GLint u_edge_ba, u_edge_hw, u_edge_dim_col, u_edge_act_col;
+  GLint u_edge_mode3d, u_edge_mvp, u_edge_pulse_en, u_edge_pulse_ph;
   GLint u_node_vp, u_node_pan, u_node_zoom, u_node_scale, u_node_bt;
   GLint u_node_has_foc, u_node_hf, u_node_hq, u_node_glow_col, u_node_s2_col;
+  GLint u_node_mode3d, u_node_mvp;
   GLint u_lbl_vp, u_lbl_atlas, u_lbl_tp, u_lbl_ts, u_lbl_pbg;
+  GLint u_ext_scene, u_ext_thresh;
+  GLint u_blur_tex, u_blur_dir;
+  GLint u_comp_scene, u_comp_bloom, u_comp_str;
 
   /* VAOs & VBOs */
   GLuint vao_bg;
   GLuint vao_dust, vbo_dust;
-  GLuint vao_edge, vbo_edge;
-  GLuint vao_node, vbo_node_static, vbo_node_state;
+  GLuint vao_edge, vbo_edge, vbo_edge3d;
+  GLuint vao_node, vbo_node_static, vbo_node_state, vbo_node3d;
   GLuint vao_label, vbo_label;
   GLuint tex_atlas;
+
+  /* Bloom FBOs (full-res scene + half-res ping-pong blur) */
+  GLuint scene_fbo, scene_tex;
+  GLuint bloom_fbo[2], bloom_tex[2];
+  int fbo_w, fbo_h;
 
   guint edge_count;
   guint node_count;
   guint node_state_cap;
-  float *node_state_scratch; /* reusable per-node state buffer (zero per-frame alloc) */
+  float *node_state_scratch;
 
   AtlasSlot *atlas_slots;
   guint atlas_slot_count;
@@ -192,15 +219,82 @@ static guint32 lcg_u32(guint32 *s)
   return *s;
 }
 
-/* ----------------------------------------------------- GL resource mgmt -- */
+/* ----------------------------------------------------- FBO & GL cleanup -- */
+
+static void destroy_bloom_fbos(BtGraphGL *gl)
+{
+  if (gl->scene_fbo)    { glDeleteFramebuffers(1, &gl->scene_fbo);    gl->scene_fbo = 0; }
+  if (gl->scene_tex)    { glDeleteTextures(1, &gl->scene_tex);        gl->scene_tex = 0; }
+  for (int i = 0; i < 2; i++) {
+    if (gl->bloom_fbo[i]) { glDeleteFramebuffers(1, &gl->bloom_fbo[i]); gl->bloom_fbo[i] = 0; }
+    if (gl->bloom_tex[i]) { glDeleteTextures(1, &gl->bloom_tex[i]);     gl->bloom_tex[i] = 0; }
+  }
+  gl->fbo_w = 0;
+  gl->fbo_h = 0;
+  gl->bloom_ready = FALSE;
+}
+
+static gboolean alloc_color_fbo(GLuint *fbo_out, GLuint *tex_out, int w, int h)
+{
+  GLuint fbo = 0, tex = 0;
+  glGenFramebuffers(1, &fbo);
+  glGenTextures(1, &tex);
+  glBindTexture(GL_TEXTURE_2D, tex);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+  GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+  glBindTexture(GL_TEXTURE_2D, 0);
+  if (status != GL_FRAMEBUFFER_COMPLETE) {
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(1, &tex);
+    return FALSE;
+  }
+  *fbo_out = fbo;
+  *tex_out = tex;
+  return TRUE;
+}
+
+static gboolean ensure_bloom_fbos(BtGraphGL *gl, int fb_w, int fb_h, GLint restore_fbo)
+{
+  if (!gl->bloom_supported || fb_w < 4 || fb_h < 4)
+    return FALSE;
+  if (gl->bloom_ready && gl->fbo_w == fb_w && gl->fbo_h == fb_h)
+    return TRUE;
+
+  destroy_bloom_fbos(gl);
+  int hw = MAX(fb_w / 2, 2);
+  int hh = MAX(fb_h / 2, 2);
+  gboolean ok = alloc_color_fbo(&gl->scene_fbo, &gl->scene_tex, fb_w, fb_h) &&
+                alloc_color_fbo(&gl->bloom_fbo[0], &gl->bloom_tex[0], hw, hh) &&
+                alloc_color_fbo(&gl->bloom_fbo[1], &gl->bloom_tex[1], hw, hh);
+  glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)restore_fbo);
+  if (!ok) {
+    destroy_bloom_fbos(gl);
+    gl->bloom_supported = FALSE;
+    return FALSE;
+  }
+  gl->fbo_w = fb_w;
+  gl->fbo_h = fb_h;
+  gl->bloom_ready = TRUE;
+  return TRUE;
+}
 
 static void destroy_gl_objects(BtGraphGL *gl)
 {
-  if (gl->prog_bg)    { glDeleteProgram(gl->prog_bg);    gl->prog_bg = 0; }
-  if (gl->prog_dust)  { glDeleteProgram(gl->prog_dust);  gl->prog_dust = 0; }
-  if (gl->prog_edge)  { glDeleteProgram(gl->prog_edge);  gl->prog_edge = 0; }
-  if (gl->prog_node)  { glDeleteProgram(gl->prog_node);  gl->prog_node = 0; }
-  if (gl->prog_label) { glDeleteProgram(gl->prog_label); gl->prog_label = 0; }
+  destroy_bloom_fbos(gl);
+  if (gl->prog_bg)        { glDeleteProgram(gl->prog_bg);        gl->prog_bg = 0; }
+  if (gl->prog_dust)      { glDeleteProgram(gl->prog_dust);      gl->prog_dust = 0; }
+  if (gl->prog_edge)      { glDeleteProgram(gl->prog_edge);      gl->prog_edge = 0; }
+  if (gl->prog_node)      { glDeleteProgram(gl->prog_node);      gl->prog_node = 0; }
+  if (gl->prog_label)     { glDeleteProgram(gl->prog_label);     gl->prog_label = 0; }
+  if (gl->prog_extract)   { glDeleteProgram(gl->prog_extract);   gl->prog_extract = 0; }
+  if (gl->prog_blur)      { glDeleteProgram(gl->prog_blur);      gl->prog_blur = 0; }
+  if (gl->prog_composite) { glDeleteProgram(gl->prog_composite); gl->prog_composite = 0; }
 
   if (gl->vao_bg)    { glDeleteVertexArrays(1, &gl->vao_bg);    gl->vao_bg = 0; }
   if (gl->vao_dust)  { glDeleteVertexArrays(1, &gl->vao_dust);  gl->vao_dust = 0; }
@@ -210,8 +304,10 @@ static void destroy_gl_objects(BtGraphGL *gl)
 
   if (gl->vbo_dust)        { glDeleteBuffers(1, &gl->vbo_dust);        gl->vbo_dust = 0; }
   if (gl->vbo_edge)        { glDeleteBuffers(1, &gl->vbo_edge);        gl->vbo_edge = 0; }
+  if (gl->vbo_edge3d)      { glDeleteBuffers(1, &gl->vbo_edge3d);      gl->vbo_edge3d = 0; }
   if (gl->vbo_node_static) { glDeleteBuffers(1, &gl->vbo_node_static); gl->vbo_node_static = 0; }
   if (gl->vbo_node_state)  { glDeleteBuffers(1, &gl->vbo_node_state);  gl->vbo_node_state = 0; }
+  if (gl->vbo_node3d)      { glDeleteBuffers(1, &gl->vbo_node3d);      gl->vbo_node3d = 0; }
   if (gl->vbo_label)       { glDeleteBuffers(1, &gl->vbo_label);       gl->vbo_label = 0; }
   if (gl->tex_atlas)       { glDeleteTextures(1, &gl->tex_atlas);      gl->tex_atlas = 0; }
   gl->gl_ready = FALSE;
@@ -250,7 +346,6 @@ static void init_dust_vbo(BtGraphGL *gl)
   glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, (GLsizei)sizeof(DustInst),
                         (const void *)(uintptr_t)offsetof(DustInst, radius));
   glVertexAttribDivisor(1, 1);
-
   glBindVertexArray(0);
 }
 
@@ -258,9 +353,10 @@ static void init_dynamic_vaos(BtGraphGL *gl)
 {
   glGenVertexArrays(1, &gl->vao_bg);
 
-  /* Edges VAO */
+  /* Edges VAO: loc 0..1 = 2D static, loc 2..3 = 3D static */
   glGenVertexArrays(1, &gl->vao_edge);
   glGenBuffers(1, &gl->vbo_edge);
+  glGenBuffers(1, &gl->vbo_edge3d);
   glBindVertexArray(gl->vao_edge);
   glBindBuffer(GL_ARRAY_BUFFER, gl->vbo_edge);
   glEnableVertexAttribArray(0);
@@ -272,10 +368,21 @@ static void init_dynamic_vaos(BtGraphGL *gl)
                         (const void *)(uintptr_t)offsetof(EdgeInst, curve_sign));
   glVertexAttribDivisor(1, 1);
 
-  /* Nodes VAO (static geom/color + dynamic state) */
+  glBindBuffer(GL_ARRAY_BUFFER, gl->vbo_edge3d);
+  glEnableVertexAttribArray(2);
+  glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, (GLsizei)sizeof(Edge3DInst),
+                        (const void *)(uintptr_t)offsetof(Edge3DInst, ax));
+  glVertexAttribDivisor(2, 1);
+  glEnableVertexAttribArray(3);
+  glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, (GLsizei)sizeof(Edge3DInst),
+                        (const void *)(uintptr_t)offsetof(Edge3DInst, bx));
+  glVertexAttribDivisor(3, 1);
+
+  /* Nodes VAO: loc 0..1 = 2D static, loc 2 = dynamic state, loc 3 = 3D static */
   glGenVertexArrays(1, &gl->vao_node);
   glGenBuffers(1, &gl->vbo_node_static);
   glGenBuffers(1, &gl->vbo_node_state);
+  glGenBuffers(1, &gl->vbo_node3d);
   glBindVertexArray(gl->vao_node);
   glBindBuffer(GL_ARRAY_BUFFER, gl->vbo_node_static);
   glEnableVertexAttribArray(0);
@@ -292,7 +399,12 @@ static void init_dynamic_vaos(BtGraphGL *gl)
   glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, (GLsizei)sizeof(float), (const void *)0);
   glVertexAttribDivisor(2, 1);
 
-  /* Labels VAO + pre-allocated VBO (BT_GL_LABEL_CAP instances) */
+  glBindBuffer(GL_ARRAY_BUFFER, gl->vbo_node3d);
+  glEnableVertexAttribArray(3);
+  glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, (GLsizei)sizeof(BtGraphVec3), (const void *)0);
+  glVertexAttribDivisor(3, 1);
+
+  /* Labels VAO + pre-allocated VBO */
   glGenVertexArrays(1, &gl->vao_label);
   glGenBuffers(1, &gl->vbo_label);
   glBindVertexArray(gl->vao_label);
@@ -316,7 +428,7 @@ static void init_dynamic_vaos(BtGraphGL *gl)
   glGenTextures(1, &gl->tex_atlas);
 }
 
-/* ------------------------------------------- graph & label atlas upload -- */
+/* ------------------------------------------- graph, 3D & atlas uploads -- */
 
 static void rebuild_label_atlas(BtGraphGL *gl, gint scale)
 {
@@ -349,8 +461,8 @@ static void rebuild_label_atlas(BtGraphGL *gl, gint scale)
 
   int pad = 4 * gl->atlas_scale;
   int cx = pad, cy = pad, row_h = 0;
-
   cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 1.0);
+
   for (guint i = 0; i < n; i++) {
     const BtGraphNode *nd = g_ptr_array_index(gl->graph->nodes, i);
     if (!nd->visible || nd->label == NULL || nd->label[0] == '\0')
@@ -368,7 +480,7 @@ static void rebuild_label_atlas(BtGraphGL *gl, gint scale)
       row_h = 0;
     }
     if (cy + bh + 2 > ah)
-      break; /* atlas full (covers hundreds of labels) */
+      break;
 
     cairo_move_to(cr, (gdouble)(cx + pad), (gdouble)(cy + pad / 2));
     pango_cairo_show_layout(cr, pl);
@@ -391,7 +503,6 @@ static void rebuild_label_atlas(BtGraphGL *gl, gint scale)
   cairo_destroy(cr);
   cairo_surface_flush(surf);
 
-  /* Convert Cairo ARGB32 (BGRA on little-endian) -> GL_RGBA once on atlas build. */
   int used_h = MIN(MAX(cy + row_h + 4, 64), ah);
   unsigned char *src = cairo_image_surface_get_data(surf);
   int stride = cairo_image_surface_get_stride(surf);
@@ -400,13 +511,12 @@ static void rebuild_label_atlas(BtGraphGL *gl, gint scale)
     const unsigned char *srow = src + y * stride;
     unsigned char *drow = rgba + (gsize)y * (gsize)aw * 4u;
     for (int x = 0; x < aw; x++) {
-      drow[x * 4 + 0] = srow[x * 4 + 2]; /* R */
-      drow[x * 4 + 1] = srow[x * 4 + 1]; /* G */
-      drow[x * 4 + 2] = srow[x * 4 + 0]; /* B */
-      drow[x * 4 + 3] = srow[x * 4 + 3]; /* A */
+      drow[x * 4 + 0] = srow[x * 4 + 2];
+      drow[x * 4 + 1] = srow[x * 4 + 1];
+      drow[x * 4 + 2] = srow[x * 4 + 0];
+      drow[x * 4 + 3] = srow[x * 4 + 3];
     }
   }
-  /* Rescale V coordinates to tightly cropped used_h. */
   float v_scale = (float)ah / (float)used_h;
   for (guint i = 0; i < n; i++) {
     if (gl->atlas_slots[i].valid) {
@@ -423,8 +533,50 @@ static void rebuild_label_atlas(BtGraphGL *gl, gint scale)
   glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
   glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, aw, used_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
   glBindTexture(GL_TEXTURE_2D, 0);
-
   cairo_surface_destroy(surf);
+}
+
+static void upload_layout3d_buffers(BtGraphGL *gl)
+{
+  gl->layout3d_dirty = FALSE;
+  const BtGraph *g = gl->graph;
+  if (g == NULL || gl->node_count == 0)
+    return;
+
+  /* Upload per-node 3D positions (zero-filled fallback if worker hasn't swapped yet). */
+  g_autofree BtGraphVec3 *n3 = g_new0(BtGraphVec3, gl->node_count);
+  if (gl->pts3d != NULL && gl->pts3d_count > 0) {
+    guint copy_n = MIN(gl->pts3d_count, gl->node_count);
+    memcpy(n3, gl->pts3d, copy_n * sizeof(BtGraphVec3));
+  }
+  glBindBuffer(GL_ARRAY_BUFFER, gl->vbo_node3d);
+  glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(gl->node_count * sizeof(BtGraphVec3)), n3,
+               GL_STATIC_DRAW);
+
+  if (gl->edge_count > 0 && g->edges != NULL) {
+    g_autofree Edge3DInst *e3 = g_new0(Edge3DInst, gl->edge_count);
+    guint out_e = 0;
+    for (guint i = 0; i < g->edges->len && out_e < gl->edge_count; i++) {
+      const BtGraphEdge *e = &g_array_index(g->edges, BtGraphEdge, i);
+      if (e->src_idx >= gl->node_count || e->dst_idx >= gl->node_count)
+        continue;
+      const BtGraphNode *a = g_ptr_array_index(g->nodes, e->src_idx);
+      const BtGraphNode *b = g_ptr_array_index(g->nodes, e->dst_idx);
+      if (!a->visible || !b->visible)
+        continue;
+      e3[out_e].ax = n3[e->src_idx].x;
+      e3[out_e].ay = n3[e->src_idx].y;
+      e3[out_e].az = n3[e->src_idx].z;
+      e3[out_e].bx = n3[e->dst_idx].x;
+      e3[out_e].by = n3[e->dst_idx].y;
+      e3[out_e].bz = n3[e->dst_idx].z;
+      out_e++;
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, gl->vbo_edge3d);
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(gl->edge_count * sizeof(Edge3DInst)), e3,
+                 GL_STATIC_DRAW);
+  }
+  glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
 static void upload_graph_buffers(BtGraphGL *gl)
@@ -499,6 +651,7 @@ static void upload_graph_buffers(BtGraphGL *gl)
   glBindBuffer(GL_ARRAY_BUFFER, 0);
   gl->state_dirty = TRUE;
   gl->atlas_dirty = TRUE;
+  gl->layout3d_dirty = TRUE;
 }
 
 static void upload_node_states(BtGraphGL *gl, const BtGraphRenderState *st)
@@ -536,6 +689,8 @@ void bt_graph_gl_render_state(BtGraphGL *gl, const BtGraphRenderState *st)
   }
   if (gl->graph_dirty)
     upload_graph_buffers(gl);
+  if (gl->layout3d_dirty)
+    upload_layout3d_buffers(gl);
 
   gint scale = MAX(st->scale, 1);
   if (gl->atlas_dirty || gl->atlas_scale != scale)
@@ -545,6 +700,16 @@ void bt_graph_gl_render_state(BtGraphGL *gl, const BtGraphRenderState *st)
 
   int fb_w = st->width * scale;
   int fb_h = st->height * scale;
+  gboolean high = (st->quality == BT_GRAPH_QUALITY_HIGH);
+  gboolean mode_3d = (st->mode == BT_GRAPH_MODE_3D && gl->pts3d != NULL && gl->pts3d_count > 0);
+
+  GLint target_fbo = 0;
+  glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &target_fbo);
+
+  gboolean use_bloom = high && ensure_bloom_fbos(gl, fb_w, fb_h, target_fbo);
+  if (use_bloom)
+    glBindFramebuffer(GL_FRAMEBUFFER, gl->scene_fbo);
+
   glViewport(0, 0, fb_w, fb_h);
   glDisable(GL_DEPTH_TEST);
   glDisable(GL_CULL_FACE);
@@ -561,7 +726,6 @@ void bt_graph_gl_render_state(BtGraphGL *gl, const BtGraphRenderState *st)
   glBindVertexArray(gl->vao_bg);
   glDrawArrays(GL_TRIANGLES, 0, 3);
 
-  gboolean high = (st->quality == BT_GRAPH_QUALITY_HIGH);
   float vp_w = (float)st->width;
   float vp_h = (float)st->height;
 
@@ -578,15 +742,17 @@ void bt_graph_gl_render_state(BtGraphGL *gl, const BtGraphRenderState *st)
   glBindVertexArray(gl->vao_dust);
   glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, high ? (GLsizei)BT_GL_DUST_MAX : 32);
 
-  if (st->graph == NULL || gl->node_count == 0) {
-    glBindVertexArray(0);
-    glUseProgram(0);
-    return;
+  float mvp[16];
+  if (mode_3d) {
+    bt_graph_build_orbit_mvp(st->yaw, st->pitch, MAX(st->dist3d, 1.2),
+                             (gdouble)st->width / MAX((gdouble)st->height, 1.0), mvp);
+  } else {
+    memset(mvp, 0, sizeof(mvp));
+    mvp[0] = mvp[5] = mvp[10] = mvp[15] = 1.0f;
   }
 
-  /* Compute shared birth_t (min across nodes if animating; O(1) fast check on node 0). */
   float bt = 1.0f;
-  if (st->graph->nodes->len > 0) {
+  if (st->graph != NULL && st->graph->nodes->len > 0) {
     const BtGraphNode *n0 = g_ptr_array_index(st->graph->nodes, 0);
     if (n0->birth_t < 0.999)
       bt = (float)n0->birth_t;
@@ -598,52 +764,113 @@ void bt_graph_gl_render_state(BtGraphGL *gl, const BtGraphRenderState *st)
   if (st->hover_idx < 0 && st->focus_idx >= 0)
     hf = 1.0f;
 
-  /* Pass 3: instanced edges (additive blending so crossings glow brighter) */
-  if (gl->edge_count > 0) {
-    int segs = high ? 6 : 1;
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
-    glUseProgram(gl->prog_edge);
-    glUniform2f(gl->u_edge_vp, vp_w, vp_h);
-    glUniform2f(gl->u_edge_pan, (float)st->pan_x, (float)st->pan_y);
-    glUniform1f(gl->u_edge_zoom, (float)st->zoom);
-    glUniform1f(gl->u_edge_scale, 1.0f);
-    glUniform1f(gl->u_edge_bt, bt);
-    glUniform1i(gl->u_edge_foc, focus_idx);
-    glUniform1f(gl->u_edge_hf, hf);
-    glUniform1i(gl->u_edge_segs, segs);
-    glUniform1i(gl->u_edge_curved, high ? 1 : 0);
-    glUniform1f(gl->u_edge_ba, high ? 0.20f : 0.14f);
-    glUniform1f(gl->u_edge_hw, high ? 0.85f : 0.70f);
-    bt_theme_unpack_f(BT_COL_GRAPH_EDGE_DIM, &r, &g, &b);
-    glUniform3f(gl->u_edge_dim_col, r, g, b);
-    bt_theme_unpack_f(BT_COL_GRAPH_EDGE_ACTIVE, &r, &g, &b);
-    glUniform3f(gl->u_edge_act_col, r, g, b);
-    glBindVertexArray(gl->vao_edge);
-    glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, (segs + 1) * 2, (GLsizei)gl->edge_count);
+  if (st->graph != NULL && gl->node_count > 0) {
+    /* Pass 3: instanced edges (additive + optional traveling pulse) */
+    if (gl->edge_count > 0) {
+      int segs = high ? 6 : 1;
+      glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+      glUseProgram(gl->prog_edge);
+      glUniform2f(gl->u_edge_vp, vp_w, vp_h);
+      glUniform2f(gl->u_edge_pan, (float)st->pan_x, (float)st->pan_y);
+      glUniform1f(gl->u_edge_zoom, (float)st->zoom);
+      glUniform1f(gl->u_edge_scale, 1.0f);
+      glUniform1f(gl->u_edge_bt, bt);
+      glUniform1i(gl->u_edge_foc, focus_idx);
+      glUniform1i(gl->u_edge_sel, st->selected_idx);
+      glUniform1f(gl->u_edge_hf, hf);
+      glUniform1i(gl->u_edge_segs, segs);
+      glUniform1i(gl->u_edge_curved, high ? 1 : 0);
+      glUniform1f(gl->u_edge_ba, high ? (mode_3d ? 0.17f : 0.20f) : 0.14f);
+      glUniform1f(gl->u_edge_hw, high ? 0.85f : 0.70f);
+      bt_theme_unpack_f(BT_COL_GRAPH_EDGE_DIM, &r, &g, &b);
+      glUniform3f(gl->u_edge_dim_col, r, g, b);
+      bt_theme_unpack_f(BT_COL_GRAPH_EDGE_ACTIVE, &r, &g, &b);
+      glUniform3f(gl->u_edge_act_col, r, g, b);
+      glUniform1i(gl->u_edge_mode3d, mode_3d ? 1 : 0);
+      glUniformMatrix4fv(gl->u_edge_mvp, 1, GL_FALSE, mvp);
+      glUniform1i(gl->u_edge_pulse_en, (st->pulse_enabled && !st->reduce_motion) ? 1 : 0);
+      glUniform1f(gl->u_edge_pulse_ph, (float)st->pulse_phase);
+      glBindVertexArray(gl->vao_edge);
+      glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, (segs + 1) * 2, (GLsizei)gl->edge_count);
+    }
+
+    /* Pass 4: instanced glowing nodes */
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glUseProgram(gl->prog_node);
+    glUniform2f(gl->u_node_vp, vp_w, vp_h);
+    glUniform2f(gl->u_node_pan, (float)st->pan_x, (float)st->pan_y);
+    glUniform1f(gl->u_node_zoom, (float)st->zoom);
+    glUniform1f(gl->u_node_scale, 1.0f);
+    glUniform1f(gl->u_node_bt, bt);
+    glUniform1f(gl->u_node_has_foc, has_focus ? 1.0f : 0.0f);
+    glUniform1f(gl->u_node_hf, hf);
+    glUniform1i(gl->u_node_hq, high ? 1 : 0);
+    bt_theme_unpack_f(BT_COL_GRAPH_NODE_GLOW, &r, &g, &b);
+    glUniform3f(gl->u_node_glow_col, r, g, b);
+    bt_theme_unpack_f(BT_COL_SURFACE_2, &r, &g, &b);
+    glUniform3f(gl->u_node_s2_col, r, g, b);
+    glUniform1i(gl->u_node_mode3d, mode_3d ? 1 : 0);
+    glUniformMatrix4fv(gl->u_node_mvp, 1, GL_FALSE, mvp);
+    glBindVertexArray(gl->vao_node);
+    glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, (GLsizei)gl->node_count);
   }
 
-  /* Pass 4: instanced glowing nodes */
-  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-  glUseProgram(gl->prog_node);
-  glUniform2f(gl->u_node_vp, vp_w, vp_h);
-  glUniform2f(gl->u_node_pan, (float)st->pan_x, (float)st->pan_y);
-  glUniform1f(gl->u_node_zoom, (float)st->zoom);
-  glUniform1f(gl->u_node_scale, 1.0f);
-  glUniform1f(gl->u_node_bt, bt);
-  glUniform1f(gl->u_node_has_foc, has_focus ? 1.0f : 0.0f);
-  glUniform1f(gl->u_node_hf, hf);
-  glUniform1i(gl->u_node_hq, high ? 1 : 0);
-  bt_theme_unpack_f(BT_COL_GRAPH_NODE_GLOW, &r, &g, &b);
-  glUniform3f(gl->u_node_glow_col, r, g, b);
-  bt_theme_unpack_f(BT_COL_SURFACE_2, &r, &g, &b);
-  glUniform3f(gl->u_node_s2_col, r, g, b);
-  glBindVertexArray(gl->vao_node);
-  glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, (GLsizei)gl->node_count);
+  /* Pass 5: Half-res two-pass Gaussian bloom composite (High quality only) */
+  if (use_bloom) {
+    int hw = MAX(fb_w / 2, 2);
+    int hh = MAX(fb_h / 2, 2);
+    glDisable(GL_BLEND);
+    glBindVertexArray(gl->vao_bg);
 
-  /* Pass 5: cached Pango RGBA label atlas (zero per-frame heap alloc) */
-  if (gl->atlas_slots != NULL && gl->tex_atlas != 0) {
+    /* 5a. Extract bright luminous features to half-res bloom_fbo[0] */
+    glBindFramebuffer(GL_FRAMEBUFFER, gl->bloom_fbo[0]);
+    glViewport(0, 0, hw, hh);
+    glUseProgram(gl->prog_extract);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, gl->scene_tex);
+    glUniform1i(gl->u_ext_scene, 0);
+    glUniform1f(gl->u_ext_thresh, 0.22f);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+
+    /* 5b. Horizontal Gaussian blur: bloom_tex[0] -> bloom_fbo[1] */
+    glBindFramebuffer(GL_FRAMEBUFFER, gl->bloom_fbo[1]);
+    glUseProgram(gl->prog_blur);
+    glBindTexture(GL_TEXTURE_2D, gl->bloom_tex[0]);
+    glUniform1i(gl->u_blur_tex, 0);
+    glUniform2f(gl->u_blur_dir, 1.0f / (float)hw, 0.0f);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+
+    /* 5c. Vertical Gaussian blur: bloom_tex[1] -> bloom_fbo[0] */
+    glBindFramebuffer(GL_FRAMEBUFFER, gl->bloom_fbo[0]);
+    glBindTexture(GL_TEXTURE_2D, gl->bloom_tex[1]);
+    glUniform2f(gl->u_blur_dir, 0.0f, 1.0f / (float)hh);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+
+    /* 5d. Composite scene + bloom back into target_fbo */
+    glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)target_fbo);
+    glViewport(0, 0, fb_w, fb_h);
+    glUseProgram(gl->prog_composite);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, gl->scene_tex);
+    glUniform1i(gl->u_comp_scene, 0);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, gl->bloom_tex[0]);
+    glUniform1i(gl->u_comp_bloom, 1);
+    glUniform1f(gl->u_comp_str, 0.68f);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+  }
+
+  /* Pass 6: Crisp Pango RGBA label atlas drawn AFTER bloom so text stays sharp */
+  if (st->graph != NULL && gl->node_count > 0 && gl->atlas_slots != NULL && gl->tex_atlas != 0) {
     guint lbl_n = 0;
     float bt_eased = 1.0f - powf(1.0f - CLAMP(bt, 0.0f, 1.0f), 3.0f);
+    gdouble eff_zoom = mode_3d ? CLAMP(2.6 / MAX(st->dist3d, 1.2), 0.5, 2.0) : st->zoom;
+
     for (guint i = 0; i < gl->node_count && i < gl->atlas_slot_count && lbl_n < BT_GL_LABEL_CAP; i++) {
       if (!gl->atlas_slots[i].valid)
         continue;
@@ -651,13 +878,31 @@ void bt_graph_gl_render_state(BtGraphGL *gl, const BtGraphRenderState *st)
       guint8 nbr = (st->nbr_mask != NULL && i < st->nbr_mask_len) ? st->nbr_mask[i] : BT_NBR_NONE;
       gboolean is_sel = ((gint)i == st->selected_idx);
       gboolean is_kbd = ((gint)i == st->focus_idx);
-      gdouble la = bt_graph_label_alpha(nd, nbr, is_sel, is_kbd, st->hub_thresh, st->zoom,
+      gdouble la = bt_graph_label_alpha(nd, nbr, is_sel, is_kbd, st->hub_thresh, eff_zoom,
                                         has_focus, (gdouble)hf, gl->node_count);
       if (la < 0.06)
         continue;
 
-      float sx = vp_w * 0.5f + (float)st->pan_x + (float)nd->x * bt_eased * (float)st->zoom;
-      float sy = vp_h * 0.5f + (float)st->pan_y + (float)nd->y * bt_eased * (float)st->zoom;
+      float sx = 0.0f, sy = 0.0f, y_off = (float)nd->radius * (float)eff_zoom + 5.0f;
+      if (mode_3d) {
+        if (i >= gl->pts3d_count)
+          continue;
+        BtGraphVec3 pt = {gl->pts3d[i].x * bt_eased, gl->pts3d[i].y * bt_eased,
+                          gl->pts3d[i].z * bt_eased};
+        gdouble psx = 0.0, psy = 0.0, pw = 0.0;
+        if (!bt_graph_project_3d(mvp, &pt, (gdouble)vp_w, (gdouble)vp_h, &psx, &psy, &pw))
+          continue;
+        sx = (float)psx;
+        sy = (float)psy;
+        if (nbr == BT_NBR_NONE && !is_sel && !is_kbd)
+          la *= CLAMP(1.42 - pw * 0.22, 0.25, 1.0);
+        if (la < 0.06)
+          continue;
+      } else {
+        sx = vp_w * 0.5f + (float)st->pan_x + (float)nd->x * bt_eased * (float)st->zoom;
+        sy = vp_h * 0.5f + (float)st->pan_y + (float)nd->y * bt_eased * (float)st->zoom;
+      }
+
       const AtlasSlot *sl = &gl->atlas_slots[i];
       if (sx + sl->w_log * 0.5f < 0.0f || sx - sl->w_log * 0.5f > vp_w ||
           sy + sl->h_log + 24.0f < 0.0f || sy - 24.0f > vp_h)
@@ -665,7 +910,7 @@ void bt_graph_gl_render_state(BtGraphGL *gl, const BtGraphRenderState *st)
 
       LabelInst *li = &gl->label_scratch[lbl_n++];
       li->x = floorf(sx - sl->w_log * 0.5f);
-      li->y = floorf(sy + (float)nd->radius * (float)st->zoom + 5.0f);
+      li->y = floorf(sy + y_off);
       li->w = sl->w_log;
       li->h = sl->h_log;
       li->u0 = sl->u0;
@@ -682,6 +927,7 @@ void bt_graph_gl_render_state(BtGraphGL *gl, const BtGraphRenderState *st)
                       gl->label_scratch);
       glBindBuffer(GL_ARRAY_BUFFER, 0);
 
+      glEnable(GL_BLEND);
       glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
       glUseProgram(gl->prog_label);
       glUniform2f(gl->u_lbl_vp, vp_w, vp_h);
@@ -747,7 +993,15 @@ static void on_realize(GtkWidget *widget, gpointer ud)
       gl->prog_label = link_program("graph_label.vert.glsl", "graph_label.frag.glsl", probe.is_gles);
       probe.shaders_ok = (gl->prog_bg && gl->prog_dust && gl->prog_edge &&
                           gl->prog_node && gl->prog_label);
-      probe.fbo_ok = TRUE; /* FBO bloom added in Step 3 */
+
+      /* Bloom shaders are optional: if they fail, downgrade bloom off without failing GL. */
+      gl->prog_extract =
+          link_program("graph_bg.vert.glsl", "graph_bloom_extract.frag.glsl", probe.is_gles);
+      gl->prog_blur =
+          link_program("graph_bg.vert.glsl", "graph_bloom_blur.frag.glsl", probe.is_gles);
+      gl->prog_composite =
+          link_program("graph_bg.vert.glsl", "graph_bloom_composite.frag.glsl", probe.is_gles);
+      probe.fbo_ok = (gl->prog_extract && gl->prog_blur && gl->prog_composite);
     }
   }
 
@@ -761,6 +1015,8 @@ static void on_realize(GtkWidget *widget, gpointer ud)
       gl->on_fallback(dec.reason, gl->user_data);
     return;
   }
+
+  gl->bloom_supported = dec.bloom_enabled;
 
   /* Cache uniform locations once. */
   gl->u_bg_col = glGetUniformLocation(gl->prog_bg, "u_bg_col");
@@ -778,6 +1034,7 @@ static void on_realize(GtkWidget *widget, gpointer ud)
   gl->u_edge_scale = glGetUniformLocation(gl->prog_edge, "u_scale");
   gl->u_edge_bt = glGetUniformLocation(gl->prog_edge, "u_birth_t");
   gl->u_edge_foc = glGetUniformLocation(gl->prog_edge, "u_focus_idx");
+  gl->u_edge_sel = glGetUniformLocation(gl->prog_edge, "u_selected_idx");
   gl->u_edge_hf = glGetUniformLocation(gl->prog_edge, "u_hover_fade");
   gl->u_edge_segs = glGetUniformLocation(gl->prog_edge, "u_seg_count");
   gl->u_edge_curved = glGetUniformLocation(gl->prog_edge, "u_curved");
@@ -785,6 +1042,10 @@ static void on_realize(GtkWidget *widget, gpointer ud)
   gl->u_edge_hw = glGetUniformLocation(gl->prog_edge, "u_half_width");
   gl->u_edge_dim_col = glGetUniformLocation(gl->prog_edge, "u_dim_col");
   gl->u_edge_act_col = glGetUniformLocation(gl->prog_edge, "u_active_col");
+  gl->u_edge_mode3d = glGetUniformLocation(gl->prog_edge, "u_mode_3d");
+  gl->u_edge_mvp = glGetUniformLocation(gl->prog_edge, "u_mvp");
+  gl->u_edge_pulse_en = glGetUniformLocation(gl->prog_edge, "u_pulse_enabled");
+  gl->u_edge_pulse_ph = glGetUniformLocation(gl->prog_edge, "u_pulse_phase");
 
   gl->u_node_vp = glGetUniformLocation(gl->prog_node, "u_viewport");
   gl->u_node_pan = glGetUniformLocation(gl->prog_node, "u_pan");
@@ -796,6 +1057,8 @@ static void on_realize(GtkWidget *widget, gpointer ud)
   gl->u_node_hq = glGetUniformLocation(gl->prog_node, "u_high_quality");
   gl->u_node_glow_col = glGetUniformLocation(gl->prog_node, "u_glow_col");
   gl->u_node_s2_col = glGetUniformLocation(gl->prog_node, "u_surface2_col");
+  gl->u_node_mode3d = glGetUniformLocation(gl->prog_node, "u_mode_3d");
+  gl->u_node_mvp = glGetUniformLocation(gl->prog_node, "u_mvp");
 
   gl->u_lbl_vp = glGetUniformLocation(gl->prog_label, "u_viewport");
   gl->u_lbl_atlas = glGetUniformLocation(gl->prog_label, "u_atlas");
@@ -803,10 +1066,21 @@ static void on_realize(GtkWidget *widget, gpointer ud)
   gl->u_lbl_ts = glGetUniformLocation(gl->prog_label, "u_text_secondary");
   gl->u_lbl_pbg = glGetUniformLocation(gl->prog_label, "u_pill_bg");
 
+  if (gl->bloom_supported) {
+    gl->u_ext_scene = glGetUniformLocation(gl->prog_extract, "u_scene");
+    gl->u_ext_thresh = glGetUniformLocation(gl->prog_extract, "u_threshold");
+    gl->u_blur_tex = glGetUniformLocation(gl->prog_blur, "u_tex");
+    gl->u_blur_dir = glGetUniformLocation(gl->prog_blur, "u_dir");
+    gl->u_comp_scene = glGetUniformLocation(gl->prog_composite, "u_scene");
+    gl->u_comp_bloom = glGetUniformLocation(gl->prog_composite, "u_bloom");
+    gl->u_comp_str = glGetUniformLocation(gl->prog_composite, "u_strength");
+  }
+
   init_dust_vbo(gl);
   init_dynamic_vaos(gl);
   gl->gl_ready = TRUE;
   gl->graph_dirty = TRUE;
+  gl->layout3d_dirty = TRUE;
   gl->state_dirty = TRUE;
   gl->atlas_dirty = TRUE;
   gl->init_ms = (gdouble)(g_get_monotonic_time() - t0) / 1000.0;
@@ -846,6 +1120,7 @@ BtGraphGL *bt_graph_gl_new(BtGraphGLStateFillFn fill_state, BtGraphGLFallbackFn 
   gl->on_fallback = on_fallback;
   gl->user_data = user_data;
   gl->graph_dirty = TRUE;
+  gl->layout3d_dirty = TRUE;
   gl->state_dirty = TRUE;
   gl->atlas_dirty = TRUE;
 
@@ -868,6 +1143,7 @@ void bt_graph_gl_free(BtGraphGL *gl)
 {
   if (gl == NULL)
     return;
+  g_free(gl->pts3d);
   g_free(gl->node_state_scratch);
   g_free(gl->atlas_slots);
   g_free(gl);
@@ -884,8 +1160,23 @@ void bt_graph_gl_set_graph(BtGraphGL *gl, const BtGraph *graph)
     return;
   gl->graph = graph;
   gl->graph_dirty = TRUE;
+  gl->layout3d_dirty = TRUE;
   gl->state_dirty = TRUE;
   gl->atlas_dirty = TRUE;
+}
+
+void bt_graph_gl_set_layout3d(BtGraphGL *gl, const BtGraphVec3 *pts, guint count)
+{
+  if (gl == NULL)
+    return;
+  g_free(gl->pts3d);
+  gl->pts3d = NULL;
+  gl->pts3d_count = 0;
+  if (pts != NULL && count > 0) {
+    gl->pts3d = g_memdup2(pts, count * sizeof(BtGraphVec3));
+    gl->pts3d_count = count;
+  }
+  gl->layout3d_dirty = TRUE;
 }
 
 void bt_graph_gl_mark_state_dirty(BtGraphGL *gl)
@@ -908,6 +1199,11 @@ gboolean bt_graph_gl_is_ready(const BtGraphGL *gl)
 gboolean bt_graph_gl_has_failed(const BtGraphGL *gl)
 {
   return gl != NULL && gl->gl_failed;
+}
+
+gboolean bt_graph_gl_bloom_ready(const BtGraphGL *gl)
+{
+  return gl != NULL && gl->bloom_supported;
 }
 
 const gchar *bt_graph_gl_vendor(const BtGraphGL *gl)

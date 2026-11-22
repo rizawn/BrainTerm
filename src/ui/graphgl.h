@@ -23,11 +23,13 @@ void bt_graph_gl_free(BtGraphGL *gl);
 
 GtkWidget *bt_graph_gl_widget(BtGraphGL *gl);
 void bt_graph_gl_set_graph(BtGraphGL *gl, const BtGraph *graph);
+void bt_graph_gl_set_layout3d(BtGraphGL *gl, const BtGraphVec3 *pts, guint count);
 void bt_graph_gl_mark_state_dirty(BtGraphGL *gl);
 void bt_graph_gl_queue_render(BtGraphGL *gl);
 
 gboolean bt_graph_gl_is_ready(const BtGraphGL *gl);
 gboolean bt_graph_gl_has_failed(const BtGraphGL *gl);
+gboolean bt_graph_gl_bloom_ready(const BtGraphGL *gl);
 const gchar *bt_graph_gl_vendor(const BtGraphGL *gl);
 const gchar *bt_graph_gl_renderer(const BtGraphGL *gl);
 const gchar *bt_graph_gl_version(const BtGraphGL *gl);

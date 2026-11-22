@@ -1,12 +1,14 @@
-/* bench_graph_gl.c — Brain Graph v2 OpenGL 2D benchmark (Step 2):
- *   - Realizes GtkGLArea inside a real window, reports GL_VENDOR / GL_RENDERER / GL_VERSION.
- *   - Measures GL init time + offscreen 800x600 FBO frame time (with glFinish) for:
- *       1k nodes / 3k edges (Low & High)
- *       3k nodes / 9k edges (Low & High)
- *   - Verifies rendered pixels are non-uniform via glReadPixels.
+/* bench_graph_gl.c — Brain Graph v2 OpenGL 2D + Bloom + 3D Orbit benchmark (Step 3):
+ *   - Realizes GtkGLArea, reports GL_VENDOR / GL_RENDERER / GL_VERSION + init_ms.
+ *   - Measures 800x600 offscreen FBO frame time (60 frames + glFinish) for:
+ *       2D 1k/3k Low (no bloom), 2D 1k/3k High (with half-res Gaussian bloom),
+ *       2D 3k/9k Low (no bloom), 2D 3k/9k High (with bloom),
+ *       3D 1k/3k High (orbit + bloom), 3D 3k/9k High (orbit + bloom).
+ *   - Verifies non-uniform rendered pixels for both 2D bloom and 3D bloom.
  *   - Exits 77 (Meson skip) cleanly if no display or GL context is unavailable. */
 #include <epoxy/gl.h>
 #include <gtk/gtk.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -72,10 +74,12 @@ static void dummy_fill(BtGraphRenderState *out, gpointer ud)
   (void)ud;
   out->quality = BT_GRAPH_QUALITY_HIGH;
   out->zoom = 1.0;
+  out->dist3d = 2.8;
 }
 
-static double bench_gl_case(BtGraphGL *gl, const BtGraph *g, BtGraphQuality q,
-                            const char *label, guint frames, guint *nonbg_out)
+static double bench_gl_case(BtGraphGL *gl, const BtGraph *g, const BtGraphVec3 *pts3d,
+                            BtGraphMode mode, BtGraphQuality q, const char *label,
+                            guint frames, guint *nonbg_out)
 {
   guint n = g->nodes->len;
   guint e = g->edges->len;
@@ -83,16 +87,21 @@ static double bench_gl_case(BtGraphGL *gl, const BtGraph *g, BtGraphQuality q,
   guint hub_thresh = bt_graph_hub_degree_threshold(g);
 
   bt_graph_gl_set_graph(gl, g);
+  if (pts3d != NULL)
+    bt_graph_gl_set_layout3d(gl, pts3d, n);
+
   BtGraphRenderState st = {
     .graph = g, .width = 800, .height = 600, .scale = 1,
     .pan_x = 0.0, .pan_y = 0.0, .zoom = 1.0,
-    .hover_idx = -1, .selected_idx = -1, .focus_idx = -1,
+    .yaw = 0.35, .pitch = 0.22, .dist3d = 2.7,
+    .hover_idx = -1, .selected_idx = 0, .focus_idx = -1,
     .hover_fade = 0.0, .nbr_mask = mask, .nbr_mask_len = n,
-    .hub_thresh = hub_thresh, .time_sec = 0.0,
-    .quality = q, .mode = BT_GRAPH_MODE_2D, .reduce_motion = FALSE,
+    .hub_thresh = hub_thresh, .time_sec = 0.0, .pulse_phase = 0.0,
+    .quality = q, .mode = mode, .reduce_motion = FALSE,
+    .pulse_enabled = (q == BT_GRAPH_QUALITY_HIGH),
   };
 
-  /* Warmup + initial upload + atlas build (excluded from steady-state frame timing). */
+  /* Warmup + initial upload + FBO alloc + atlas build. */
   bt_graph_gl_render_state(gl, &st);
   bt_graph_gl_render_state(gl, &st);
   glFinish();
@@ -100,7 +109,9 @@ static double bench_gl_case(BtGraphGL *gl, const BtGraph *g, BtGraphQuality q,
   gint64 t0 = g_get_monotonic_time();
   for (guint f = 0; f < frames; f++) {
     st.pan_x = (gdouble)(f % 30) * 1.5;
+    st.yaw = 0.35 + (gdouble)f * 0.02;
     st.time_sec = (gdouble)f * 0.016;
+    st.pulse_phase = fmod((gdouble)f * 0.03, 1.0);
     bt_graph_gl_render_state(gl, &st);
   }
   glFinish();
@@ -118,7 +129,7 @@ static double bench_gl_case(BtGraphGL *gl, const BtGraph *g, BtGraphQuality q,
     *nonbg_out = diff;
   }
 
-  printf("BT_BENCH_GL %-16s nodes=%u edges=%u avg_ms=%.3f fps=%.1f\n",
+  printf("BT_BENCH_GL %-18s nodes=%u edges=%u avg_ms=%.3f fps=%.1f\n",
          label, n, e, avg_ms, fps);
   return avg_ms;
 }
@@ -150,14 +161,14 @@ int main(void)
     return 77;
   }
 
-  printf("BT_BENCH_GL info vendor=\"%s\" renderer=\"%s\" version=\"%s\" init_ms=%.2f\n",
+  printf("BT_BENCH_GL info vendor=\"%s\" renderer=\"%s\" version=\"%s\" bloom=%d init_ms=%.2f\n",
          bt_graph_gl_vendor(gl), bt_graph_gl_renderer(gl),
-         bt_graph_gl_version(gl), bt_graph_gl_init_ms(gl));
+         bt_graph_gl_version(gl), bt_graph_gl_bloom_ready(gl) ? 1 : 0,
+         bt_graph_gl_init_ms(gl));
 
   GtkGLArea *area = GTK_GL_AREA(bt_graph_gl_widget(gl));
   gtk_gl_area_make_current(area);
 
-  /* Create 800x600 offscreen FBO for deterministic, vsync-free GPU frame timing. */
   GLuint fbo = 0, tex = 0;
   glGenFramebuffers(1, &fbo);
   glBindFramebuffer(GL_FRAMEBUFFER, fbo);
@@ -178,15 +189,29 @@ int main(void)
   }
 
   BtGraph *g1k = make_bench_graph(1000, 3000);
-  guint diff_1k = 0;
-  double ms_1k_low = bench_gl_case(gl, g1k, BT_GRAPH_QUALITY_LOW, "gl_1k_3k_low", 60, NULL);
-  double ms_1k_high = bench_gl_case(gl, g1k, BT_GRAPH_QUALITY_HIGH, "gl_1k_3k_high", 60, &diff_1k);
+  g_autofree BtGraphVec3 *pts1k = g_new0(BtGraphVec3, 1000);
+  bt_graph_compute_3d_layout(g1k, pts1k, 1000);
+
+  guint diff_2d = 0, diff_3d = 0;
+  double ms_2d_1k_low =
+      bench_gl_case(gl, g1k, pts1k, BT_GRAPH_MODE_2D, BT_GRAPH_QUALITY_LOW, "gl_2d_1k_3k_low", 60, NULL);
+  double ms_2d_1k_high =
+      bench_gl_case(gl, g1k, pts1k, BT_GRAPH_MODE_2D, BT_GRAPH_QUALITY_HIGH, "gl_2d_1k_3k_high", 60, &diff_2d);
+  double ms_3d_1k_high =
+      bench_gl_case(gl, g1k, pts1k, BT_GRAPH_MODE_3D, BT_GRAPH_QUALITY_HIGH, "gl_3d_1k_3k_high", 60, &diff_3d);
 
   BtGraph *g3k = make_bench_graph(3000, 9000);
-  double ms_3k_low = bench_gl_case(gl, g3k, BT_GRAPH_QUALITY_LOW, "gl_3k_9k_low", 60, NULL);
-  double ms_3k_high = bench_gl_case(gl, g3k, BT_GRAPH_QUALITY_HIGH, "gl_3k_9k_high", 60, NULL);
+  g_autofree BtGraphVec3 *pts3k = g_new0(BtGraphVec3, 3000);
+  bt_graph_compute_3d_layout(g3k, pts3k, 3000);
 
-  printf("BT_BENCH_GL pixels_diff_1k=%u\n", diff_1k);
+  double ms_2d_3k_low =
+      bench_gl_case(gl, g3k, pts3k, BT_GRAPH_MODE_2D, BT_GRAPH_QUALITY_LOW, "gl_2d_3k_9k_low", 60, NULL);
+  double ms_2d_3k_high =
+      bench_gl_case(gl, g3k, pts3k, BT_GRAPH_MODE_2D, BT_GRAPH_QUALITY_HIGH, "gl_2d_3k_9k_high", 60, NULL);
+  double ms_3d_3k_high =
+      bench_gl_case(gl, g3k, pts3k, BT_GRAPH_MODE_3D, BT_GRAPH_QUALITY_HIGH, "gl_3d_3k_9k_high", 60, NULL);
+
+  printf("BT_BENCH_GL pixels_diff_2d=%u pixels_diff_3d=%u\n", diff_2d, diff_3d);
 
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
   glDeleteTextures(1, &tex);
@@ -199,7 +224,9 @@ int main(void)
     g_main_context_iteration(NULL, FALSE);
   bt_graph_gl_free(gl);
 
-  gboolean ok = (diff_1k > 500u) && (ms_1k_low < 16.6) && (ms_1k_high < 16.6) &&
-                (ms_3k_low < 16.6) && (ms_3k_high < 22.2);
+  gboolean ok = (diff_2d > 500u) && (diff_3d > 500u) &&
+                (ms_2d_1k_low < 16.6) && (ms_2d_1k_high < 16.6) &&
+                (ms_3d_1k_high < 16.6) && (ms_2d_3k_low < 16.6) &&
+                (ms_2d_3k_high < 22.2) && (ms_3d_3k_high < 22.2);
   return ok ? 0 : 1;
 }

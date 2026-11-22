@@ -27,6 +27,10 @@ void bt_graphview_set_graph(BtGraphView *gv, BtGraph *graph, gboolean animate_gr
 void bt_graphview_set_dark(BtGraphView *gv, gboolean dark);
 void bt_graphview_set_quality(BtGraphView *gv, BtGraphQuality quality);
 BtGraphQuality bt_graphview_get_quality(const BtGraphView *gv);
+void bt_graphview_set_mode(BtGraphView *gv, BtGraphMode mode);
+BtGraphMode bt_graphview_get_mode(const BtGraphView *gv);
+void bt_graphview_set_pulse(BtGraphView *gv, gboolean enabled);
+gboolean bt_graphview_get_pulse(const BtGraphView *gv);
 void bt_graphview_set_reduce_motion(BtGraphView *gv, gboolean reduce_motion);
 gboolean bt_graphview_get_reduce_motion(const BtGraphView *gv);
 void bt_graphview_set_notice_cb(BtGraphView *gv, BtGraphNoticeFn on_notice, gpointer user_data);

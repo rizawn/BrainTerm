@@ -220,3 +220,90 @@ void bt_graph_compute_3d_layout(const BtGraph *g, BtGraphVec3 *out_pts, guint ma
     }
   }
 }
+
+static void mat4_mul(const float a[16], const float b[16], float out[16])
+{
+  float r[16];
+  for (int c = 0; c < 4; c++) {
+    for (int row = 0; row < 4; row++) {
+      r[c * 4 + row] = a[0 * 4 + row] * b[c * 4 + 0] +
+                       a[1 * 4 + row] * b[c * 4 + 1] +
+                       a[2 * 4 + row] * b[c * 4 + 2] +
+                       a[3 * 4 + row] * b[c * 4 + 3];
+    }
+  }
+  memcpy(out, r, sizeof(r));
+}
+
+void bt_graph_build_orbit_mvp(gdouble yaw, gdouble pitch, gdouble dist, gdouble aspect,
+                              float mvp_out[16])
+{
+  gdouble asp = MAX(aspect, 0.1);
+  gdouble fov = 45.0 * (M_PI / 180.0);
+  gdouble f = 1.0 / tan(fov * 0.5);
+  gdouble zn = 0.1, zf = 20.0;
+
+  /* Perspective matrix (column-major). */
+  float proj[16];
+  memset(proj, 0, sizeof(proj));
+  proj[0] = (float)(f / asp);
+  proj[5] = (float)f;
+  proj[10] = (float)((zf + zn) / (zn - zf));
+  proj[11] = -1.0f;
+  proj[14] = (float)((2.0 * zf * zn) / (zn - zf));
+
+  /* Camera orbits origin at (yaw, pitch, dist). */
+  gdouble cp = cos(pitch), sp = sin(pitch);
+  gdouble cy = cos(yaw), sy = sin(yaw);
+  gdouble ex = dist * cp * sy;
+  gdouble ey = dist * sp;
+  gdouble ez = dist * cp * cy;
+
+  /* LookAt(eye, (0,0,0), (0,1,0)) */
+  gdouble fl = hypot(hypot(ex, ey), ez);
+  gdouble fx = -ex / MAX(fl, 1e-6);
+  gdouble fy = -ey / MAX(fl, 1e-6);
+  gdouble fz = -ez / MAX(fl, 1e-6);
+
+  /* side = normalize(cross(forward, up(0,1,0))) = (-fz, 0, fx) */
+  gdouble sx = -fz, sy_v = 0.0, sz = fx;
+  gdouble sl = hypot(sx, sz);
+  if (sl < 1e-6) {
+    sx = 1.0; sz = 0.0; sl = 1.0;
+  }
+  sx /= sl;
+  sz /= sl;
+
+  /* true up = cross(side, forward) */
+  gdouble ux = sy_v * fz - sz * fy;
+  gdouble uy = sz * fx - sx * fz;
+  gdouble uz = sx * fy - sy_v * fx;
+
+  float view[16];
+  memset(view, 0, sizeof(view));
+  view[0] = (float)sx;  view[4] = (float)sy_v; view[8]  = (float)sz;  view[12] = (float)-(sx * ex + sy_v * ey + sz * ez);
+  view[1] = (float)ux;  view[5] = (float)uy;   view[9]  = (float)uz;  view[13] = (float)-(ux * ex + uy * ey + uz * ez);
+  view[2] = (float)-fx; view[6] = (float)-fy;  view[10] = (float)-fz; view[14] = (float)(fx * ex + fy * ey + fz * ez);
+  view[15] = 1.0f;
+
+  mat4_mul(proj, view, mvp_out);
+}
+
+gboolean bt_graph_project_3d(const float mvp[16], const BtGraphVec3 *pt, gdouble vp_w,
+                             gdouble vp_h, gdouble *sx_out, gdouble *sy_out, gdouble *w_out)
+{
+  if (mvp == NULL || pt == NULL)
+    return FALSE;
+  float x = pt->x, y = pt->y, z = pt->z;
+  float cx = mvp[0] * x + mvp[4] * y + mvp[8] * z + mvp[12];
+  float cy = mvp[1] * x + mvp[5] * y + mvp[9] * z + mvp[13];
+  float cw = mvp[3] * x + mvp[7] * y + mvp[11] * z + mvp[15];
+  if (cw <= 0.15f)
+    return FALSE;
+  float nx = cx / cw;
+  float ny = cy / cw;
+  if (sx_out) *sx_out = ((gdouble)nx * 0.5 + 0.5) * vp_w;
+  if (sy_out) *sy_out = (0.5 - (gdouble)ny * 0.5) * vp_h;
+  if (w_out) *w_out = (gdouble)cw;
+  return TRUE;
+}

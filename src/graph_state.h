@@ -74,6 +74,15 @@ gdouble bt_graph_label_alpha(const BtGraphNode *nd, guint8 nbr_state, gboolean i
  * Writes MIN(g->nodes->len, max_pts) normalized points into out_pts. */
 void bt_graph_compute_3d_layout(const BtGraph *g, BtGraphVec3 *out_pts, guint max_pts);
 
+/* Builds column-major 4x4 perspective orbit MVP matrix for 3D graph mode. */
+void bt_graph_build_orbit_mvp(gdouble yaw, gdouble pitch, gdouble dist, gdouble aspect,
+                              float mvp_out[16]);
+
+/* Projects a 3D point via mvp into logical screen coordinates (sx, sy) and clip w.
+ * Returns FALSE if behind the near plane. */
+gboolean bt_graph_project_3d(const float mvp[16], const BtGraphVec3 *pt, gdouble vp_w,
+                             gdouble vp_h, gdouble *sx_out, gdouble *sy_out, gdouble *w_out);
+
 G_END_DECLS
 
 #endif
