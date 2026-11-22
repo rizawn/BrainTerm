@@ -1,0 +1,748 @@
+/* theme.css — BrainTerm "Dusk": calm, dark, flat. The ONLY stylesheet.
+ *
+ * Tokens below are mirrored in src/theme.h (BT_COL_*); tests/unit/test_theme.c
+ * fails if they drift. Hot-reload while developing:
+ *     set BRAINTERM_CSS_DEV=C:\path\to\BrainTerm\data\theme.css
+ *
+ * Scale: spacing 4/8/12/16/24, radius 8 (panels) / 6 (controls), 140ms ease-out.
+ */
+
+@define-color bt_bg_base        #0E0F12;
+@define-color bt_surface_1      #15171C;
+@define-color bt_surface_2      #1B1E24;
+@define-color bt_border         #262A32;
+@define-color bt_border_strong  #343944;
+@define-color bt_text_primary   #E6E8EC;
+@define-color bt_text_secondary #9AA1AD;
+@define-color bt_text_muted     #666D79;
+@define-color bt_accent         #8B7CF6;
+@define-color bt_accent_soft    alpha(#8B7CF6, 0.14);
+@define-color bt_accent_sel     alpha(#8B7CF6, 0.30);
+@define-color bt_success        #4ADE80;
+@define-color bt_warning        #FBBF24;
+@define-color bt_danger         #F87171;
+
+/* ---- Re-point libadwaita named colors at our tokens ---------------------- */
+@define-color accent_color            @bt_accent;
+@define-color accent_bg_color         @bt_accent;
+@define-color accent_fg_color         #0E0F12;
+@define-color destructive_color       @bt_danger;
+@define-color destructive_bg_color    @bt_danger;
+@define-color success_color           @bt_success;
+@define-color warning_color           @bt_warning;
+@define-color error_color             @bt_danger;
+@define-color window_bg_color         @bt_bg_base;
+@define-color window_fg_color         @bt_text_primary;
+@define-color view_bg_color           @bt_surface_1;
+@define-color view_fg_color           @bt_text_primary;
+@define-color headerbar_bg_color      @bt_bg_base;
+@define-color headerbar_fg_color      @bt_text_primary;
+@define-color headerbar_border_color  transparent;
+@define-color headerbar_backdrop_color @bt_bg_base;
+@define-color headerbar_shade_color   transparent;
+@define-color card_bg_color           @bt_surface_1;
+@define-color card_fg_color           @bt_text_primary;
+@define-color card_shade_color        transparent;
+@define-color popover_bg_color        @bt_surface_2;
+@define-color popover_fg_color        @bt_text_primary;
+@define-color popover_shade_color     transparent;
+@define-color dialog_bg_color         @bt_surface_1;
+@define-color dialog_fg_color         @bt_text_primary;
+@define-color sidebar_bg_color        @bt_bg_base;
+@define-color sidebar_fg_color        @bt_text_primary;
+@define-color sidebar_backdrop_color  @bt_bg_base;
+@define-color sidebar_shade_color     transparent;
+@define-color sidebar_border_color    transparent;
+@define-color secondary_sidebar_bg_color @bt_bg_base;
+@define-color thumbnail_bg_color      @bt_surface_2;
+@define-color thumbnail_fg_color      @bt_text_primary;
+@define-color shade_color             transparent;
+@define-color scrollbar_outline_color transparent;
+
+/* ---- Base ---------------------------------------------------------------- */
+* {
+  font-family: "Inter", "Inter Variable", "Segoe UI Variable", "Segoe UI", sans-serif;
+  font-size: 13px;
+}
+
+window,
+window.background,
+.background {
+  background-color: @bt_bg_base;
+  color: @bt_text_primary;
+}
+
+.bt-mono,
+.bt-mono * {
+  font-family: "JetBrains Mono", "Cascadia Mono", "Consolas", monospace;
+}
+
+label.dim-label,
+.dim-label,
+.subtitle {
+  color: @bt_text_secondary;
+  opacity: 1;
+}
+
+separator {
+  background-color: @bt_border;
+  min-width: 1px;
+  min-height: 1px;
+}
+
+/* Visible keyboard focus (accent). */
+*:focus-visible {
+  outline: 2px solid @bt_accent;
+  outline-offset: -2px;
+  outline-style: solid;
+}
+
+textview:focus-visible,
+textview text:focus-visible,
+.bt-terminal-area:focus-visible,
+paned > separator:focus-visible {
+  outline: none;
+}
+
+/* ---- Header bar ---------------------------------------------------------- */
+headerbar {
+  background-color: @bt_bg_base;
+  background-image: none;
+  color: @bt_text_primary;
+  border: none;
+  box-shadow: none;
+  min-height: 44px;
+  padding: 0 0 0 12px;
+}
+
+headerbar windowtitle .title {
+  font-size: 13px;
+  font-weight: 600;
+  color: @bt_text_primary;
+}
+
+headerbar windowtitle .subtitle {
+  font-size: 11px;
+  font-weight: 400;
+  color: @bt_text_secondary;
+}
+
+/* Windows 11 style caption buttons: 46px wide, square, red close. */
+windowcontrols {
+  margin: 0;
+  padding: 0;
+}
+
+windowcontrols > button {
+  min-width: 46px;
+  min-height: 44px;
+  margin: 0;
+  padding: 0;
+  border-radius: 0;
+  border: none;
+  background: transparent;
+  color: @bt_text_secondary;
+  box-shadow: none;
+}
+
+windowcontrols > button:hover {
+  background-color: @bt_surface_2;
+  color: @bt_text_primary;
+}
+
+windowcontrols > button:active {
+  background-color: @bt_border;
+}
+
+windowcontrols > button.close:hover {
+  background-color: @bt_danger;
+  color: #0E0F12;
+}
+
+windowcontrols > button.close:active {
+  background-color: alpha(@bt_danger, 0.8);
+  color: #0E0F12;
+}
+
+/* ---- Buttons ------------------------------------------------------------- */
+button {
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background-color: transparent;
+  background-image: none;
+  color: @bt_text_secondary;
+  box-shadow: none;
+  text-shadow: none;
+  transition: background-color 140ms ease-out, color 140ms ease-out,
+              border-color 140ms ease-out;
+}
+
+button:hover {
+  background-color: @bt_surface_2;
+  color: @bt_text_primary;
+}
+
+button:active {
+  background-color: @bt_border;
+  color: @bt_text_primary;
+}
+
+button:disabled {
+  color: @bt_text_muted;
+  background-color: transparent;
+}
+
+button.image-button,
+button.bt-iconbtn {
+  min-width: 28px;
+  padding: 0;
+}
+
+button.bt-iconbtn image {
+  -gtk-icon-size: 16px;
+}
+
+button.bt-hairline,
+button.bt-outline {
+  border-color: @bt_border;
+  background-color: @bt_surface_1;
+}
+
+button.bt-hairline:hover,
+button.bt-outline:hover {
+  border-color: @bt_border_strong;
+  background-color: @bt_surface_2;
+}
+
+/* ---- Segmented control (Editor | Sessions | Graph) ----------------------- */
+.bt-segmented {
+  background-color: @bt_surface_1;
+  border: 1px solid @bt_border;
+  border-radius: 8px;
+  padding: 2px;
+}
+
+.bt-segmented > button {
+  margin: 0;
+  min-height: 26px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 6px;
+  background-color: transparent;
+  color: @bt_text_secondary;
+}
+
+.bt-segmented > button:hover {
+  background-color: alpha(@bt_surface_2, 0.7);
+  color: @bt_text_primary;
+}
+
+.bt-segmented > button:checked {
+  background-color: @bt_surface_2;
+  background-image: linear-gradient(@bt_accent_soft, @bt_accent_soft);
+  color: @bt_accent;
+}
+
+.bt-segmented > button image {
+  -gtk-icon-size: 16px;
+}
+
+/* ---- Agent split button -------------------------------------------------- */
+splitbutton {
+  border-radius: 8px;
+}
+
+splitbutton > button,
+splitbutton > menubutton > button {
+  min-height: 28px;
+  background-color: @bt_surface_1;
+  border: 1px solid @bt_border;
+  color: @bt_text_primary;
+  border-radius: 6px;
+}
+
+splitbutton > button {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+  border-right-width: 0;
+  padding: 0 12px;
+}
+
+splitbutton > menubutton > button {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  padding: 0 6px;
+}
+
+splitbutton > button:hover,
+splitbutton > menubutton > button:hover {
+  background-color: @bt_surface_2;
+  border-color: @bt_border_strong;
+}
+
+splitbutton > separator {
+  background-color: @bt_border;
+  min-width: 1px;
+}
+
+/* ---- Popovers / menus ---------------------------------------------------- */
+popover > contents {
+  background-color: @bt_surface_2;
+  color: @bt_text_primary;
+  border: 1px solid @bt_border_strong;
+  border-radius: 8px;
+  padding: 4px;
+  box-shadow: 0 8px 24px alpha(black, 0.45);
+}
+
+popover modelbutton,
+popover.menu modelbutton {
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 6px;
+  color: @bt_text_primary;
+}
+
+popover modelbutton:hover,
+popover modelbutton:focus {
+  background-color: @bt_accent_soft;
+  color: @bt_accent;
+}
+
+popover separator {
+  background-color: @bt_border;
+  margin: 4px 0;
+}
+
+/* ---- Cards & layout ------------------------------------------------------ */
+.bt-card {
+  background-color: @bt_surface_1;
+  border: 1px solid @bt_border;
+  border-radius: 8px;
+}
+
+.bt-card-header {
+  min-height: 36px;
+  padding: 0 8px 0 12px;
+  border-bottom: 1px solid @bt_border;
+}
+
+.bt-card-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.6px;
+  color: @bt_text_secondary;
+}
+
+.bt-workspace {
+  padding: 0 8px 0 0;
+}
+
+.bt-body {
+  padding: 0 8px 8px 8px;
+}
+
+/* Transparent 8px split handles; thin accent line on hover. */
+paned > separator {
+  background-color: transparent;
+  background-image: none;
+  min-width: 8px;
+  min-height: 8px;
+  border: none;
+  box-shadow: none;
+}
+
+paned.bt-hsplit > separator:hover {
+  background-image: linear-gradient(to right, transparent 3px, @bt_accent 3px,
+                                    @bt_accent 5px, transparent 5px);
+}
+
+paned.bt-vsplit > separator:hover {
+  background-image: linear-gradient(to bottom, transparent 3px, @bt_accent 3px,
+                                    @bt_accent 5px, transparent 5px);
+}
+
+overlay-split-view,
+overlay-split-view > widget {
+  background-color: transparent;
+  border: none;
+  box-shadow: none;
+}
+
+/* ---- Sidebar ------------------------------------------------------------- */
+.bt-sidebar {
+  background-color: @bt_surface_1;
+}
+
+.bt-sidebar-header {
+  min-height: 40px;
+  padding: 0 8px 0 12px;
+  border-bottom: 1px solid @bt_border;
+}
+
+.bt-vault-name {
+  font-weight: 600;
+  font-size: 13px;
+  color: @bt_text_primary;
+}
+
+listview.navigation-sidebar,
+listview.navigation-sidebar > row {
+  background-color: transparent;
+}
+
+listview.navigation-sidebar {
+  padding: 4px;
+}
+
+listview.navigation-sidebar > row {
+  min-height: 28px;
+  margin: 1px 0;
+  padding: 0 8px 0 4px;
+  border-radius: 6px;
+  border-left: 2px solid transparent;
+  color: @bt_text_secondary;
+  transition: background-color 120ms ease-out, color 120ms ease-out;
+}
+
+listview.navigation-sidebar > row:hover {
+  background-color: @bt_surface_2;
+  color: @bt_text_primary;
+}
+
+listview.navigation-sidebar > row:selected,
+listview.navigation-sidebar > row:selected:hover {
+  background-color: @bt_accent_soft;
+  border-left-color: @bt_accent;
+  border-top-left-radius: 2px;
+  border-bottom-left-radius: 2px;
+  color: @bt_text_primary;
+}
+
+listview.navigation-sidebar > row:selected image {
+  color: @bt_accent;
+}
+
+listview.navigation-sidebar image {
+  -gtk-icon-size: 16px;
+  color: @bt_text_muted;
+}
+
+listview.navigation-sidebar .bt-icon-folder {
+  color: @bt_text_secondary;
+}
+
+listview.navigation-sidebar .bt-icon-special {
+  color: @bt_accent;
+}
+
+treeexpander > indent,
+treeexpander > .expander {
+  min-width: 16px;
+  color: @bt_text_muted;
+}
+
+.bt-badge {
+  font-size: 10px;
+  padding: 0 6px;
+  border-radius: 8px;
+  color: @bt_accent;
+  background-color: @bt_accent_soft;
+}
+
+/* ---- Editor -------------------------------------------------------------- */
+textview.bt-editor,
+textview.bt-editor text {
+  font-family: "Inter", "Inter Variable", "Segoe UI Variable", "Segoe UI", sans-serif;
+  font-size: 15px;
+  background-color: transparent;
+  color: @bt_text_primary;
+  caret-color: @bt_accent;
+}
+
+textview.bt-editor text selection,
+textview.bt-editor selection {
+  background-color: @bt_accent_sel;
+  color: @bt_text_primary;
+}
+
+textview.bt-editor border.left,
+textview.bt-editor border.left text {
+  background-color: transparent;
+  color: @bt_text_muted;
+  font-family: "JetBrains Mono", "Cascadia Mono", "Consolas", monospace;
+  font-size: 11px;
+}
+
+.bt-banner {
+  background-color: alpha(@bt_warning, 0.10);
+  color: @bt_text_primary;
+  border-bottom: 1px solid alpha(@bt_warning, 0.35);
+  padding: 6px 12px;
+}
+
+.bt-chip {
+  background-color: @bt_surface_2;
+  color: @bt_text_secondary;
+  border-radius: 6px;
+  padding: 1px 8px;
+  font-size: 11px;
+}
+
+/* ---- Terminal chrome ----------------------------------------------------- */
+.bt-terminal {
+  background-color: @bt_surface_1;
+  padding: 12px 0 0 12px;
+}
+
+notebook {
+  background-color: transparent;
+}
+
+notebook > header {
+  background-color: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 6px 8px 0 8px;
+  min-height: 0;
+}
+
+notebook > header > tabs {
+  margin: 0;
+}
+
+notebook > header > tabs > tab {
+  min-height: 24px;
+  margin: 0 4px 0 0;
+  padding: 0 8px 0 10px;
+  border: none;
+  border-radius: 6px;
+  background-color: transparent;
+  background-image: none;
+  color: @bt_text_secondary;
+  box-shadow: none;
+  transition: background-color 140ms ease-out, color 140ms ease-out;
+}
+
+notebook > header > tabs > tab:hover {
+  background-color: alpha(@bt_surface_2, 0.7);
+  color: @bt_text_primary;
+}
+
+notebook > header > tabs > tab:checked {
+  background-color: @bt_surface_2;
+  background-image: linear-gradient(@bt_accent_soft, @bt_accent_soft);
+  color: @bt_accent;
+}
+
+notebook > header > tabs > tab button {
+  min-height: 18px;
+  min-width: 18px;
+  padding: 0;
+  border-radius: 4px;
+}
+
+notebook > header button {
+  margin: 0 0 0 2px;
+}
+
+notebook > stack {
+  background-color: transparent;
+}
+
+/* ---- Entries ------------------------------------------------------------- */
+entry,
+searchentry,
+entry.search {
+  min-height: 28px;
+  padding: 0 8px;
+  border-radius: 6px;
+  border: 1px solid @bt_border;
+  background-color: @bt_bg_base;
+  color: @bt_text_primary;
+  caret-color: @bt_accent;
+  box-shadow: none;
+  transition: border-color 140ms ease-out;
+}
+
+entry:focus-within,
+searchentry:focus-within {
+  border-color: @bt_accent;
+  outline: none;
+}
+
+entry selection,
+searchentry selection {
+  background-color: @bt_accent_sel;
+}
+
+/* ---- Scrollbars: thin 6px overlay ---------------------------------------- */
+scrollbar {
+  background: transparent;
+  border: none;
+}
+
+scrollbar slider {
+  min-width: 6px;
+  min-height: 6px;
+  margin: 2px;
+  border-radius: 6px;
+  border: none;
+  background-color: @bt_border_strong;
+  transition: background-color 140ms ease-out;
+}
+
+scrollbar slider:hover {
+  background-color: @bt_text_muted;
+}
+
+scrollbar slider:active {
+  background-color: @bt_accent;
+}
+
+scrollbar.overlay-indicator:not(.hovering) slider {
+  min-width: 4px;
+  min-height: 4px;
+}
+
+scrolledwindow undershoot,
+scrolledwindow overshoot {
+  background: none;
+}
+
+/* ---- Lists (quick open / ask / sessions) --------------------------------- */
+list,
+listview {
+  background-color: transparent;
+  color: @bt_text_primary;
+}
+
+list > row,
+listview > row {
+  border-radius: 6px;
+  padding: 2px 4px;
+}
+
+list > row:hover {
+  background-color: @bt_surface_2;
+}
+
+list > row:selected,
+listview > row:selected {
+  background-color: @bt_accent_soft;
+  color: @bt_text_primary;
+}
+
+window.bt-dialog,
+window.dialog {
+  background-color: @bt_surface_1;
+}
+
+/* ---- Toasts -------------------------------------------------------------- */
+toast {
+  background-color: @bt_surface_2;
+  color: @bt_text_primary;
+  border: 1px solid @bt_border_strong;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px alpha(black, 0.45);
+}
+
+/* ---- Graph overlay controls --------------------------------------------- */
+.bt-graph-controls {
+  background-color: alpha(@bt_surface_2, 0.92);
+  border: 1px solid @bt_border;
+  border-radius: 8px;
+  padding: 2px;
+}
+
+.bt-graph-controls button {
+  min-width: 26px;
+  min-height: 26px;
+  padding: 0;
+}
+
+.bt-graph-legend {
+  background-color: alpha(@bt_surface_2, 0.92);
+  border: 1px solid @bt_border;
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 11px;
+  color: @bt_text_secondary;
+}
+
+.bt-graph-stats {
+  font-size: 11px;
+  color: @bt_text_muted;
+}
+
+/* ---- Status bar ---------------------------------------------------------- */
+.bt-statusbar {
+  min-height: 24px;
+  padding: 0 16px;
+  background-color: @bt_bg_base;
+  color: @bt_text_muted;
+  font-size: 11px;
+}
+
+.bt-statusbar label {
+  font-size: 11px;
+  color: @bt_text_muted;
+}
+
+.bt-statusbar .bt-status-strong {
+  color: @bt_text_secondary;
+}
+
+.bt-statusbar image {
+  -gtk-icon-size: 12px;
+  color: @bt_text_muted;
+}
+
+.bt-statusbar .bt-status-ok image,
+.bt-statusbar .bt-status-ok label {
+  color: @bt_success;
+}
+
+.bt-statusbar .bt-status-warn image,
+.bt-statusbar .bt-status-warn label {
+  color: @bt_warning;
+}
+
+/* ---- Empty states -------------------------------------------------------- */
+.bt-empty {
+  color: @bt_text_muted;
+}
+
+.bt-empty image {
+  -gtk-icon-size: 40px;
+  color: @bt_border_strong;
+  margin-bottom: 4px;
+}
+
+.bt-empty label {
+  color: @bt_text_muted;
+  font-size: 13px;
+}
+
+.bt-empty .bt-empty-title {
+  color: @bt_text_secondary;
+  font-weight: 600;
+}
+
+/* ---- Sessions panel ------------------------------------------------------ */
+.bt-session-row {
+  padding: 8px 12px;
+  border-bottom: 1px solid @bt_border;
+}
+
+.bt-session-title {
+  font-weight: 600;
+  color: @bt_text_primary;
+}
+
+.bt-session-meta {
+  font-size: 11px;
+  color: @bt_text_secondary;
+}

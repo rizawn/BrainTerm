@@ -31,18 +31,25 @@ struct BtGraphView {
 
 static inline void set_gray(cairo_t *cr, guint32 rgb, gdouble alpha)
 {
-  gdouble v = (gdouble)(rgb & 0xFFu) / 255.0;
+  gdouble r, g, b;
+  bt_theme_unpack(rgb, &r, &g, &b);
   if (alpha >= 0.999)
-    cairo_set_source_rgb(cr, v, v, v);
+    cairo_set_source_rgb(cr, r, g, b);
   else
-    cairo_set_source_rgba(cr, v, v, v, alpha);
+    cairo_set_source_rgba(cr, r, g, b, alpha);
 }
+
+/* Interim palette (Step 1 shim) — replaced by the full Dusk renderer in Step 5. */
+static const struct {
+  guint32 surface, hairline, ink, bright, mid, faint;
+} PAL = {BT_COL_SURFACE_1, BT_COL_BORDER, BT_COL_TEXT_PRIMARY, BT_COL_TEXT_PRIMARY,
+         BT_COL_ACCENT, BT_COL_TEXT_MUTED};
 
 void bt_graph_draw_cairo(const BtGraph *g, cairo_t *cr, int width, int height, gdouble pan_x,
                          gdouble pan_y, gdouble zoom, gint hover_idx, gboolean dark_mode)
 {
-  const BtInkPalette *pal = bt_theme_palette(dark_mode);
-  set_gray(cr, pal->surface, 1.0);
+  (void)dark_mode;
+  set_gray(cr, PAL.surface, 1.0);
   cairo_rectangle(cr, 0, 0, width, height);
   cairo_fill(cr);
 
@@ -61,7 +68,7 @@ void bt_graph_draw_cairo(const BtGraph *g, cairo_t *cr, int width, int height, g
   gdouble max_wy = (height * 0.5 - pan_y) / zoom + 24.0;
 
   /* Spine guide line (hairline). */
-  set_gray(cr, pal->hairline, 1.0);
+  set_gray(cr, PAL.hairline, 1.0);
   cairo_set_line_width(cr, 1.5 / zoom);
   cairo_move_to(cr, 0.0, -240.0);
   cairo_line_to(cr, 0.0, 260.0);
@@ -72,7 +79,7 @@ void bt_graph_draw_cairo(const BtGraph *g, cairo_t *cr, int width, int height, g
   /* Edges: 8% alpha ink lines, AA off on 1px hairlines for 60+ fps. */
   cairo_set_antialias(cr, CAIRO_ANTIALIAS_NONE);
   cairo_set_line_width(cr, 1.0 / zoom);
-  set_gray(cr, pal->ink, 0.09);
+  set_gray(cr, PAL.ink, 0.09);
   for (guint i = 0; i < g->edges->len; i++) {
     const BtGraphEdge *e = &g_array_index(g->edges, BtGraphEdge, i);
     if (lod_collapse && e->kind == BT_EDGE_TAGGED)
@@ -104,36 +111,36 @@ void bt_graph_draw_cairo(const BtGraph *g, cairo_t *cr, int width, int height, g
 
     if (nd->birth_t < 0.99) {
       /* Monochrome fade-in halo (no colored glow). */
-      set_gray(cr, pal->bright, 0.25 * (1.0 - nd->birth_t));
+      set_gray(cr, PAL.bright, 0.25 * (1.0 - nd->birth_t));
       cairo_arc(cr, nx, ny, nd->radius * 2.0, 0, 2.0 * M_PI);
       cairo_fill(cr);
     }
 
     if (nd->kind == BT_NODE_HUMAN_NOTE) {
-      set_gray(cr, pal->ink, 1.0);
+      set_gray(cr, PAL.ink, 1.0);
       cairo_arc(cr, nx, ny, nd->radius, 0, 2.0 * M_PI);
       cairo_fill(cr);
     } else if (nd->kind == BT_NODE_AI_NOTE) {
-      set_gray(cr, pal->mid, 1.0);
+      set_gray(cr, PAL.mid, 1.0);
       cairo_set_line_width(cr, 1.6 / zoom);
       cairo_arc(cr, nx, ny, nd->radius, 0, 2.0 * M_PI);
       cairo_stroke(cr);
     } else if (nd->kind == BT_NODE_TAG) {
-      set_gray(cr, pal->faint, 1.0);
+      set_gray(cr, PAL.faint, 1.0);
       cairo_set_line_width(cr, 1.2 / zoom);
       cairo_arc(cr, nx, ny, nd->radius, 0, 2.0 * M_PI);
       cairo_stroke(cr);
     } else if (nd->kind == BT_NODE_SESSION) {
-      set_gray(cr, pal->ink, 1.0);
+      set_gray(cr, PAL.ink, 1.0);
       cairo_rectangle(cr, nx - nd->radius, ny - nd->radius, nd->radius * 2.0, nd->radius * 2.0);
       cairo_fill(cr);
     } else if (nd->kind == BT_NODE_IMPORT_ROOT) {
-      set_gray(cr, pal->ink, 1.0);
+      set_gray(cr, PAL.ink, 1.0);
       cairo_set_line_width(cr, 1.6 / zoom);
       cairo_rectangle(cr, nx - nd->radius, ny - nd->radius, nd->radius * 2.0, nd->radius * 2.0);
       cairo_stroke(cr);
     } else if (nd->kind == BT_NODE_GHOST) {
-      set_gray(cr, nd->broken ? pal->faint : pal->mid, nd->broken ? 0.35 : 0.85);
+      set_gray(cr, nd->broken ? PAL.faint : PAL.mid, nd->broken ? 0.35 : 0.85);
       cairo_set_dash(cr, dashes, 2, 0);
       cairo_set_line_width(cr, 1.3 / zoom);
       cairo_arc(cr, nx, ny, nd->radius, 0, 2.0 * M_PI);
@@ -142,7 +149,7 @@ void bt_graph_draw_cairo(const BtGraph *g, cairo_t *cr, int width, int height, g
     }
 
     if ((gint)i == hover_idx) {
-      set_gray(cr, pal->bright, 1.0);
+      set_gray(cr, PAL.bright, 1.0);
       cairo_set_line_width(cr, 1.8 / zoom);
       cairo_arc(cr, nx, ny, nd->radius + 3.0, 0, 2.0 * M_PI);
       cairo_stroke(cr);
@@ -156,7 +163,7 @@ void bt_graph_draw_cairo(const BtGraph *g, cairo_t *cr, int width, int height, g
     cairo_font_options_set_antialias(fo, CAIRO_ANTIALIAS_GRAY);
     cairo_set_font_options(cr, fo);
     cairo_font_options_destroy(fo);
-    set_gray(cr, pal->bright, 1.0);
+    set_gray(cr, PAL.bright, 1.0);
     cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
     cairo_set_font_size(cr, 12.0 / zoom);
     cairo_move_to(cr, nd->x + nd->radius + 5.0, nd->y + 4.0);

@@ -213,16 +213,17 @@ test(
   timeout: 30,
 )
 
-t_ink = executable(
-  'test_ink_theme',
-  ['unit/test_ink_theme.c', '../src/graphview.c'],
+t_theme = executable(
+  'test_theme',
+  ['unit/test_theme.c', '../src/graphview.c'],
   include_directories: [test_inc, include_directories('../src')],
   dependencies: [bt_core_dep, gtk4_dep, cmocka_dep],
 )
 test(
-  'ink_theme',
-  t_ink,
+  'theme',
+  t_theme,
   suite: 'unit',
+  is_parallel: false,
   env: {'BT_SOURCE_ROOT': meson.project_source_root()},
 )
 
@@ -239,6 +240,7 @@ t_fix_ui = executable(
     '../src/ui/termtabs.c',
     '../src/ui/sessionspanel.c',
     '../src/ui/askbar.c',
+    '../src/ui/themeload.c',
     bt_resources,
   ],
   include_directories: [test_inc, include_directories('../src')],

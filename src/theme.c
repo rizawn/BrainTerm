@@ -1,33 +1,96 @@
-/* theme.c — Monochrome Ink palette tokens and helpers (M-UI). */
+/* theme.c — design-token helpers (contrast math, ANSI palette, scheme names). */
 #include "theme.h"
 
+#include <math.h>
 #include <string.h>
 
-static const BtInkPalette INK_DARK = {
-  .surface  = 0x000B0B0Bu,
-  .raised   = 0x00101010u,
-  .ink      = 0x00ECECECu,
-  .bright   = 0x00FAFAFAu,
-  .mid      = 0x008B8B8Bu,
-  .faint    = 0x006E6E6Eu,
-  .hairline = 0x001C1C1Cu,
-  .deep     = 0x00000000u,
-};
-
-static const BtInkPalette INK_LIGHT = {
-  .surface  = 0x00FFFFFFu,
-  .raised   = 0x00F5F5F5u,
-  .ink      = 0x001A1A1Au,
-  .bright   = 0x00000000u,
-  .mid      = 0x00757575u,
-  .faint    = 0x00B0B0B0u,
-  .hairline = 0x00E0E0E0u,
-  .deep     = 0x00ECECECu,
-};
-
-const BtInkPalette *bt_theme_palette(gboolean dark)
+void bt_theme_unpack(guint32 rgb, gdouble *r, gdouble *g, gdouble *b)
 {
-  return dark ? &INK_DARK : &INK_LIGHT;
+  if (r != NULL)
+    *r = (gdouble)((rgb >> 16) & 0xFFu) / 255.0;
+  if (g != NULL)
+    *g = (gdouble)((rgb >> 8) & 0xFFu) / 255.0;
+  if (b != NULL)
+    *b = (gdouble)(rgb & 0xFFu) / 255.0;
+}
+
+static gdouble lin(gdouble c)
+{
+  return c <= 0.03928 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4);
+}
+
+gdouble bt_theme_luminance(guint32 rgb)
+{
+  gdouble r, g, b;
+  bt_theme_unpack(rgb, &r, &g, &b);
+  return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+}
+
+gdouble bt_theme_contrast(guint32 fg, guint32 bg)
+{
+  gdouble a = bt_theme_luminance(fg);
+  gdouble b = bt_theme_luminance(bg);
+  gdouble hi = MAX(a, b), lo = MIN(a, b);
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+static gint hex_nibble(gchar c)
+{
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+  if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+  return -1;
+}
+
+gboolean bt_theme_parse_hex(const gchar *hex, guint32 *rgb_out)
+{
+  if (hex == NULL || hex[0] != '#' || strlen(hex) < 7)
+    return FALSE;
+  guint32 v = 0;
+  for (int i = 1; i <= 6; i++) {
+    gint n = hex_nibble(hex[i]);
+    if (n < 0)
+      return FALSE;
+    v = (v << 4) | (guint32)n;
+  }
+  if (rgb_out != NULL)
+    *rgb_out = v;
+  return TRUE;
+}
+
+static const guint32 ANSI[16] = {
+  /* normal */
+  BT_COL_SURFACE_2, BT_COL_DANGER, BT_COL_SUCCESS, BT_COL_WARNING,
+  0x7AA2F7u, BT_COL_ACCENT, 0x5EEAD4u, 0xC8CCD4u,
+  /* bright */
+  BT_COL_TEXT_MUTED, 0xFCA5A5u, 0x86EFACu, 0xFDE68Au,
+  0x93C5FDu, 0xB4A9FAu, 0x99F6E4u, BT_COL_TEXT_PRIMARY,
+};
+
+guint32 bt_theme_ansi(guint idx)
+{
+  return ANSI[idx & 15u];
+}
+
+static guint32 blend(guint32 fg, guint32 bg, gdouble a)
+{
+  guint32 out = 0;
+  for (int sh = 16; sh >= 0; sh -= 8) {
+    gdouble f = (gdouble)((fg >> sh) & 0xFFu);
+    gdouble b = (gdouble)((bg >> sh) & 0xFFu);
+    out |= ((guint32)lround(f * a + b * (1.0 - a)) & 0xFFu) << sh;
+  }
+  return out;
+}
+
+guint32 bt_theme_terminal_selection(void)
+{
+  return blend(BT_COL_ACCENT, BT_COL_SURFACE_1, 0.38);
+}
+
+guint32 bt_theme_terminal_search_hit(void)
+{
+  return blend(BT_COL_WARNING, BT_COL_SURFACE_1, 0.28);
 }
 
 const gchar *bt_scheme_to_string(BtUiScheme scheme)
@@ -53,36 +116,10 @@ BtUiScheme bt_scheme_from_string(const gchar *str)
 
 const gchar *bt_theme_default_mono_font(void)
 {
-#ifdef G_OS_WIN32
-  return "Cascadia Mono, JetBrains Mono, Consolas, Monospace 11";
-#else
-  return "JetBrains Mono, Cascadia Mono, Monospace 11";
-#endif
+  return "JetBrains Mono, Cascadia Mono, Consolas, Monospace 13";
 }
 
-static gint hex_nibble(gchar c)
+const gchar *bt_theme_ui_font_stack(void)
 {
-  if (c >= '0' && c <= '9') return c - '0';
-  if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
-  if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
-  return -1;
-}
-
-gboolean bt_hex_is_grayscale(const gchar *hex, guint8 *lum_out)
-{
-  if (hex == NULL || hex[0] != '#' || strlen(hex) != 7)
-    return FALSE;
-  gint r1 = hex_nibble(hex[1]), r2 = hex_nibble(hex[2]);
-  gint g1 = hex_nibble(hex[3]), g2 = hex_nibble(hex[4]);
-  gint b1 = hex_nibble(hex[5]), b2 = hex_nibble(hex[6]);
-  if (r1 < 0 || r2 < 0 || g1 < 0 || g2 < 0 || b1 < 0 || b2 < 0)
-    return FALSE;
-  guint8 r = (guint8)((r1 << 4) | r2);
-  guint8 g = (guint8)((g1 << 4) | g2);
-  guint8 b = (guint8)((b1 << 4) | b2);
-  if (r != g || g != b)
-    return FALSE;
-  if (lum_out != NULL)
-    *lum_out = r;
-  return TRUE;
+  return "Inter, Inter Variable, Segoe UI Variable, Segoe UI, sans-serif";
 }

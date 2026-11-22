@@ -42,8 +42,15 @@ cmocka_dep = dependency('cmocka', required: get_option('tests'), include_type: '
 
 langspec_install_dir = get_option('datadir') / 'brainterm' / 'language-specs'
 styles_install_dir = get_option('datadir') / 'brainterm' / 'styles'
+fonts_install_dir = get_option('datadir') / 'brainterm' / 'fonts'
 install_data('data/language-specs/bt-markdown.lang', install_dir: langspec_install_dir)
 install_data('data/styles/bt-ink-dark.xml', 'data/styles/bt-ink-light.xml', install_dir: styles_install_dir)
+install_data(
+  'data/fonts/InterVariable.ttf',
+  'data/fonts/JetBrainsMono-Regular.ttf',
+  'data/fonts/JetBrainsMono-Bold.ttf',
+  install_dir: fonts_install_dir,
+)
 
 bt_resources = gnome.compile_resources(
   'bt-resources',

@@ -201,7 +201,7 @@ static void test_editor_mapped(void **state)
   destroy_test_shell(win, ed, gv, sp);
 }
 
-static void assert_cairo_nonempty_grayscale(BtGraph *g, int w, int h)
+static void assert_cairo_nonempty(BtGraph *g, int w, int h)
 {
   cairo_surface_t *surf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
   cairo_t *cr = cairo_create(surf);
@@ -216,12 +216,7 @@ static void assert_cairo_nonempty_grayscale(BtGraph *g, int w, int h)
   for (int y = 0; y < h; y++) {
     const guint32 *row = (const guint32 *)(const void *)(data + y * stride);
     for (int x = 0; x < w; x++) {
-      guint32 px = row[x];
-      guint8 r = (guint8)((px >> 16) & 0xFF);
-      guint8 gg = (guint8)((px >> 8) & 0xFF);
-      guint8 b = (guint8)(px & 0xFF);
-      assert_true(r == gg && gg == b);
-      if (px != first_px)
+      if (row[x] != first_px)
         diff_pixels++;
     }
   }
@@ -276,7 +271,7 @@ static void test_graph_mapped(void **state)
   int aw = gtk_widget_get_width(area);
   int ah = gtk_widget_get_height(area);
   assert_true(aw > 1 && ah > 1);
-  assert_cairo_nonempty_grayscale(g, aw, ah);
+  assert_cairo_nonempty(g, aw, ah);
 
   destroy_test_shell(win, ed, gv, sp);
   bt_index_close(idx);

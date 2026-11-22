@@ -17,6 +17,7 @@
 #include "ui/quickopen.h"
 #include "ui/sessionspanel.h"
 #include "ui/termtabs.h"
+#include "ui/themeload.h"
 #include "watcher.h"
 
 #include <adwaita.h>
@@ -36,7 +37,7 @@ struct BtApp {
   GtkWidget *top_paned;
   GtkWidget *right_paned;
   GtkWidget *graph_toggle;
-  GtkCssProvider *css_provider;
+  BtThemeLoader *themeloader;
 
   BtVault *vault;
   BtIndex *index;
@@ -190,53 +191,30 @@ static void save_scheme(BtUiScheme sc)
 
 /* ------------------------------------------- Ink theme runtime switch -- */
 
+/* "Dusk" ships a single dark theme (light is not provided yet): every scheme
+ * preference resolves to dark so chrome, editor, graph and terminal never mix. */
 static gboolean is_effective_dark(BtApp *app)
 {
-  AdwStyleManager *sm = adw_style_manager_get_default();
-  if (app->scheme == BT_SCHEME_DARK)
-    return TRUE;
-  if (app->scheme == BT_SCHEME_LIGHT)
-    return FALSE;
-  return adw_style_manager_get_dark(sm);
+  (void)app;
+  return TRUE;
 }
 
 static void apply_scheme_runtime(BtApp *app, BtUiScheme sc, gboolean persist)
 {
   app->scheme = sc;
-  AdwStyleManager *sm = adw_style_manager_get_default();
-  if (sc == BT_SCHEME_DARK)
-    adw_style_manager_set_color_scheme(sm, ADW_COLOR_SCHEME_FORCE_DARK);
-  else if (sc == BT_SCHEME_LIGHT)
-    adw_style_manager_set_color_scheme(sm, ADW_COLOR_SCHEME_FORCE_LIGHT);
-  else
-    adw_style_manager_set_color_scheme(sm, ADW_COLOR_SCHEME_DEFAULT);
-
-  gboolean dark = is_effective_dark(app);
-  if (app->window != NULL) {
-    if (dark)
-      gtk_widget_remove_css_class(GTK_WIDGET(app->window), "bt-light");
-    else
-      gtk_widget_add_css_class(GTK_WIDGET(app->window), "bt-light");
-  }
+  adw_style_manager_set_color_scheme(adw_style_manager_get_default(), ADW_COLOR_SCHEME_FORCE_DARK);
   if (app->editor != NULL)
-    bt_editorpane_set_dark(app->editor, dark);
+    bt_editorpane_set_dark(app->editor, TRUE);
   if (app->graphview != NULL)
-    bt_graphview_set_dark(app->graphview, dark);
+    bt_graphview_set_dark(app->graphview, TRUE);
   if (persist && !app->smoke_test)
     save_scheme(sc);
 }
 
-static void install_ink_css(BtApp *app)
+static void install_theme(BtApp *app)
 {
-  if (app->css_provider != NULL)
-    return;
-  app->css_provider = gtk_css_provider_new();
-  gtk_css_provider_load_from_resource(app->css_provider, "/local/brainterm/bt-ink.css");
-  GdkDisplay *disp = gdk_display_get_default();
-  if (disp != NULL) {
-    gtk_style_context_add_provider_for_display(disp, GTK_STYLE_PROVIDER(app->css_provider),
-                                               GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
-  }
+  if (app->themeloader == NULL)
+    app->themeloader = bt_themeloader_new(NULL);
 }
 
 /* ----------------------------------------------------------- UI helpers -- */
@@ -1267,7 +1245,7 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
     return;
   }
 
-  install_ink_css(app);
+  install_theme(app);
 
   app->window = GTK_WINDOW(adw_application_window_new(gtk_app));
   gtk_widget_set_name(GTK_WIDGET(app->window), "bt-window");
@@ -1501,7 +1479,7 @@ void bt_app_free(BtApp *app)
   bt_filetree_free(app->tree);
   vault_free(app->vault);
   bt_agents_clear(&app->agents);
-  g_clear_object(&app->css_provider);
+  bt_themeloader_free(app->themeloader);
   g_free(app->cli_vault);
   g_clear_object(&app->adw_app);
   g_free(app);

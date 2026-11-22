@@ -1,4 +1,4 @@
-# package-win.ps1 — Bundles bt.exe with UCRT64 GTK4/GtkSourceView runtime DLLs
+﻿# package-win.ps1 — Bundles bt.exe with UCRT64 GTK4/GtkSourceView runtime DLLs
 # and runs the §11.7 packaging smoke test with an isolated PATH.
 param(
   [string]$BuildDir = "build",
@@ -21,6 +21,7 @@ New-Item -ItemType Directory -Force -Path `
   $OutDir, `
   (Join-Path $OutDir "share\brainterm\language-specs"), `
   (Join-Path $OutDir "share\brainterm\styles"), `
+  (Join-Path $OutDir "share\brainterm\fonts"), `
   (Join-Path $OutDir "share\glib-2.0\schemas"), `
   (Join-Path $OutDir "share\icons"), `
   (Join-Path $OutDir "lib\gdk-pixbuf-2.0") | Out-Null
@@ -32,6 +33,9 @@ if (Test-Path $mcpExe) {
 }
 Copy-Item "data\language-specs\bt-markdown.lang" (Join-Path $OutDir "share\brainterm\language-specs\")
 Copy-Item "data\styles\bt-ink-*.xml" (Join-Path $OutDir "share\brainterm\styles\")
+if (Test-Path "data\fonts") {
+  Copy-Item "data\fonts\*" (Join-Path $OutDir "share\brainterm\fonts\")
+}
 
 # Recursively resolve DLL dependencies from UCRT64 using objdump.
 $objdump = Join-Path $MsysRoot "bin\objdump.exe"
