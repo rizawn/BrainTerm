@@ -43,6 +43,11 @@ void bt_editorpane_flush_save(BtEditorPane *pane);
 /* Called by BtApp after vault_atomic_write succeeds. */
 void bt_editorpane_mark_saved(BtEditorPane *pane);
 
+/* Inspection helpers for unit tests (Group H / Phase M1). */
+gboolean bt_editorpane_range_has_emphasis_tag(const BtEditorPane *pane, gsize byte_start, gsize byte_end);
+gboolean bt_editorpane_offset_has_tag_name(const BtEditorPane *pane, gsize byte_offset, const gchar *tag_name);
+const gchar *bt_editorpane_language_id(const BtEditorPane *pane);
+
 G_END_DECLS
 
 #endif

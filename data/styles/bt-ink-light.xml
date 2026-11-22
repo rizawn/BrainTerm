@@ -44,6 +44,8 @@
 
   <!-- BrainTerm Markdown & YAML frontmatter -->
   <style name="bt-markdown:frontmatter-delim" foreground="faint"/>
+  <style name="bt-markdown:math"              foreground="ink" italic="false" bold="false"/>
+  <style name="bt-markdown:math-delim"        foreground="faint" italic="false"/>
   <style name="bt-markdown:wikilink"          foreground="bright" underline="single"/>
   <style name="bt-markdown:wikilink-bracket"  foreground="faint"/>
   <style name="bt-markdown:tag"               foreground="mid"/>

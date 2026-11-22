@@ -15,6 +15,8 @@
 
   <styles>
     <style id="frontmatter-delim" name="Frontmatter Delimiter" map-to="def:preprocessor"/>
+    <style id="math"              name="Math"                  map-to="def:identifier"/>
+    <style id="math-delim"        name="Math Delimiter"        map-to="def:special-char"/>
     <style id="wikilink"          name="Wiki Link"             map-to="def:underlined"/>
     <style id="wikilink-bracket"  name="Wiki Link Bracket"     map-to="def:special-char"/>
     <style id="tag"               name="Inline Tag"            map-to="def:keyword"/>
@@ -31,11 +33,41 @@
       </include>
     </context>
 
+    <context id="fenced-code" style-ref="def:inline-code" extend-parent="false">
+      <start>^[ \t]*(&gt;[ \t]*)?`{3,}.*$</start>
+      <end>^[ \t]*(&gt;[ \t]*)?`{3,}[ \t]*$</end>
+    </context>
+
+    <context id="inline-code" style-ref="def:inline-code" extend-parent="false">
+      <match>(?&lt;!`)``[^`\r\n]+``(?!`)|(?&lt;!`)`[^`\r\n]+`(?!`)</match>
+    </context>
+
+    <context id="math-display" style-ref="math" extend-parent="false">
+      <start>(?&lt;!\\)\$\$</start>
+      <end>(?&lt;!\\)\$\$</end>
+      <include>
+        <context sub-pattern="0" where="start" style-ref="math-delim"/>
+        <context sub-pattern="0" where="end" style-ref="math-delim"/>
+      </include>
+    </context>
+
+    <context id="math-inline" style-ref="math" extend-parent="false">
+      <match>(?&lt;!\\)(\$)(?!\$)(?!\s)(?:[^$\r\n\\]|\\.)*(?&lt;!\s)(?&lt;!\\)(\$)(?![0-9])</match>
+      <include>
+        <context sub-pattern="1" style-ref="math-delim"/>
+        <context sub-pattern="2" style-ref="math-delim"/>
+      </include>
+    </context>
+
     <context id="ai-draft-section" style-ref="ai-draft-body" end-at-line-end="false">
       <start>^##\s+AI draft\b.*$</start>
       <end>(?=^##?\s+)</end>
       <include>
         <context sub-pattern="0" where="start" style-ref="ai-draft-header"/>
+        <context ref="fenced-code"/>
+        <context ref="inline-code"/>
+        <context ref="math-display"/>
+        <context ref="math-inline"/>
         <context ref="wikilink"/>
         <context ref="inline-tag"/>
         <context ref="markdown:markdown"/>
@@ -57,7 +89,11 @@
     <context id="bt-markdown">
       <include>
         <context ref="frontmatter"/>
+        <context ref="fenced-code"/>
         <context ref="ai-draft-section"/>
+        <context ref="inline-code"/>
+        <context ref="math-display"/>
+        <context ref="math-inline"/>
         <context ref="wikilink"/>
         <context ref="inline-tag"/>
         <context ref="markdown:markdown"/>

@@ -3,6 +3,7 @@
  * blockquote / ## AI draft accents, 1s debounced autosave, and Ctrl+Click wiki-links. */
 #include "editorpane.h"
 #include "frontmatter.h"
+#include "math/mathtok.h"
 #include "noteutil.h"
 #include "theme.h"
 #include "ui/themeload.h"
@@ -47,6 +48,7 @@ struct BtEditorPane {
   GtkTextTag *t_frontmatter;
   GtkTextTag *t_ai_heading;
   GtkTextTag *t_ai_body;
+  GtkTextTag *t_math;
 
   BtEditorSaveFn on_save;
   BtEditorLinkFn on_link;
@@ -159,6 +161,8 @@ static void init_markdown_tags(BtEditorPane *p)
       "pixels-above-lines", 6, "pixels-below-lines", 2, NULL);
   p->t_ai_body = gtk_text_buffer_create_tag(b, "bt-ai-body",
       "foreground", "#C4BFFA", "paragraph-background", "#181724", NULL);
+  p->t_math = gtk_text_buffer_create_tag(b, "bt-math",
+      "family", mono, "foreground", "#E6E8EC", "style", PANGO_STYLE_NORMAL, NULL);
 }
 
 static void clear_md_tags(BtEditorPane *p, const GtkTextIter *a, const GtkTextIter *b)
@@ -168,6 +172,7 @@ static void clear_md_tags(BtEditorPane *p, const GtkTextIter *a, const GtkTextIt
     p->t_h1, p->t_h2, p->t_h3, p->t_syntax, p->t_bold, p->t_italic,
     p->t_code, p->t_codeblock, p->t_list_marker, p->t_quote,
     p->t_wikilink, p->t_tag, p->t_frontmatter, p->t_ai_heading, p->t_ai_body,
+    p->t_math,
   };
   for (gsize i = 0; i < G_N_ELEMENTS(all); i++)
     gtk_text_buffer_remove_tag(buf, all[i], a, b);
@@ -202,14 +207,31 @@ static gboolean is_any_h1_or_h2(const gchar *line)
   return (line[0] == '#' && (line[1] == ' ' || (line[1] == '#' && line[2] == ' ')));
 }
 
+static const BtMathSpan *find_math_span_at(const GArray *mspans, gsize off)
+{
+  if (mspans == NULL)
+    return NULL;
+  for (guint k = 0; k < mspans->len; k++) {
+    const BtMathSpan *sp = &g_array_index(mspans, BtMathSpan, k);
+    if (off >= sp->start && off < sp->end)
+      return sp;
+    if (sp->start > off)
+      break;
+  }
+  return NULL;
+}
+
 static void tag_inline_spans(BtEditorPane *p, const GtkTextIter *ls, const gchar *s)
 {
   GtkTextBuffer *buf = GTK_TEXT_BUFFER(p->buffer);
   gint len = (gint)strlen(s);
+  BtMathScanOpts mopts = bt_math_scan_default_opts();
+  mopts.skip_frontmatter = FALSE;
+  GArray *mspans = bt_math_scan(s, (gsize)len, &mopts);
   gint i = 0;
 
   while (i < len) {
-    /* Inline code: `code` */
+    /* Inline code: `code` (checked first, §B.2.5) */
     if (s[i] == '`') {
       const gchar *close = strchr(s + i + 1, '`');
       if (close != NULL && close > s + i + 1) {
@@ -221,10 +243,20 @@ static void tag_inline_spans(BtEditorPane *p, const GtkTextIter *ls, const gchar
         continue;
       }
     }
+    /* Math spans ($...$, $$...$$, \(...\), \[...\]): exclude all emphasis & link tags (§B.2.5). */
+    const BtMathSpan *ms = find_math_span_at(mspans, (gsize)i);
+    if (ms != NULL && (gint)ms->start == i) {
+      apply_byte_tag(buf, p->t_syntax, ls, (gint)ms->start, (gint)ms->src_start);
+      apply_byte_tag(buf, p->t_math, ls, (gint)ms->src_start, (gint)ms->src_end);
+      apply_byte_tag(buf, p->t_syntax, ls, (gint)ms->src_end, (gint)ms->end);
+      i = (gint)ms->end;
+      continue;
+    }
     /* Wiki-link: [[target]] */
     if (s[i] == '[' && i + 1 < len && s[i + 1] == '[') {
       const gchar *close = strstr(s + i + 2, "]]");
-      if (close != NULL && close > s + i + 2) {
+      if (close != NULL && close > s + i + 2 &&
+          find_math_span_at(mspans, (gsize)(close - s)) == NULL) {
         gint end = (gint)(close - s);
         apply_byte_tag(buf, p->t_syntax, ls, i, i + 2);
         apply_byte_tag(buf, p->t_wikilink, ls, i + 2, end);
@@ -236,7 +268,8 @@ static void tag_inline_spans(BtEditorPane *p, const GtkTextIter *ls, const gchar
     /* Bold: **text** */
     if (s[i] == '*' && i + 1 < len && s[i + 1] == '*') {
       const gchar *close = strstr(s + i + 2, "**");
-      if (close != NULL && close > s + i + 2) {
+      if (close != NULL && close > s + i + 2 &&
+          find_math_span_at(mspans, (gsize)(close - s)) == NULL) {
         gint end = (gint)(close - s);
         apply_byte_tag(buf, p->t_syntax, ls, i, i + 2);
         apply_byte_tag(buf, p->t_bold, ls, i + 2, end);
@@ -245,10 +278,11 @@ static void tag_inline_spans(BtEditorPane *p, const GtkTextIter *ls, const gchar
         continue;
       }
     }
-    /* Italic: *text* (not **) */
+    /* Italic: *text* (not **; never cross into a math span) */
     if (s[i] == '*' && (i + 1 >= len || s[i + 1] != '*')) {
       const gchar *close = strchr(s + i + 1, '*');
-      if (close != NULL && close > s + i + 1 && s[i + 1] != ' ') {
+      if (close != NULL && close > s + i + 1 && s[i + 1] != ' ' &&
+          find_math_span_at(mspans, (gsize)(close - s)) == NULL) {
         gint end = (gint)(close - s);
         apply_byte_tag(buf, p->t_syntax, ls, i, i + 1);
         apply_byte_tag(buf, p->t_italic, ls, i + 1, end);
@@ -269,13 +303,44 @@ static void tag_inline_spans(BtEditorPane *p, const GtkTextIter *ls, const gchar
     }
     i++;
   }
+  g_array_unref(mspans);
 }
 
 typedef struct {
   gboolean in_frontmatter;
   gboolean in_codeblock;
+  gboolean in_mathblock;
   gboolean in_ai_draft;
 } LineCtx;
+
+static guint count_unescaped_dd_outside_code(const gchar *line, gsize *first_pos, gsize *last_pos)
+{
+  guint count = 0;
+  gboolean in_code = FALSE;
+  gsize n = strlen(line);
+  if (first_pos) *first_pos = G_MAXSIZE;
+  if (last_pos) *last_pos = G_MAXSIZE;
+  for (gsize i = 0; i < n; i++) {
+    if (line[i] == '`') {
+      in_code = !in_code;
+      continue;
+    }
+    if (!in_code && line[i] == '$' && i + 1 < n && line[i + 1] == '$') {
+      gsize bs = 0;
+      while (i > bs && line[i - 1 - bs] == '\\')
+        bs++;
+      if ((bs & 1u) == 0u) {
+        if (count == 0 && first_pos)
+          *first_pos = i;
+        if (last_pos)
+          *last_pos = i;
+        count++;
+        i++;
+      }
+    }
+  }
+  return count;
+}
 
 static void scan_line_context(GtkTextBuffer *buf, gint target_line, LineCtx *ctx)
 {
@@ -303,15 +368,19 @@ static void scan_line_context(GtkTextBuffer *buf, gint target_line, LineCtx *ctx
         ctx->in_frontmatter = FALSE;
       continue;
     }
-    if (g_str_has_prefix(trim, "```")) {
+    if (!ctx->in_mathblock && g_str_has_prefix(trim, "```")) {
       ctx->in_codeblock = !ctx->in_codeblock;
       continue;
     }
     if (!ctx->in_codeblock) {
-      if (is_ai_draft_heading_line(txt))
-        ctx->in_ai_draft = TRUE;
-      else if (ctx->in_ai_draft && is_any_h1_or_h2(txt))
-        ctx->in_ai_draft = FALSE;
+      if ((count_unescaped_dd_outside_code(txt, NULL, NULL) & 1u) != 0u)
+        ctx->in_mathblock = !ctx->in_mathblock;
+      if (!ctx->in_mathblock) {
+        if (is_ai_draft_heading_line(txt))
+          ctx->in_ai_draft = TRUE;
+        else if (ctx->in_ai_draft && is_any_h1_or_h2(txt))
+          ctx->in_ai_draft = FALSE;
+      }
     }
   }
 }
@@ -347,8 +416,8 @@ static void tag_single_line(BtEditorPane *p, gint ln, LineCtx *ctx)
     return;
   }
 
-  /* Fenced code blocks */
-  if (g_str_has_prefix(trim, "```")) {
+  /* Fenced code blocks (never toggle inside multi-line math) */
+  if (!ctx->in_mathblock && g_str_has_prefix(trim, "```")) {
     ctx->in_codeblock = !ctx->in_codeblock;
     gtk_text_buffer_apply_tag(buf, p->t_codeblock, &s, &e);
     gtk_text_buffer_apply_tag(buf, p->t_syntax, &s, &e);
@@ -356,6 +425,26 @@ static void tag_single_line(BtEditorPane *p, gint ln, LineCtx *ctx)
   }
   if (ctx->in_codeblock) {
     gtk_text_buffer_apply_tag(buf, p->t_codeblock, &s, &e);
+    return;
+  }
+
+  /* Multi-line $$ display math blocks: never apply emphasis or links inside */
+  gsize first_dd = G_MAXSIZE, last_dd = G_MAXSIZE;
+  guint dd_count = count_unescaped_dd_outside_code(txt, &first_dd, &last_dd);
+  if (ctx->in_mathblock) {
+    gtk_text_buffer_apply_tag(buf, p->t_math, &s, &e);
+    if ((dd_count & 1u) != 0u) {
+      if (last_dd != G_MAXSIZE)
+        apply_byte_tag(buf, p->t_syntax, &s, (gint)last_dd, (gint)(last_dd + 2));
+      ctx->in_mathblock = FALSE;
+    }
+    return;
+  }
+  if ((dd_count & 1u) != 0u) {
+    ctx->in_mathblock = TRUE;
+    gtk_text_buffer_apply_tag(buf, p->t_math, &s, &e);
+    if (first_dd != G_MAXSIZE)
+      apply_byte_tag(buf, p->t_syntax, &s, (gint)first_dd, (gint)(first_dd + 2));
     return;
   }
 
@@ -441,9 +530,10 @@ static void on_insert_text_after(GtkTextBuffer *buf, GtkTextIter *loc, gchar *te
       newlines++;
   gint start_ln = MAX(end_ln - newlines, 0);
 
-  /* Fence/heading/frontmatter edits can affect subsequent lines; otherwise only touched lines. */
+  /* Fence/heading/frontmatter/display-math edits can affect subsequent lines. */
   gboolean structural = (start_ln == 0) || strstr(text, "```") != NULL ||
-                        strstr(text, "---") != NULL || strstr(text, "##") != NULL;
+                        strstr(text, "---") != NULL || strstr(text, "##") != NULL ||
+                        strstr(text, "$$") != NULL;
   if (structural)
     retag_lines(p, start_ln, gtk_text_buffer_get_line_count(buf) - 1);
   else
@@ -1047,4 +1137,81 @@ void bt_editorpane_mark_saved(BtEditorPane *pane)
   pane->dirty = FALSE;
   if (pane->on_dirty != NULL)
     pane->on_dirty(FALSE, pane->user_data);
+}
+
+static gboolean iter_at_utf8_byte(GtkTextBuffer *buf, gsize byte_off, GtkTextIter *out)
+{
+  GtkTextIter s, e;
+  gtk_text_buffer_get_bounds(buf, &s, &e);
+  g_autofree gchar *txt = gtk_text_buffer_get_text(buf, &s, &e, FALSE);
+  gsize total = strlen(txt);
+  if (byte_off > total)
+    byte_off = total;
+  gint char_off = (gint)g_utf8_strlen(txt, (gssize)byte_off);
+  gtk_text_buffer_get_iter_at_offset(buf, out, char_off);
+  return TRUE;
+}
+
+gboolean bt_editorpane_range_has_emphasis_tag(const BtEditorPane *pane, gsize byte_start, gsize byte_end)
+{
+  if (pane == NULL || pane->buffer == NULL || byte_end <= byte_start)
+    return FALSE;
+  GtkTextBuffer *buf = GTK_TEXT_BUFFER(pane->buffer);
+  GtkTextIter s, e;
+  iter_at_utf8_byte(buf, byte_start, &s);
+  iter_at_utf8_byte(buf, byte_end, &e);
+  gtk_source_buffer_ensure_highlight(pane->buffer, &s, &e);
+
+  GtkTextIter it = s;
+  while (gtk_text_iter_compare(&it, &e) < 0) {
+    GSList *tags = gtk_text_iter_get_tags(&it);
+    for (GSList *l = tags; l != NULL; l = l->next) {
+      GtkTextTag *tag = GTK_TEXT_TAG(l->data);
+      gboolean style_set = FALSE;
+      PangoStyle pstyle = PANGO_STYLE_NORMAL;
+      g_object_get(tag, "style-set", &style_set, "style", &pstyle, NULL);
+      if (tag == pane->t_italic || (style_set && pstyle == PANGO_STYLE_ITALIC)) {
+        g_slist_free(tags);
+        return TRUE;
+      }
+    }
+    g_slist_free(tags);
+    if (!gtk_text_iter_forward_char(&it))
+      break;
+  }
+  return FALSE;
+}
+
+gboolean bt_editorpane_offset_has_tag_name(const BtEditorPane *pane, gsize byte_offset, const gchar *tag_name)
+{
+  if (pane == NULL || pane->buffer == NULL || tag_name == NULL)
+    return FALSE;
+  GtkTextBuffer *buf = GTK_TEXT_BUFFER(pane->buffer);
+  GtkTextIter s, e, bstart, bend;
+  gtk_text_buffer_get_bounds(buf, &bstart, &bend);
+  gtk_source_buffer_ensure_highlight(pane->buffer, &bstart, &bend);
+  iter_at_utf8_byte(buf, byte_offset, &s);
+  e = s;
+  gtk_text_iter_forward_char(&e);
+
+  GSList *tags = gtk_text_iter_get_tags(&s);
+  gboolean found = FALSE;
+  for (GSList *l = tags; l != NULL; l = l->next) {
+    g_autofree gchar *name = NULL;
+    g_object_get(GTK_TEXT_TAG(l->data), "name", &name, NULL);
+    if (name != NULL && strcmp(name, tag_name) == 0) {
+      found = TRUE;
+      break;
+    }
+  }
+  g_slist_free(tags);
+  return found;
+}
+
+const gchar *bt_editorpane_language_id(const BtEditorPane *pane)
+{
+  if (pane == NULL || pane->buffer == NULL)
+    return "none";
+  GtkSourceLanguage *lang = gtk_source_buffer_get_language(pane->buffer);
+  return lang ? gtk_source_language_get_id(lang) : "none";
 }
