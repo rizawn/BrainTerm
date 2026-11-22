@@ -6,6 +6,7 @@ core_sources = files(
   'bterror.c',
   'vault.c',
   'noteutil.c',
+  'linkresolve.c',
   'vtermbridge.c',
   'checkpoint.c',
   'agents.c',

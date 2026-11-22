@@ -182,6 +182,14 @@ t_graph_v2 = executable(
 )
 test('graph_v2', t_graph_v2, suite: 'unit')
 
+t_linkresolve = executable(
+  'test_linkresolve',
+  'unit/test_linkresolve.c',
+  include_directories: test_inc,
+  dependencies: [bt_core_dep, cmocka_dep],
+)
+test('linkresolve', t_linkresolve, suite: 'unit')
+
 t_math_tok = executable(
   'test_math_tok',
   'unit/test_math_tok.c',
