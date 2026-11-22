@@ -1,10 +1,11 @@
 /* vtermbridge.c — libvterm + scrollback ring buffer + grid mirror (§5.4, §6.D3, §8.2). */
 #include "vtermbridge.h"
+#include "theme.h"
 
 #include <string.h>
 
-#define BT_DEFAULT_FG 0x00E6EDF3u
-#define BT_DEFAULT_BG 0x000D1117u
+#define BT_DEFAULT_FG BT_COL_TEXT_PRIMARY
+#define BT_DEFAULT_BG BT_COL_SURFACE_1
 
 typedef struct {
   BtCell *cells;
@@ -340,6 +341,13 @@ BtVTerm *bt_vterm_new(gint rows, gint cols, guint scrollback_cap, BtVTermOutputF
                   BT_DEFAULT_FG & 0xFF);
   vterm_color_rgb(&def_bg, (BT_DEFAULT_BG >> 16) & 0xFF, (BT_DEFAULT_BG >> 8) & 0xFF,
                   BT_DEFAULT_BG & 0xFF);
+  for (guint i = 0; i < 16; i++) {
+    guint32 c = bt_theme_ansi(i);
+    VTermColor vc;
+    vterm_color_rgb(&vc, (uint8_t)((c >> 16) & 0xFFu), (uint8_t)((c >> 8) & 0xFFu),
+                    (uint8_t)(c & 0xFFu));
+    vterm_state_set_palette_color(bt->state, (int)i, &vc);
+  }
 
   bt->screen = vterm_obtain_screen(bt->vt);
   vterm_screen_set_callbacks(bt->screen, &screen_cbs, bt);

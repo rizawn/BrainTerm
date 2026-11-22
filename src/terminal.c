@@ -2,6 +2,7 @@
 #include "terminal.h"
 #include "pty.h"
 #include "theme.h"
+#include "ui/themeload.h"
 #include "vtermbridge.h"
 
 #include <math.h>
@@ -9,6 +10,7 @@
 #include <string.h>
 
 #define BT_TERM_RESIZE_DEBOUNCE_MS 100u
+#define BT_TERM_PAD                12.0
 
 struct BtTerminal {
   GtkWidget *root;
@@ -204,12 +206,15 @@ static void on_draw(GtkDrawingArea *area, cairo_t *cr, int width, int height, gp
   guint sb = bt_vterm_scrollback_len(t->vt);
   guint top_vrow = (sb >= t->scroll_offset) ? (sb - t->scroll_offset) : 0;
 
+  guint32 sel_bg = bt_theme_terminal_selection();
+  guint32 hit_bg = bt_theme_terminal_search_hit();
+
   PangoLayout *layout = pango_cairo_create_layout(cr);
   GString *run = g_string_sized_new(128);
 
   for (gint r = 0; r < rows; r++) {
     guint vrow = top_vrow + (guint)r;
-    gdouble y = (gdouble)r * t->cell_h;
+    gdouble y = BT_TERM_PAD + (gdouble)r * t->cell_h;
     if (y > (gdouble)height)
       break;
 
@@ -222,9 +227,9 @@ static void on_draw(GtkDrawingArea *area, cairo_t *cr, int width, int height, gp
       bt_vterm_get_vrow_cell(t->vt, vrow, c, &cell);
       guint32 bg = (cell.flags & BT_CELL_REVERSE) ? cell.fg_rgb : cell.bg_rgb;
       if (is_selected(t, vrow, c))
-        bg = 0x00264F78u;
+        bg = sel_bg;
       else if (hit_row && bg == def_bg)
-        bg = 0x003B2E00u;
+        bg = hit_bg;
 
       gint run_end = c + 1;
       while (run_end < cols) {
@@ -232,17 +237,17 @@ static void on_draw(GtkDrawingArea *area, cairo_t *cr, int width, int height, gp
         bt_vterm_get_vrow_cell(t->vt, vrow, run_end, &nxt);
         guint32 nbg = (nxt.flags & BT_CELL_REVERSE) ? nxt.fg_rgb : nxt.bg_rgb;
         if (is_selected(t, vrow, run_end))
-          nbg = 0x00264F78u;
+          nbg = sel_bg;
         else if (hit_row && nbg == def_bg)
-          nbg = 0x003B2E00u;
+          nbg = hit_bg;
         if (nbg != bg)
           break;
         run_end++;
       }
       if (bg != def_bg) {
         set_rgb(cr, bg);
-        cairo_rectangle(cr, (gdouble)c * t->cell_w, y, (gdouble)(run_end - c) * t->cell_w,
-                        t->cell_h);
+        cairo_rectangle(cr, BT_TERM_PAD + (gdouble)c * t->cell_w, y,
+                        (gdouble)(run_end - c) * t->cell_w, t->cell_h);
         cairo_fill(cr);
       }
       c = run_end;
@@ -293,30 +298,34 @@ static void on_draw(GtkDrawingArea *area, cairo_t *cr, int width, int height, gp
       pango_layout_set_font_description(layout, fd);
       pango_layout_set_text(layout, run->str, (int)run->len);
       set_rgb(cr, fg);
-      cairo_move_to(cr, (gdouble)start_c * t->cell_w, y);
+      cairo_move_to(cr, BT_TERM_PAD + (gdouble)start_c * t->cell_w, y);
       pango_cairo_show_layout(cr, layout);
 
       gdouble run_px = (gdouble)(c - start_c) * t->cell_w;
       if (style_flags & BT_CELL_UNDERLINE) {
-        cairo_rectangle(cr, (gdouble)start_c * t->cell_w, y + t->cell_h - 2.0, run_px, 1.0);
+        cairo_rectangle(cr, BT_TERM_PAD + (gdouble)start_c * t->cell_w, y + t->cell_h - 2.0,
+                        run_px, 1.0);
         cairo_fill(cr);
       }
       if (style_flags & BT_CELL_STRIKE) {
-        cairo_rectangle(cr, (gdouble)start_c * t->cell_w, y + t->cell_h * 0.5, run_px, 1.0);
+        cairo_rectangle(cr, BT_TERM_PAD + (gdouble)start_c * t->cell_w, y + t->cell_h * 0.5,
+                        run_px, 1.0);
         cairo_fill(cr);
       }
     }
   }
 
-  /* Pass 3: cursor (only when viewing live bottom). */
+  /* Pass 3: accent cursor (only when viewing live bottom). */
   gint cur_r = 0, cur_c = 0, cur_shape = VTERM_PROP_CURSORSHAPE_BLOCK;
   gboolean cur_vis = FALSE;
   bt_vterm_cursor(t->vt, &cur_r, &cur_c, &cur_vis, &cur_shape);
   if (cur_vis && t->scroll_offset == 0 && cur_r >= 0 && cur_r < rows && cur_c >= 0 &&
       cur_c < cols) {
-    gdouble cx = (gdouble)cur_c * t->cell_w;
-    gdouble cy = (gdouble)cur_r * t->cell_h;
-    cairo_set_source_rgba(cr, 0.90, 0.93, 0.95, 0.75);
+    gdouble cx = BT_TERM_PAD + (gdouble)cur_c * t->cell_w;
+    gdouble cy = BT_TERM_PAD + (gdouble)cur_r * t->cell_h;
+    gdouble ar, ag, ab;
+    bt_theme_unpack(BT_COL_ACCENT, &ar, &ag, &ab);
+    cairo_set_source_rgba(cr, ar, ag, ab, 0.85);
     if (cur_shape == VTERM_PROP_CURSORSHAPE_UNDERLINE)
       cairo_rectangle(cr, cx, cy + t->cell_h - 2.0, t->cell_w, 2.0);
     else if (cur_shape == VTERM_PROP_CURSORSHAPE_BAR_LEFT)
@@ -351,10 +360,12 @@ static void on_area_resize(GtkDrawingArea *area, int width, int height, gpointer
 {
   (void)area;
   BtTerminal *t = ud;
-  gdouble cw = t->cell_w > 0.0 ? t->cell_w : 9.0;
+  gdouble cw = t->cell_w > 0.0 ? t->cell_w : 8.0;
   gdouble ch = t->cell_h > 0.0 ? t->cell_h : 18.0;
-  gint cols = MAX((gint)floor((gdouble)width / cw), 2);
-  gint rows = MAX((gint)floor((gdouble)height / ch), 2);
+  gdouble inner_w = MAX((gdouble)width - BT_TERM_PAD * 2.0, cw * 2.0);
+  gdouble inner_h = MAX((gdouble)height - BT_TERM_PAD * 2.0, ch * 2.0);
+  gint cols = MAX((gint)floor(inner_w / cw), 2);
+  gint rows = MAX((gint)floor(inner_h / ch), 2);
   if (t->vt != NULL && rows == bt_vterm_rows(t->vt) && cols == bt_vterm_cols(t->vt))
     return;
   t->pending_rows = rows;
@@ -589,10 +600,10 @@ static gboolean on_key_pressed(GtkEventControllerKey *ctrl, guint keyval, guint 
 
 static void xy_to_cell(BtTerminal *t, gdouble x, gdouble y, guint *vrow, gint *col, gint *srow)
 {
-  gdouble cw = t->cell_w > 0.0 ? t->cell_w : 9.0;
+  gdouble cw = t->cell_w > 0.0 ? t->cell_w : 8.0;
   gdouble ch = t->cell_h > 0.0 ? t->cell_h : 18.0;
-  gint r = CLAMP((gint)(y / ch), 0, bt_vterm_rows(t->vt) - 1);
-  gint c = CLAMP((gint)(x / cw), 0, bt_vterm_cols(t->vt) - 1);
+  gint r = CLAMP((gint)((y - BT_TERM_PAD) / ch), 0, bt_vterm_rows(t->vt) - 1);
+  gint c = CLAMP((gint)((x - BT_TERM_PAD) / cw), 0, bt_vterm_cols(t->vt) - 1);
   guint sb = bt_vterm_scrollback_len(t->vt);
   guint top = (sb >= t->scroll_offset) ? (sb - t->scroll_offset) : 0;
   if (srow) *srow = r;
@@ -730,7 +741,12 @@ BtTerminal *bt_terminal_new(BtTerminalFullscreenFn on_fullscreen, BtTerminalStat
   t->on_status = on_status;
   t->user_data = user_data;
 
-  t->font_desc = pango_font_description_from_string(bt_theme_default_mono_font());
+  const gchar *fam = bt_fonts_family_available("JetBrains Mono") ? "JetBrains Mono"
+                     : (bt_fonts_family_available("Cascadia Mono") ? "Cascadia Mono"
+                        : (bt_fonts_family_available("Consolas") ? "Consolas" : "Monospace"));
+  t->font_desc = pango_font_description_new();
+  pango_font_description_set_family(t->font_desc, fam);
+  pango_font_description_set_absolute_size(t->font_desc, 13 * PANGO_SCALE);
   t->font_bold = pango_font_description_copy(t->font_desc);
   pango_font_description_set_weight(t->font_bold, PANGO_WEIGHT_BOLD);
   t->font_italic = pango_font_description_copy(t->font_desc);
@@ -785,6 +801,7 @@ BtTerminal *bt_terminal_new(BtTerminalFullscreenFn on_fullscreen, BtTerminalStat
   gtk_widget_set_hexpand(hbox, TRUE);
 
   t->drawing_area = gtk_drawing_area_new();
+  gtk_widget_add_css_class(t->drawing_area, "bt-terminal-area");
   gtk_widget_set_hexpand(t->drawing_area, TRUE);
   gtk_widget_set_vexpand(t->drawing_area, TRUE);
   gtk_widget_set_focusable(t->drawing_area, TRUE);

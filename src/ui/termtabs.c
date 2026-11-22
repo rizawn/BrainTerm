@@ -100,7 +100,8 @@ BtTermTabs *bt_termtabs_new(guint max_tabs, BtTerminalFullscreenFn on_fullscreen
   gtk_widget_set_vexpand(tabs->notebook, TRUE);
   gtk_widget_set_hexpand(tabs->notebook, TRUE);
 
-  GtkWidget *plus_btn = gtk_button_new_from_icon_name("tab-new-symbolic");
+  GtkWidget *plus_btn = gtk_button_new_from_icon_name("bt-plus-symbolic");
+  gtk_widget_add_css_class(plus_btn, "bt-iconbtn");
   gtk_widget_set_tooltip_text(plus_btn, "New Terminal Tab");
   gtk_actionable_set_action_name(GTK_ACTIONABLE(plus_btn), "app.term-spawn");
   gtk_notebook_set_action_widget(GTK_NOTEBOOK(tabs->notebook), plus_btn, GTK_PACK_END);
@@ -201,12 +202,15 @@ gboolean bt_termtabs_open(BtTermTabs *tabs, const BtVault *vault, const gchar *r
   e->session_id = session_id ? g_strdup(session_id) : NULL;
   bt_terminal_set_exit_cb(term, on_tab_pty_exit, e);
 
-  GtkWidget *tab_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+  GtkWidget *tab_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+  GtkWidget *tico = gtk_image_new_from_icon_name("bt-sessions-symbolic");
+  gtk_image_set_pixel_size(GTK_IMAGE(tico), 14);
   GtkWidget *lbl = gtk_label_new(e->badge);
   gtk_widget_set_tooltip_text(tab_box, e->cwd_abs);
   GtkWidget *close_btn = gtk_button_new_with_label("×");
   gtk_widget_add_css_class(close_btn, "flat");
   g_signal_connect(close_btn, "clicked", G_CALLBACK(on_close_btn_clicked), e);
+  gtk_box_append(GTK_BOX(tab_box), tico);
   gtk_box_append(GTK_BOX(tab_box), lbl);
   gtk_box_append(GTK_BOX(tab_box), close_btn);
 
