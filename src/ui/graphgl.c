@@ -1332,3 +1332,68 @@ guint bt_graph_gl_visible_edge_count(const BtGraphGL *gl)
 {
   return gl ? gl->edge_count : 0u;
 }
+
+gboolean bt_graph_gl_capture_png(BtGraphGL *gl, const BtGraphRenderState *st, const gchar *png_path,
+                                 GError **error)
+{
+  if (gl == NULL || !gl->gl_ready || gl->area == NULL || st == NULL || png_path == NULL ||
+      st->width <= 0 || st->height <= 0) {
+    g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "GL graph capture unavailable");
+    return FALSE;
+  }
+
+  gtk_gl_area_make_current(GTK_GL_AREA(gl->area));
+  if (gtk_gl_area_get_error(GTK_GL_AREA(gl->area)) != NULL) {
+    g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "GL context error during capture");
+    return FALSE;
+  }
+
+  gint scale = MAX(st->scale, 1);
+  int fb_w = st->width * scale;
+  int fb_h = st->height * scale;
+
+  GLint prev_fbo = 0;
+  glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prev_fbo);
+
+  GLuint fbo = 0, tex = 0;
+  if (!alloc_color_fbo(&fbo, &tex, fb_w, fb_h)) {
+    glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prev_fbo);
+    g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Failed to allocate GL capture FBO");
+    return FALSE;
+  }
+
+  glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+  bt_graph_gl_render_state(gl, st);
+  glFinish();
+
+  g_autofree unsigned char *rgba = g_malloc((gsize)fb_w * (gsize)fb_h * 4u);
+  glPixelStorei(GL_PACK_ALIGNMENT, 1);
+  glReadPixels(0, 0, fb_w, fb_h, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+
+  glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prev_fbo);
+  glDeleteTextures(1, &tex);
+  glDeleteFramebuffers(1, &fbo);
+
+  cairo_surface_t *surf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, fb_w, fb_h);
+  unsigned char *dst = cairo_image_surface_get_data(surf);
+  int stride = cairo_image_surface_get_stride(surf);
+  for (int y = 0; y < fb_h; y++) {
+    const unsigned char *srow = rgba + (gsize)(fb_h - 1 - y) * (gsize)fb_w * 4u;
+    unsigned char *drow = dst + y * stride;
+    for (int x = 0; x < fb_w; x++) {
+      drow[x * 4 + 0] = srow[x * 4 + 2];
+      drow[x * 4 + 1] = srow[x * 4 + 1];
+      drow[x * 4 + 2] = srow[x * 4 + 0];
+      drow[x * 4 + 3] = 255;
+    }
+  }
+  cairo_surface_mark_dirty(surf);
+  cairo_status_t cst = cairo_surface_write_to_png(surf, png_path);
+  cairo_surface_destroy(surf);
+  if (cst != CAIRO_STATUS_SUCCESS) {
+    g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Failed to write PNG '%s': %s",
+                png_path, cairo_status_to_string(cst));
+    return FALSE;
+  }
+  return TRUE;
+}

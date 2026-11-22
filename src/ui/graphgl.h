@@ -41,6 +41,10 @@ guint bt_graph_gl_visible_edge_count(const BtGraphGL *gl);
 /* Direct draw helper for headless/offscreen GL benchmarks (caller must bind FBO & make_current). */
 void bt_graph_gl_render_state(BtGraphGL *gl, const BtGraphRenderState *st);
 
+/* Captures current state rendered via GL offscreen FBO into a PNG file. */
+gboolean bt_graph_gl_capture_png(BtGraphGL *gl, const BtGraphRenderState *st, const gchar *png_path,
+                                 GError **error);
+
 G_END_DECLS
 
 #endif

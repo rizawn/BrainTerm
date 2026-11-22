@@ -14,6 +14,7 @@
 #include "ui/graphgl.h"
 #include "ui/graphview_renderer.h"
 
+#include <cjson/cJSON.h>
 #include <math.h>
 #include <pango/pangocairo.h>
 #include <string.h>
@@ -2627,6 +2628,249 @@ void bt_graphview_toggle_debug_overlay(BtGraphView *gv)
 {
   if (gv != NULL)
     bt_graphview_set_debug_overlay(gv, !gv->debug_overlay);
+}
+
+gboolean bt_graphview_is_capture_ready(const BtGraphView *gv, const BtGraphCaptureSpec *spec)
+{
+  if (gv == NULL || gv->graph == NULL || gv->canvas_stack == NULL)
+    return FALSE;
+  if (!gtk_widget_get_mapped(gv->canvas_stack))
+    return FALSE;
+  if (gtk_widget_get_width(gv->canvas_stack) <= 40 ||
+      gtk_widget_get_height(gv->canvas_stack) <= 40)
+    return FALSE;
+  if (gv->active_backend == BT_GRAPH_BACKEND_GL) {
+    if (gv->gl == NULL || (!bt_graph_gl_is_ready(gv->gl) && !bt_graph_gl_has_failed(gv->gl)))
+      return FALSE;
+    if (spec != NULL && spec->mode == BT_GRAPH_MODE_3D && gv->graph->nodes->len > 0 &&
+        (gv->pts3d == NULL || gv->pts3d_count < gv->graph->nodes->len))
+      return FALSE;
+  }
+  return TRUE;
+}
+
+void bt_graphview_apply_capture_state(BtGraphView *gv, const BtGraphCaptureSpec *spec)
+{
+  if (gv == NULL || gv->graph == NULL || spec == NULL)
+    return;
+
+  bt_graphview_set_show_tags(gv, spec->show_tags);
+  bt_graphview_set_show_ghosts(gv, spec->show_ghosts);
+  bt_graphview_set_quality(gv, spec->quality);
+  bt_graphview_set_mode(gv, spec->mode);
+  bt_graphview_set_reduce_motion(gv, spec->reduce_motion);
+
+  guint n = gv->graph->nodes->len;
+  for (guint i = 0; i < n; i++) {
+    BtGraphNode *nd = g_ptr_array_index(gv->graph->nodes, i);
+    nd->birth_t = 1.0;
+  }
+
+  int w = gv->canvas_stack ? gtk_widget_get_width(gv->canvas_stack) : 800;
+  int h = gv->canvas_stack ? gtk_widget_get_height(gv->canvas_stack) : 600;
+  gv->animating_cam = FALSE;
+  gv->animating_3d = FALSE;
+  gv->needs_fit = FALSE;
+
+  if (spec->cam == BT_CAP_CAM_FIT) {
+    compute_fit_camera(gv, w, h, &gv->pan_x, &gv->pan_y, &gv->zoom);
+    gv->target_pan_x = gv->pan_x;
+    gv->target_pan_y = gv->pan_y;
+    gv->target_zoom = gv->zoom;
+  } else if (spec->cam == BT_CAP_CAM_ZOOM2X_DENSEST) {
+    gdouble dense_x = 0.0, dense_y = 0.0;
+    guint best_cnt = 0;
+    for (guint i = 0; i < n; i++) {
+      const BtGraphNode *a = g_ptr_array_index(gv->graph->nodes, i);
+      if (!a->visible) continue;
+      guint cnt = 0;
+      gdouble sx = 0.0, sy = 0.0;
+      for (guint j = 0; j < n; j++) {
+        const BtGraphNode *b = g_ptr_array_index(gv->graph->nodes, j);
+        if (!b->visible) continue;
+        if (hypot(a->x - b->x, a->y - b->y) <= 45.0) {
+          cnt++;
+          sx += b->x;
+          sy += b->y;
+        }
+      }
+      if (cnt > best_cnt) {
+        best_cnt = cnt;
+        dense_x = sx / (gdouble)cnt;
+        dense_y = sy / (gdouble)cnt;
+      }
+    }
+    gv->zoom = 2.0;
+    gv->pan_x = -dense_x * 2.0;
+    gv->pan_y = -dense_y * 2.0;
+    gv->target_zoom = gv->zoom;
+    gv->target_pan_x = gv->pan_x;
+    gv->target_pan_y = gv->pan_y;
+  } else if (spec->cam == BT_CAP_CAM_3D_ORBIT) {
+    gv->yaw = 0.35;
+    gv->pitch = 0.20;
+    gv->dist3d = 2.8;
+    gv->target_yaw = gv->yaw;
+    gv->target_pitch = gv->pitch;
+    gv->target_dist3d = gv->dist3d;
+    gv->user_interacted_3d = TRUE;
+  }
+
+  gint hub_idx = -1, small_idx = -1;
+  guint hub_deg = 0;
+  for (guint i = 0; i < n; i++) {
+    const BtGraphNode *nd = g_ptr_array_index(gv->graph->nodes, i);
+    if (!nd->visible) continue;
+    if ((nd->kind == BT_NODE_HUMAN_NOTE || nd->kind == BT_NODE_AI_NOTE) && nd->degree > hub_deg) {
+      hub_deg = nd->degree;
+      hub_idx = (gint)i;
+    }
+    if (small_idx < 0 &&
+        (nd->kind == BT_NODE_HUMAN_NOTE || nd->kind == BT_NODE_AI_NOTE) &&
+        (nd->degree == 1u || nd->degree == 2u)) {
+      small_idx = (gint)i;
+    }
+  }
+
+  gv->focus_idx = -1;
+  switch (spec->interact) {
+  case BT_CAP_INTERACT_HOVER_HUB:
+    gv->hover_idx = hub_idx;
+    gv->selected_idx = -1;
+    gv->hover_fade = (hub_idx >= 0) ? 1.0 : 0.0;
+    break;
+  case BT_CAP_INTERACT_HOVER_SMALL:
+    gv->hover_idx = small_idx;
+    gv->selected_idx = -1;
+    gv->hover_fade = (small_idx >= 0) ? 1.0 : 0.0;
+    break;
+  case BT_CAP_INTERACT_SELECT_HUB:
+    gv->hover_idx = -1;
+    gv->selected_idx = hub_idx;
+    gv->hover_fade = (hub_idx >= 0) ? 1.0 : 0.0;
+    break;
+  case BT_CAP_INTERACT_NONE:
+  default:
+    gv->hover_idx = -1;
+    gv->selected_idx = -1;
+    gv->hover_fade = 0.0;
+    break;
+  }
+
+  gv->time_sec = spec->reduce_motion ? 0.0 : 4.0;
+  refresh_neighbor_mask(gv);
+  update_hover_readout(gv);
+  sync_toolbar_buttons(gv);
+  queue_canvas_draw(gv);
+}
+
+static guint current_overlap_count(const BtGraphView *gv)
+{
+  if (gv == NULL)
+    return 0u;
+  if (gv->active_backend == BT_GRAPH_BACKEND_GL && gv->gl != NULL)
+    return bt_graph_gl_last_overlap_count(gv->gl);
+  if (gv->cairo_renderer != NULL && gv->cairo_renderer->priv != NULL)
+    return ((const BtCairoPriv *)gv->cairo_renderer->priv)->last_overlap_count;
+  return 0u;
+}
+
+gboolean bt_graphview_capture_evidence(BtGraphView *gv, GtkWindow *win, const gchar *out_dir,
+                                       const BtGraphCaptureSpec *spec, const gchar *build_stamp,
+                                       GError **error)
+{
+  if (gv == NULL || gv->canvas_stack == NULL || out_dir == NULL || spec == NULL) {
+    g_set_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT, "Invalid capture arguments");
+    return FALSE;
+  }
+  if (g_mkdir_with_parents(out_dir, 0755) != 0) {
+    g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Cannot create output dir '%s'", out_dir);
+    return FALSE;
+  }
+
+  int gw = gtk_widget_get_width(gv->canvas_stack);
+  int gh = gtk_widget_get_height(gv->canvas_stack);
+  int scale = MAX(gtk_widget_get_scale_factor(gv->canvas_stack), 1);
+  if (gw <= 0 || gh <= 0) {
+    g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Graph widget has zero size");
+    return FALSE;
+  }
+
+  BtGraphRenderState st;
+  fill_render_state(gv, gw, gh, scale, &st);
+
+  gchar *png_name = g_strdup_printf("%s.png", spec->name);
+  gchar *png_path = g_build_filename(out_dir, png_name, NULL);
+  g_free(png_name);
+
+  gboolean is_gl = (gv->active_backend == BT_GRAPH_BACKEND_GL && gv->gl != NULL &&
+                    bt_graph_gl_is_ready(gv->gl));
+  gboolean ok = FALSE;
+  if (is_gl) {
+    ok = bt_graph_gl_capture_png(gv->gl, &st, png_path, error);
+  } else {
+    cairo_surface_t *surf =
+        cairo_image_surface_create(CAIRO_FORMAT_ARGB32, gw * scale, gh * scale);
+    cairo_t *cr = cairo_create(surf);
+    cairo_scale(cr, (gdouble)scale, (gdouble)scale);
+    if (gv->cairo_renderer != NULL && gv->cairo_renderer->vt->render_cairo != NULL)
+      gv->cairo_renderer->vt->render_cairo(gv->cairo_renderer, cr, &st);
+    cairo_destroy(cr);
+    cairo_status_t cst = cairo_surface_write_to_png(surf, png_path);
+    cairo_surface_destroy(surf);
+    if (cst == CAIRO_STATUS_SUCCESS)
+      ok = TRUE;
+    else
+      g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Cairo PNG write failed: %s",
+                  cairo_status_to_string(cst));
+  }
+  g_free(png_path);
+  if (!ok)
+    return FALSE;
+
+  guint vn = 0, tn = 0, ve = 0, te = 0;
+  count_visible_graph_stats(gv, &vn, &tn, &ve, &te);
+  guint drawn_lbl = current_drawn_label_count(gv);
+  guint ov_cnt = current_overlap_count(gv);
+
+  int ww = win ? gtk_widget_get_width(GTK_WIDGET(win)) : gw;
+  int wh = win ? gtk_widget_get_height(GTK_WIDGET(win)) : gh;
+
+  cJSON *root = cJSON_CreateObject();
+  cJSON_AddStringToObject(root, "state", spec->name);
+  cJSON_AddStringToObject(root, "build_stamp", build_stamp ? build_stamp : "");
+  cJSON_AddNumberToObject(root, "window_width", ww);
+  cJSON_AddNumberToObject(root, "window_height", wh);
+  cJSON_AddNumberToObject(root, "graph_width", gw);
+  cJSON_AddNumberToObject(root, "graph_height", gh);
+  cJSON_AddNumberToObject(root, "scale_factor", scale);
+  cJSON_AddStringToObject(root, "backend", is_gl ? "gl" : "cairo");
+  cJSON_AddStringToObject(root, "gl_renderer",
+                          is_gl ? bt_graph_gl_renderer(gv->gl) : "CPU (Cairo fallback)");
+  cJSON_AddStringToObject(root, "gl_version", is_gl ? bt_graph_gl_version(gv->gl) : "N/A");
+  cJSON_AddStringToObject(root, "quality",
+                          (gv->quality == BT_GRAPH_QUALITY_HIGH) ? "high" : "low");
+  cJSON_AddStringToObject(root, "mode",
+                          (is_gl && gv->mode == BT_GRAPH_MODE_3D) ? "3d" : "2d");
+  cJSON_AddBoolToObject(root, "reduce_motion", gv->reduce_motion);
+  cJSON_AddNumberToObject(root, "nodes_total", (double)tn);
+  cJSON_AddNumberToObject(root, "nodes_visible", (double)vn);
+  cJSON_AddNumberToObject(root, "edges_total", (double)te);
+  cJSON_AddNumberToObject(root, "edges_visible", (double)ve);
+  cJSON_AddNumberToObject(root, "drawn_labels", (double)drawn_lbl);
+  cJSON_AddNumberToObject(root, "overlap_count", (double)ov_cnt);
+  cJSON_AddNumberToObject(root, "settle_frames", (double)spec->settle_frames);
+
+  gchar *json_name = g_strdup_printf("%s.json", spec->name);
+  gchar *json_path = g_build_filename(out_dir, json_name, NULL);
+  g_free(json_name);
+
+  char *printed = cJSON_Print(root);
+  cJSON_Delete(root);
+  gboolean jok = g_file_set_contents(json_path, printed ? printed : "{}", -1, error);
+  free(printed);
+  g_free(json_path);
+  return jok;
 }
 
 void bt_graphview_set_notice_cb(BtGraphView *gv, BtGraphNoticeFn on_notice, gpointer user_data)

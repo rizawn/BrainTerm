@@ -9,6 +9,7 @@
 
 #include "graph.h"
 #include "graph_state.h"
+#include "ui/graphcapture.h"
 
 G_BEGIN_DECLS
 
@@ -43,6 +44,11 @@ void bt_graphview_set_prefs_cb(BtGraphView *gv, BtGraphPrefsChangedFn on_prefs, 
 void bt_graphview_set_debug_overlay(BtGraphView *gv, gboolean enabled);
 gboolean bt_graphview_get_debug_overlay(const BtGraphView *gv);
 void bt_graphview_toggle_debug_overlay(BtGraphView *gv);
+gboolean bt_graphview_is_capture_ready(const BtGraphView *gv, const BtGraphCaptureSpec *spec);
+void bt_graphview_apply_capture_state(BtGraphView *gv, const BtGraphCaptureSpec *spec);
+gboolean bt_graphview_capture_evidence(BtGraphView *gv, GtkWindow *win, const gchar *out_dir,
+                                       const BtGraphCaptureSpec *spec, const gchar *build_stamp,
+                                       GError **error);
 void bt_graphview_set_notice_cb(BtGraphView *gv, BtGraphNoticeFn on_notice, gpointer user_data);
 void bt_graphview_set_rename_cb(BtGraphView *gv, BtGraphRenameNoteFn on_rename, gpointer user_data);
 gboolean bt_graphview_has_graph(const BtGraphView *gv);

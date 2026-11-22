@@ -40,6 +40,7 @@ app_sources = files(
   'terminal.c',
   'graphview.c',
   'ui/graphgl.c',
+  'ui/graphcapture.c',
   'ui/filetree.c',
   'ui/editorpane.c',
   'ui/quickopen.c',

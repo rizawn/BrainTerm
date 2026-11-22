@@ -184,7 +184,7 @@ test('graph_v2', t_graph_v2, suite: 'unit')
 
 bench_graph = executable(
   'bench_graph',
-  ['bench/bench_graph.c', '../src/graphview.c', '../src/ui/graphgl.c', bt_resources],
+  ['bench/bench_graph.c', '../src/graphview.c', '../src/ui/graphgl.c', '../src/ui/graphcapture.c', bt_resources],
   include_directories: [test_inc, include_directories('../src')],
   dependencies: [bt_core_dep, gtk4_dep, epoxy_dep],
 )
@@ -231,7 +231,7 @@ test(
 
 t_theme = executable(
   'test_theme',
-  ['unit/test_theme.c', '../src/graphview.c', '../src/ui/graphgl.c', bt_resources],
+  ['unit/test_theme.c', '../src/graphview.c', '../src/ui/graphgl.c', '../src/ui/graphcapture.c', bt_resources],
   include_directories: [test_inc, include_directories('../src')],
   dependencies: [bt_core_dep, gtk4_dep, epoxy_dep, cmocka_dep],
 )
@@ -251,6 +251,7 @@ t_fix_ui = executable(
     '../src/terminal.c',
     '../src/graphview.c',
     '../src/ui/graphgl.c',
+    '../src/ui/graphcapture.c',
     '../src/ui/filetree.c',
     '../src/ui/editorpane.c',
     '../src/ui/quickopen.c',

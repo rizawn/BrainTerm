@@ -74,6 +74,14 @@ struct BtApp {
   gchar *cli_vault;
   gboolean smoke_test;
   gboolean graph_debug;
+  gchar *capture_dir;
+  gchar *capture_state;
+  gint capture_w;
+  gint capture_h;
+  gsize capture_idx;
+  guint capture_settle_left;
+  gboolean capture_applied;
+  gboolean capture_failed;
 };
 
 /* ----------------------------------------------------- state.ini (§7.5) -- */
@@ -388,7 +396,7 @@ gboolean bt_app_open_vault(BtApp *app, const gchar *path, GError **error)
   app->vault = v;
   app->last_checkpoint_oid[0] = '\0';
 
-  if (!app->smoke_test) {
+  if (!app->smoke_test && app->capture_dir == NULL) {
     gboolean differs = FALSE;
     bt_agents_apply_vault_template(app->vault, &differs, NULL);
     bt_app_save_last_vault(vault_root(app->vault), NULL);
@@ -416,7 +424,7 @@ gboolean bt_app_open_vault(BtApp *app, const gchar *path, GError **error)
     bt_filetree_populate(app->tree, app->vault);
   refresh_graph(app, !app->smoke_test);
 
-  if (app->tabs != NULL) {
+  if (app->tabs != NULL && app->capture_dir == NULL) {
     GError *terr = NULL;
     const BtSession *sess = bt_sessions_add(app->sessions, "shell", vault_root(app->vault), "",
                                             NULL, NULL, NULL);
@@ -1921,6 +1929,72 @@ static void dump_bt_widget_tree(GtkWidget *w, int depth)
   }
 }
 
+static gboolean on_capture_settle_tick(GtkWidget *w, GdkFrameClock *clock, gpointer ud);
+
+static const BtGraphCaptureSpec *current_capture_spec(BtApp *app)
+{
+  if (app->capture_state == NULL || g_ascii_strcasecmp(app->capture_state, "all") == 0) {
+    gsize cnt = 0;
+    const BtGraphCaptureSpec *all = bt_graph_capture_states(&cnt);
+    return (app->capture_idx < cnt) ? &all[app->capture_idx] : NULL;
+  }
+  return (app->capture_idx == 0) ? bt_graph_capture_find(app->capture_state) : NULL;
+}
+
+static gboolean on_capture_poll(gpointer ud)
+{
+  BtApp *app = ud;
+  const BtGraphCaptureSpec *spec = current_capture_spec(app);
+  if (spec == NULL) {
+    g_application_quit(G_APPLICATION(app->adw_app));
+    return G_SOURCE_REMOVE;
+  }
+  if (!bt_graphview_is_capture_ready(app->graphview, spec))
+    return G_SOURCE_CONTINUE;
+
+  bt_graphview_apply_capture_state(app->graphview, spec);
+  app->capture_applied = TRUE;
+  app->capture_settle_left = MAX(spec->settle_frames, 2u);
+  gtk_widget_add_tick_callback(bt_graphview_widget(app->graphview),
+                               on_capture_settle_tick, app, NULL);
+  return G_SOURCE_REMOVE;
+}
+
+static gboolean on_capture_settle_tick(GtkWidget *w, GdkFrameClock *clock, gpointer ud)
+{
+  (void)w; (void)clock;
+  BtApp *app = ud;
+  if (app->capture_settle_left > 0u) {
+    app->capture_settle_left--;
+    gtk_widget_queue_draw(bt_graphview_widget(app->graphview));
+    return G_SOURCE_CONTINUE;
+  }
+
+  const BtGraphCaptureSpec *spec = current_capture_spec(app);
+  if (spec != NULL) {
+    GError *err = NULL;
+    if (!bt_graphview_capture_evidence(app->graphview, app->window, app->capture_dir, spec,
+                                       BT_BUILD_STAMP, &err)) {
+      g_printerr("BT_CAPTURE ERROR state=%s: %s\n", spec->name, err ? err->message : "unknown");
+      g_clear_error(&err);
+      app->capture_failed = TRUE;
+      g_application_quit(G_APPLICATION(app->adw_app));
+      return G_SOURCE_REMOVE;
+    }
+    printf("BT_CAPTURE ok state=%s dir=%s\n", spec->name, app->capture_dir);
+    fflush(stdout);
+  }
+
+  app->capture_idx++;
+  app->capture_applied = FALSE;
+  if (current_capture_spec(app) == NULL) {
+    g_application_quit(G_APPLICATION(app->adw_app));
+    return G_SOURCE_REMOVE;
+  }
+  g_timeout_add(30, on_capture_poll, app);
+  return G_SOURCE_REMOVE;
+}
+
 static gboolean on_smoke_idle(gpointer ud)
 {
   BtApp *app = ud;
@@ -2045,7 +2119,9 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
 
   app->window = GTK_WINDOW(adw_application_window_new(gtk_app));
   gtk_widget_set_name(GTK_WIDGET(app->window), "bt-window");
-  gtk_window_set_default_size(app->window, 1280, 800);
+  int def_w = (app->capture_w > 200) ? app->capture_w : 1280;
+  int def_h = (app->capture_h > 200) ? app->capture_h : 800;
+  gtk_window_set_default_size(app->window, def_w, def_h);
   g_signal_connect(app->window, "close-request", G_CALLBACK(on_window_close), app);
 
   /* Header bar: left = sidebar + vault title; right = segmented nav + Agent + menu + Win11 controls */
@@ -2096,7 +2172,7 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
   bt_editorpane_set_conflict_cbs(app->editor, on_editor_conflict_diff, on_editor_conflict_reload);
   app->graphview = bt_graphview_new(on_graph_open_note, on_tree_open_term, app);
   bt_graphview_set_rename_cb(app->graphview, on_graph_rename_note, app);
-  if (!app->smoke_test) {
+  if (!app->smoke_test && app->capture_dir == NULL) {
     bt_graphview_set_show_tags(app->graphview, load_saved_graph_bool("show_tags", FALSE));
     bt_graphview_set_show_ghosts(app->graphview, load_saved_graph_bool("show_ghosts", FALSE));
   }
@@ -2120,7 +2196,7 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
   const gchar *stack_page = (g_strcmp0(saved_page, "sessions") == 0) ? "sessions" : "editor";
   adw_view_stack_set_visible_child_name(app->view_stack, stack_page);
 
-  app->graph_visible = app->smoke_test ? TRUE : load_saved_graph_visible();
+  app->graph_visible = (app->smoke_test || app->capture_dir != NULL) ? TRUE : load_saved_graph_visible();
   if (g_strcmp0(saved_page, "graph") == 0)
     app->graph_visible = TRUE;
 
@@ -2289,8 +2365,16 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
   g_free(saved_page);
   g_free(initial);
 
+  if (app->capture_dir != NULL && app->capture_w > 0 && app->capture_w <= 1100) {
+    /* Compact capture size (e.g. 1000x700): let graph widget fill the capture viewport. */
+    adw_overlay_split_view_set_show_sidebar(app->split_view, FALSE);
+    gtk_widget_set_visible(left_card, FALSE);
+    gtk_widget_set_visible(app->term_card, FALSE);
+  }
   if (app->smoke_test)
     g_timeout_add(250, on_smoke_idle, app);
+  else if (app->capture_dir != NULL)
+    g_timeout_add(60, on_capture_poll, app);
 }
 
 static gint on_handle_local_options(GApplication *gapp, GVariantDict *opts, gpointer ud)
@@ -2312,6 +2396,33 @@ static gint on_handle_local_options(GApplication *gapp, GVariantDict *opts, gpoi
     app->smoke_test = TRUE;
   if (g_variant_dict_contains(opts, "graph-debug"))
     app->graph_debug = TRUE;
+  gchar *cap_dir = NULL;
+  if (g_variant_dict_lookup(opts, "graph-capture", "s", &cap_dir)) {
+    g_free(app->capture_dir);
+    app->capture_dir = cap_dir;
+  }
+  gchar *cap_state = NULL;
+  if (g_variant_dict_lookup(opts, "graph-state", "s", &cap_state)) {
+    g_free(app->capture_state);
+    app->capture_state = cap_state;
+  }
+  gchar *cap_sz = NULL;
+  if (g_variant_dict_lookup(opts, "graph-size", "s", &cap_sz)) {
+    int cw = 0, ch = 0;
+    if (sscanf(cap_sz, "%dx%d", &cw, &ch) == 2 && cw > 200 && ch > 200) {
+      app->capture_w = cw;
+      app->capture_h = ch;
+    }
+    g_free(cap_sz);
+  }
+  if (app->capture_dir != NULL && app->capture_state != NULL &&
+      g_ascii_strcasecmp(app->capture_state, "all") != 0 &&
+      bt_graph_capture_find(app->capture_state) == NULL) {
+    g_printerr("Unknown --graph-state '%s'. Valid states: default-fit, hover-hub, hover-small, "
+               "selected, zoom2x, 3d, reduce-motion-on, reduce-motion-off, all\n",
+               app->capture_state);
+    return 1;
+  }
   return -1;
 }
 
@@ -2358,6 +2469,9 @@ BtApp *bt_app_new(void)
     {"vault", 'v', 0, G_OPTION_ARG_STRING, NULL, "Open vault directory", "DIR"},
     {"smoke-test", 0, 0, G_OPTION_ARG_NONE, NULL, "Open UI, verify startup, and exit", NULL},
     {"graph-debug", 0, 0, G_OPTION_ARG_NONE, NULL, "Show Brain Graph frame-time debug overlay", NULL},
+    {"graph-capture", 0, 0, G_OPTION_ARG_STRING, NULL, "Capture graph PNG + JSON evidence to DIR and exit", "DIR"},
+    {"graph-state", 0, 0, G_OPTION_ARG_STRING, NULL, "Named capture state (default-fit|hover-hub|hover-small|selected|zoom2x|3d|reduce-motion-on|reduce-motion-off|all)", "NAME"},
+    {"graph-size", 0, 0, G_OPTION_ARG_STRING, NULL, "Window size WxH for --graph-capture (e.g. 1000x700 or 1920x1080)", "WxH"},
     {"version", 'V', 0, G_OPTION_ARG_NONE, NULL, "Print version and build stamp and exit", NULL},
     {NULL, 0, 0, 0, NULL, NULL, NULL},
   };
@@ -2385,6 +2499,8 @@ void bt_app_free(BtApp *app)
   bt_agents_clear(&app->agents);
   bt_themeloader_free(app->themeloader);
   g_free(app->cli_vault);
+  g_free(app->capture_dir);
+  g_free(app->capture_state);
   g_clear_object(&app->adw_app);
   g_free(app);
   bt_checkpoint_shutdown();
@@ -2393,7 +2509,8 @@ void bt_app_free(BtApp *app)
 int bt_app_run(BtApp *app, int argc, char **argv)
 {
   g_return_val_if_fail(app != NULL, 1);
-  return g_application_run(G_APPLICATION(app->adw_app), argc, argv);
+  int rc = g_application_run(G_APPLICATION(app->adw_app), argc, argv);
+  return app->capture_failed ? 1 : rc;
 }
 
 const gchar *bt_app_build_stamp(void) { return BT_BUILD_STAMP; }
