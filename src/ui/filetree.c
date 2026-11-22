@@ -1,4 +1,6 @@
-/* filetree.c — GtkListView + GtkTreeListModel sidebar for vault notes (§6.A1). */
+/* filetree.c — GtkListView + GtkTreeListModel sidebar for vault notes (§6.A1)
+ * with desktop-standard right-click context menu (Open, Rename, Duplicate,
+ * Delete, New Note, Open Terminal, Copy Path, Reveal in Explorer) & F2 rename. */
 #include "filetree.h"
 
 #include <string.h>
@@ -54,13 +56,19 @@ struct BtFileTree {
   GtkWidget *stack;
   GtkWidget *scrolled;
   GtkWidget *list_view;
+  GtkWidget *ctx_popover;
   GListStore *root_store;
   GtkTreeListModel *tree_model;
   GtkSingleSelection *selection;
   BtFileTreeSelectFn on_select;
   BtFileTreeOpenTermFn on_open_term;
+  BtFileTreeActionFn on_action;
   gpointer user_data;
+  gpointer action_ud;
   gboolean suppress_select;
+
+  gchar *ctx_relpath;
+  gboolean ctx_is_dir;
 };
 
 static gboolean is_special_agent_file(const gchar *name)
@@ -82,18 +90,169 @@ static GListModel *create_child_model(gpointer item, gpointer user_data)
   return G_LIST_MODEL(g_object_ref(ti->children));
 }
 
+/* --------------------------------------------------- context menu popup -- */
+
+static void dispatch_ctx_action(BtFileTree *tree, BtFileTreeAction act,
+                                const gchar *relpath, gboolean is_dir)
+{
+  if (tree == NULL)
+    return;
+  if (tree->on_action != NULL) {
+    tree->on_action(act, relpath, is_dir, tree->action_ud);
+    return;
+  }
+  /* Legacy fallback when no action callback is wired (tests). */
+  if (act == BT_TREE_ACT_OPEN && !is_dir && tree->on_select != NULL && relpath != NULL)
+    tree->on_select(relpath, tree->user_data);
+  else if (act == BT_TREE_ACT_OPEN_TERM && tree->on_open_term != NULL && relpath != NULL)
+    tree->on_open_term(relpath, tree->user_data);
+}
+
+static void on_ctx_item_clicked(GtkButton *btn, gpointer ud)
+{
+  BtFileTree *tree = ud;
+  BtFileTreeAction act = (BtFileTreeAction)GPOINTER_TO_INT(
+      g_object_get_data(G_OBJECT(btn), "bt-ctx-act"));
+  gchar *rel = g_strdup(tree->ctx_relpath);
+  gboolean is_dir = tree->ctx_is_dir;
+  if (tree->ctx_popover != NULL)
+    gtk_popover_popdown(GTK_POPOVER(tree->ctx_popover));
+  dispatch_ctx_action(tree, act, rel, is_dir);
+  g_free(rel);
+}
+
+static void add_ctx_button(GtkWidget *box, BtFileTree *tree, const gchar *label,
+                           BtFileTreeAction act, gboolean destructive)
+{
+  GtkWidget *b = gtk_button_new_with_label(label);
+  gtk_widget_add_css_class(b, "bt-ctx-item");
+  if (destructive)
+    gtk_widget_add_css_class(b, "bt-ctx-danger");
+  GtkWidget *child = gtk_button_get_child(GTK_BUTTON(b));
+  if (GTK_IS_LABEL(child))
+    gtk_label_set_xalign(GTK_LABEL(child), 0.0f);
+  g_object_set_data(G_OBJECT(b), "bt-ctx-act", GINT_TO_POINTER((gint)act));
+  g_signal_connect(b, "clicked", G_CALLBACK(on_ctx_item_clicked), tree);
+  gtk_box_append(GTK_BOX(box), b);
+}
+
+static void add_ctx_sep(GtkWidget *box)
+{
+  GtkWidget *sep = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
+  gtk_widget_add_css_class(sep, "bt-ctx-sep");
+  gtk_box_append(GTK_BOX(box), sep);
+}
+
+static void on_ctx_closed(GtkPopover *pop, gpointer ud)
+{
+  BtFileTree *tree = ud;
+  if (tree->ctx_popover == GTK_WIDGET(pop)) {
+    tree->ctx_popover = NULL;
+    gtk_widget_unparent(GTK_WIDGET(pop));
+  }
+}
+
+static void show_context_menu(BtFileTree *tree, GtkWidget *anchor, gdouble x, gdouble y,
+                              const gchar *relpath, gboolean is_dir)
+{
+  if (tree->ctx_popover != NULL) {
+    GtkWidget *old = tree->ctx_popover;
+    tree->ctx_popover = NULL;
+    gtk_popover_popdown(GTK_POPOVER(old));
+    gtk_widget_unparent(old);
+  }
+
+  g_free(tree->ctx_relpath);
+  tree->ctx_relpath = g_strdup(relpath);
+  tree->ctx_is_dir = is_dir;
+
+  GtkWidget *pop = gtk_popover_new();
+  gtk_widget_add_css_class(pop, "bt-ctx-popover");
+  gtk_popover_set_has_arrow(GTK_POPOVER(pop), FALSE);
+  gtk_popover_set_autohide(GTK_POPOVER(pop), TRUE);
+  gtk_widget_set_halign(pop, GTK_ALIGN_START);
+
+  GtkWidget *menu_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+  gtk_widget_add_css_class(menu_box, "bt-ctx-menu");
+
+  if (relpath != NULL && !is_dir) {
+    add_ctx_button(menu_box, tree, "Open", BT_TREE_ACT_OPEN, FALSE);
+    add_ctx_button(menu_box, tree, "Rename…   F2", BT_TREE_ACT_RENAME, FALSE);
+    add_ctx_button(menu_box, tree, "Duplicate", BT_TREE_ACT_DUPLICATE, FALSE);
+    add_ctx_sep(menu_box);
+    add_ctx_button(menu_box, tree, "New Note here…", BT_TREE_ACT_NEW_NOTE, FALSE);
+    add_ctx_button(menu_box, tree, "Open terminal here", BT_TREE_ACT_OPEN_TERM, FALSE);
+    add_ctx_button(menu_box, tree, "Copy path", BT_TREE_ACT_COPY_PATH, FALSE);
+    add_ctx_button(menu_box, tree, "Reveal in Explorer", BT_TREE_ACT_REVEAL, FALSE);
+    add_ctx_sep(menu_box);
+    add_ctx_button(menu_box, tree, "Delete…", BT_TREE_ACT_DELETE, TRUE);
+  } else if (relpath != NULL && is_dir) {
+    add_ctx_button(menu_box, tree, "New Note in folder…", BT_TREE_ACT_NEW_NOTE, FALSE);
+    add_ctx_button(menu_box, tree, "Open terminal here", BT_TREE_ACT_OPEN_TERM, FALSE);
+    add_ctx_button(menu_box, tree, "Copy path", BT_TREE_ACT_COPY_PATH, FALSE);
+    add_ctx_button(menu_box, tree, "Reveal in Explorer", BT_TREE_ACT_REVEAL, FALSE);
+  } else {
+    add_ctx_button(menu_box, tree, "New Note…", BT_TREE_ACT_NEW_NOTE, FALSE);
+    add_ctx_button(menu_box, tree, "Open terminal in vault", BT_TREE_ACT_OPEN_TERM, FALSE);
+    add_ctx_sep(menu_box);
+    add_ctx_button(menu_box, tree, "Rescan vault", BT_TREE_ACT_RESCAN, FALSE);
+  }
+
+  gtk_popover_set_child(GTK_POPOVER(pop), menu_box);
+  gtk_widget_set_parent(pop, anchor);
+  GdkRectangle rect = {(int)x, (int)y, 1, 1};
+  gtk_popover_set_pointing_to(GTK_POPOVER(pop), &rect);
+  g_signal_connect(pop, "closed", G_CALLBACK(on_ctx_closed), tree);
+  tree->ctx_popover = pop;
+  gtk_popover_popup(GTK_POPOVER(pop));
+}
+
 static void on_row_right_click(GtkGestureClick *g, gint n_press, gdouble x, gdouble y, gpointer ud)
 {
-  (void)g;
-  (void)x;
-  (void)y;
   if (n_press != 1)
     return;
   GtkWidget *box = ud;
   BtFileTree *tree = g_object_get_data(G_OBJECT(box), "bt-tree");
   const gchar *rel = g_object_get_data(G_OBJECT(box), "bt-relpath");
-  if (tree != NULL && tree->on_open_term != NULL && rel != NULL)
-    tree->on_open_term(rel, tree->user_data);
+  gboolean is_dir = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(box), "bt-is-dir")) != 0;
+  if (tree == NULL || rel == NULL)
+    return;
+  gtk_gesture_set_state(GTK_GESTURE(g), GTK_EVENT_SEQUENCE_CLAIMED);
+  show_context_menu(tree, box, x, y, rel, is_dir);
+}
+
+static void on_bg_right_click(GtkGestureClick *g, gint n_press, gdouble x, gdouble y, gpointer ud)
+{
+  if (n_press != 1)
+    return;
+  BtFileTree *tree = ud;
+  if (tree == NULL || tree->scrolled == NULL)
+    return;
+  gtk_gesture_set_state(GTK_GESTURE(g), GTK_EVENT_SEQUENCE_CLAIMED);
+  show_context_menu(tree, tree->scrolled, x, y, NULL, TRUE);
+}
+
+static gboolean on_tree_key_pressed(GtkEventControllerKey *ctrl, guint keyval, guint keycode,
+                                    GdkModifierType state, gpointer ud)
+{
+  (void)ctrl; (void)keycode; (void)state;
+  BtFileTree *tree = ud;
+  if (keyval == GDK_KEY_F2) {
+    gchar *sel = bt_filetree_selected_path(tree);
+    if (sel != NULL) {
+      dispatch_ctx_action(tree, BT_TREE_ACT_RENAME, sel, FALSE);
+      g_free(sel);
+      return TRUE;
+    }
+  } else if (keyval == GDK_KEY_Delete) {
+    gchar *sel = bt_filetree_selected_path(tree);
+    if (sel != NULL) {
+      dispatch_ctx_action(tree, BT_TREE_ACT_DELETE, sel, FALSE);
+      g_free(sel);
+      return TRUE;
+    }
+  }
+  return FALSE;
 }
 
 static void on_factory_setup(GtkListItemFactory *factory, GtkListItem *list_item, gpointer ud)
@@ -138,6 +297,7 @@ static void on_factory_bind(GtkListItemFactory *factory, GtkListItem *list_item,
   GtkWidget *badge = gtk_widget_get_next_sibling(label);
 
   g_object_set_data_full(G_OBJECT(box), "bt-relpath", g_strdup(item->relpath), g_free);
+  g_object_set_data(G_OBJECT(box), "bt-is-dir", GINT_TO_POINTER(item->is_dir ? 1 : 0));
   gtk_widget_remove_css_class(icon, "bt-icon-folder");
   gtk_widget_remove_css_class(icon, "bt-icon-special");
 
@@ -213,6 +373,10 @@ BtFileTree *bt_filetree_new(BtFileTreeSelectFn on_select, BtFileTreeOpenTermFn o
   g_signal_connect(tree->selection, "notify::selected-item", G_CALLBACK(on_selection_changed), tree);
   g_signal_connect(tree->list_view, "activate", G_CALLBACK(on_row_activate), tree);
 
+  GtkEventController *key = gtk_event_controller_key_new();
+  g_signal_connect(key, "key-pressed", G_CALLBACK(on_tree_key_pressed), tree);
+  gtk_widget_add_controller(tree->list_view, key);
+
   tree->scrolled = gtk_scrolled_window_new();
   gtk_widget_set_name(tree->scrolled, "bt-filetree");
   gtk_widget_set_hexpand(tree->scrolled, TRUE);
@@ -221,6 +385,11 @@ BtFileTree *bt_filetree_new(BtFileTreeSelectFn on_select, BtFileTreeOpenTermFn o
                                  GTK_POLICY_AUTOMATIC);
   gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(tree->scrolled), tree->list_view);
   gtk_widget_set_size_request(tree->scrolled, 190, -1);
+
+  GtkGesture *bg_rclick = gtk_gesture_click_new();
+  gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(bg_rclick), GDK_BUTTON_SECONDARY);
+  g_signal_connect(bg_rclick, "pressed", G_CALLBACK(on_bg_right_click), tree);
+  gtk_widget_add_controller(tree->scrolled, GTK_EVENT_CONTROLLER(bg_rclick));
 
   GtkWidget *empty = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
   gtk_widget_add_css_class(empty, "bt-empty");
@@ -249,10 +418,23 @@ BtFileTree *bt_filetree_new(BtFileTreeSelectFn on_select, BtFileTreeOpenTermFn o
   return tree;
 }
 
+void bt_filetree_set_action_cb(BtFileTree *tree, BtFileTreeActionFn on_action, gpointer user_data)
+{
+  if (tree == NULL)
+    return;
+  tree->on_action = on_action;
+  tree->action_ud = user_data;
+}
+
 void bt_filetree_free(BtFileTree *tree)
 {
   if (tree == NULL)
     return;
+  if (tree->ctx_popover != NULL) {
+    gtk_widget_unparent(tree->ctx_popover);
+    tree->ctx_popover = NULL;
+  }
+  g_free(tree->ctx_relpath);
   g_clear_object(&tree->selection);
   g_clear_object(&tree->tree_model);
   g_clear_object(&tree->root_store);
@@ -304,7 +486,6 @@ void bt_filetree_populate(BtFileTree *tree, const BtVault *vault)
     tree->suppress_select = FALSE;
     return;
   }
-  /* Map dir relpath -> GListStore* (borrowed from tree items). */
   GHashTable *dirs = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
 
   for (guint i = 0; i < notes->len; i++) {
@@ -364,4 +545,17 @@ void bt_filetree_select_path(BtFileTree *tree, const gchar *relpath)
     }
   }
   tree->suppress_select = FALSE;
+}
+
+gchar *bt_filetree_selected_path(const BtFileTree *tree)
+{
+  if (tree == NULL || tree->selection == NULL)
+    return NULL;
+  GtkTreeListRow *row = GTK_TREE_LIST_ROW(gtk_single_selection_get_selected_item(tree->selection));
+  if (row == NULL)
+    return NULL;
+  BtTreeItem *item = BT_TREE_ITEM(gtk_tree_list_row_get_item(row));
+  gchar *out = (item != NULL && !item->is_dir && item->relpath != NULL) ? g_strdup(item->relpath) : NULL;
+  g_clear_object(&item);
+  return out;
 }

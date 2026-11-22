@@ -16,6 +16,7 @@ typedef struct BtGraphView BtGraphView;
 
 typedef void (*BtGraphOpenNoteFn)(const gchar *relpath, gboolean is_ghost, gpointer user_data);
 typedef void (*BtGraphOpenTermFn)(const gchar *rel_dir, gpointer user_data);
+typedef void (*BtGraphRenameNoteFn)(const gchar *relpath, gpointer user_data);
 typedef void (*BtGraphNoticeFn)(const gchar *message, gpointer user_data);
 
 BtGraphView *bt_graphview_new(BtGraphOpenNoteFn on_open, BtGraphOpenTermFn on_open_term,
@@ -34,6 +35,7 @@ gboolean bt_graphview_get_pulse(const BtGraphView *gv);
 void bt_graphview_set_reduce_motion(BtGraphView *gv, gboolean reduce_motion);
 gboolean bt_graphview_get_reduce_motion(const BtGraphView *gv);
 void bt_graphview_set_notice_cb(BtGraphView *gv, BtGraphNoticeFn on_notice, gpointer user_data);
+void bt_graphview_set_rename_cb(BtGraphView *gv, BtGraphRenameNoteFn on_rename, gpointer user_data);
 gboolean bt_graphview_has_graph(const BtGraphView *gv);
 gdouble bt_graphview_min_birth_t(const BtGraphView *gv);
 

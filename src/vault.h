@@ -68,6 +68,14 @@ gboolean vault_read(const BtVault *vault, const gchar *relpath, gchar **contents
 gboolean vault_atomic_write(const BtVault *vault, const gchar *relpath, const gchar *data,
                             gsize length, const BtWriteHooks *hooks, GError **error);
 
+/* Path-guarded rename/move of a .md note inside the vault. Refuses overwriting
+ * a different existing file (allows case-only rename on case-insensitive FS). */
+gboolean vault_rename_note(const BtVault *vault, const gchar *old_relpath,
+                           const gchar *new_relpath, GError **error);
+
+/* Path-guarded deletion of a single file inside the vault (refuses directories). */
+gboolean vault_delete_note(const BtVault *vault, const gchar *relpath, GError **error);
+
 G_END_DECLS
 
 #endif

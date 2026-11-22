@@ -444,3 +444,118 @@ out:
   g_free(abs);
   return ok;
 }
+
+gboolean vault_rename_note(const BtVault *vault, const gchar *old_relpath,
+                           const gchar *new_relpath, GError **error)
+{
+  g_return_val_if_fail(vault != NULL && old_relpath != NULL && new_relpath != NULL, FALSE);
+  if (has_suffix_ci(new_relpath, ".tmp") || !has_suffix_ci(new_relpath, ".md")) {
+    reject(error, new_relpath, "note filename must end with .md");
+    return FALSE;
+  }
+  if (vault_is_ignored_path(vault, new_relpath)) {
+    reject(error, new_relpath, "destination path is in an ignored folder");
+    return FALSE;
+  }
+
+  gchar *old_abs = vault_resolve(vault, old_relpath, error);
+  if (old_abs == NULL)
+    return FALSE;
+  gchar *new_abs = vault_resolve(vault, new_relpath, error);
+  if (new_abs == NULL) {
+    g_free(old_abs);
+    return FALSE;
+  }
+
+  gboolean ok = FALSE;
+  gchar *old_dir = g_path_get_dirname(old_abs);
+  gchar *new_dir = g_path_get_dirname(new_abs);
+
+  if (!g_file_test(old_abs, G_FILE_TEST_IS_REGULAR)) {
+    g_set_error(error, BT_ERROR, BT_ERROR_NOT_FOUND, "Note not found: '%s'", old_relpath);
+    goto out;
+  }
+  if (strcmp(old_abs, new_abs) == 0) {
+    ok = TRUE;
+    goto out;
+  }
+
+  gboolean case_only = (g_ascii_strcasecmp(old_abs, new_abs) == 0);
+  if (!case_only && g_file_test(new_abs, G_FILE_TEST_EXISTS)) {
+    g_set_error(error, BT_ERROR, BT_ERROR_INVALID, "A file named '%s' already exists", new_relpath);
+    goto out;
+  }
+  if (g_mkdir_with_parents(new_dir, 0755) != 0) {
+    g_set_error(error, BT_ERROR, BT_ERROR_IO, "Cannot create folder for '%s': %s",
+                new_relpath, g_strerror(errno));
+    goto out;
+  }
+
+  if (case_only) {
+    /* Two-step rename ensures case-only changes commit cleanly on NTFS/Windows. */
+    gchar *hop = g_strconcat(old_abs, ".bt-rename-hop.tmp", NULL);
+    if (g_rename(old_abs, hop) != 0) {
+      g_set_error(error, BT_ERROR, BT_ERROR_IO, "Cannot rename '%s': %s",
+                  old_relpath, g_strerror(errno));
+      g_free(hop);
+      goto out;
+    }
+    if (g_rename(hop, new_abs) != 0) {
+      g_rename(hop, old_abs);
+      g_set_error(error, BT_ERROR, BT_ERROR_IO, "Cannot rename '%s' to '%s': %s",
+                  old_relpath, new_relpath, g_strerror(errno));
+      g_free(hop);
+      goto out;
+    }
+    g_free(hop);
+  } else {
+    if (g_rename(old_abs, new_abs) != 0) {
+      g_set_error(error, BT_ERROR, BT_ERROR_IO, "Cannot rename '%s' to '%s': %s",
+                  old_relpath, new_relpath, g_strerror(errno));
+      goto out;
+    }
+  }
+
+  bt_platform_fsync_dir(old_dir, NULL);
+  if (strcmp(old_dir, new_dir) != 0)
+    bt_platform_fsync_dir(new_dir, NULL);
+  ok = TRUE;
+
+out:
+  g_free(new_dir);
+  g_free(old_dir);
+  g_free(new_abs);
+  g_free(old_abs);
+  return ok;
+}
+
+gboolean vault_delete_note(const BtVault *vault, const gchar *relpath, GError **error)
+{
+  g_return_val_if_fail(vault != NULL && relpath != NULL, FALSE);
+  gchar *abs = vault_resolve(vault, relpath, error);
+  if (abs == NULL)
+    return FALSE;
+
+  gboolean ok = FALSE;
+  if (g_file_test(abs, G_FILE_TEST_IS_DIR)) {
+    g_set_error(error, BT_ERROR, BT_ERROR_INVALID, "Cannot delete directory: '%s'", relpath);
+    g_free(abs);
+    return FALSE;
+  }
+  if (!g_file_test(abs, G_FILE_TEST_IS_REGULAR)) {
+    g_set_error(error, BT_ERROR, BT_ERROR_NOT_FOUND, "File not found: '%s'", relpath);
+    g_free(abs);
+    return FALSE;
+  }
+  if (g_remove(abs) != 0) {
+    g_set_error(error, BT_ERROR, BT_ERROR_IO, "Cannot delete '%s': %s", relpath, g_strerror(errno));
+    g_free(abs);
+    return FALSE;
+  }
+  gchar *dir = g_path_get_dirname(abs);
+  bt_platform_fsync_dir(dir, NULL);
+  g_free(dir);
+  g_free(abs);
+  ok = TRUE;
+  return ok;
+}

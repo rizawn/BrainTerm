@@ -706,10 +706,17 @@ struct BtGraphView {
   gint64 last_tick_us;
   guint tick_id;
 
+  GtkWidget *ctx_popover;
+  gint ctx_hit_idx;
+  gchar *ctx_relpath;
+  gboolean ctx_is_ghost;
+
   BtGraphOpenNoteFn on_open;
   BtGraphOpenTermFn on_open_term;
+  BtGraphRenameNoteFn on_rename;
   BtGraphNoticeFn on_notice;
   gpointer user_data;
+  gpointer rename_ud;
   gpointer notice_ud;
 };
 
@@ -1156,6 +1163,30 @@ static gint pick_node_at(BtGraphView *gv, gdouble sx, gdouble sy)
 
 /* ---------------------------------------------- pointer & toolbar UI -- */
 
+static void center_on_node(BtGraphView *gv, gint hit)
+{
+  if (gv == NULL || gv->graph == NULL || hit < 0 || (guint)hit >= gv->graph->nodes->len)
+    return;
+  const BtGraphNode *nd = g_ptr_array_index(gv->graph->nodes, (guint)hit);
+  if (gv->mode == BT_GRAPH_MODE_3D && gv->pts3d != NULL && (guint)hit < gv->pts3d_count) {
+    gv->user_interacted_3d = TRUE;
+    const BtGraphVec3 *p = &gv->pts3d[hit];
+    gv->target_yaw = atan2((gdouble)p->x, (gdouble)p->z);
+    gdouble horiz = hypot((gdouble)p->x, (gdouble)p->z);
+    gv->target_pitch = CLAMP(atan2((gdouble)p->y, MAX(horiz, 0.05)), -1.25, 1.25);
+    gv->target_dist3d = MIN(gv->dist3d, 2.35);
+    gv->animating_3d = TRUE;
+  } else {
+    gv->target_pan_x = -nd->x * gv->zoom;
+    gv->target_pan_y = -nd->y * gv->zoom;
+    gv->target_zoom = gv->zoom;
+    gv->animating_cam = TRUE;
+  }
+  ensure_tick(gv);
+}
+
+static void show_graph_context_menu(BtGraphView *gv, gdouble x, gdouble y);
+
 static void on_click_pressed(GtkGestureClick *g, gint n_press, gdouble x, gdouble y, gpointer ud)
 {
   (void)g;
@@ -1169,21 +1200,7 @@ static void on_click_pressed(GtkGestureClick *g, gint n_press, gdouble x, gdoubl
     bt_graph_gl_mark_state_dirty(gv->gl);
     const BtGraphNode *nd = g_ptr_array_index(gv->graph->nodes, (guint)hit);
     if (n_press == 2) {
-      if (gv->mode == BT_GRAPH_MODE_3D && gv->pts3d != NULL && (guint)hit < gv->pts3d_count) {
-        gv->user_interacted_3d = TRUE;
-        const BtGraphVec3 *p = &gv->pts3d[hit];
-        gv->target_yaw = atan2((gdouble)p->x, (gdouble)p->z);
-        gdouble horiz = hypot((gdouble)p->x, (gdouble)p->z);
-        gv->target_pitch = CLAMP(atan2((gdouble)p->y, MAX(horiz, 0.05)), -1.25, 1.25);
-        gv->target_dist3d = MIN(gv->dist3d, 2.35);
-        gv->animating_3d = TRUE;
-      } else {
-        gv->target_pan_x = -nd->x * gv->zoom;
-        gv->target_pan_y = -nd->y * gv->zoom;
-        gv->target_zoom = gv->zoom;
-        gv->animating_cam = TRUE;
-      }
-      ensure_tick(gv);
+      center_on_node(gv, hit);
       return;
     }
     if (n_press == 1 && nd->relpath != NULL && !nd->broken && gv->on_open != NULL)
@@ -1218,14 +1235,9 @@ static void on_right_click(GtkGestureClick *g, gint n_press, gdouble x, gdouble 
 {
   (void)g;
   BtGraphView *gv = ud;
-  if (n_press != 1 || gv->graph == NULL || gv->on_open_term == NULL)
+  if (n_press != 1 || gv->graph == NULL)
     return;
-  gint hit = pick_node_at(gv, x, y);
-  if (hit >= 0) {
-    const BtGraphNode *nd = g_ptr_array_index(gv->graph->nodes, (guint)hit);
-    if (nd->relpath != NULL && !nd->broken)
-      gv->on_open_term(nd->relpath, gv->user_data);
-  }
+  show_graph_context_menu(gv, x, y);
 }
 
 static void on_motion(GtkEventControllerMotion *c, gdouble x, gdouble y, gpointer ud)
@@ -1432,6 +1444,180 @@ static void on_btn_motion_toggled(GtkToggleButton *b, gpointer ud)
     bt_graphview_set_reduce_motion(gv, rm);
 }
 
+/* ------------------------------------------- right-click context menu -- */
+
+static void dismiss_ctx_popover(BtGraphView *gv)
+{
+  if (gv->ctx_popover != NULL) {
+    GtkWidget *old = gv->ctx_popover;
+    gv->ctx_popover = NULL;
+    gtk_popover_popdown(GTK_POPOVER(old));
+    gtk_widget_unparent(old);
+  }
+  g_clear_pointer(&gv->ctx_relpath, g_free);
+  gv->ctx_hit_idx = -1;
+  gv->ctx_is_ghost = FALSE;
+}
+
+static void on_ctx_closed(GtkPopover *pop, gpointer ud)
+{
+  BtGraphView *gv = ud;
+  if (gv->ctx_popover == GTK_WIDGET(pop)) {
+    gv->ctx_popover = NULL;
+    gtk_widget_unparent(GTK_WIDGET(pop));
+  }
+}
+
+static void on_gctx_open(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  BtGraphView *gv = ud;
+  gchar *rel = g_strdup(gv->ctx_relpath);
+  gboolean ghost = gv->ctx_is_ghost;
+  dismiss_ctx_popover(gv);
+  if (rel != NULL && gv->on_open != NULL)
+    gv->on_open(rel, ghost, gv->user_data);
+  g_free(rel);
+}
+
+static void on_gctx_rename(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  BtGraphView *gv = ud;
+  gchar *rel = g_strdup(gv->ctx_relpath);
+  dismiss_ctx_popover(gv);
+  if (rel != NULL && gv->on_rename != NULL)
+    gv->on_rename(rel, gv->rename_ud);
+  g_free(rel);
+}
+
+static void on_gctx_center(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  BtGraphView *gv = ud;
+  gint hit = gv->ctx_hit_idx;
+  dismiss_ctx_popover(gv);
+  center_on_node(gv, hit);
+}
+
+static void on_gctx_term(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  BtGraphView *gv = ud;
+  gchar *rel = g_strdup(gv->ctx_relpath);
+  dismiss_ctx_popover(gv);
+  if (rel != NULL && gv->on_open_term != NULL) {
+    gchar *dir = g_path_get_dirname(rel);
+    const gchar *rel_dir = (dir != NULL && g_strcmp0(dir, ".") != 0) ? dir : NULL;
+    gv->on_open_term(rel_dir, gv->user_data);
+    g_free(dir);
+  }
+  g_free(rel);
+}
+
+static void on_gctx_fit(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  BtGraphView *gv = ud;
+  dismiss_ctx_popover(gv);
+  on_btn_fit(NULL, gv);
+}
+
+static void on_gctx_reset(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  BtGraphView *gv = ud;
+  dismiss_ctx_popover(gv);
+  on_btn_reset(NULL, gv);
+}
+
+static void on_gctx_toggle_mode(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  BtGraphView *gv = ud;
+  dismiss_ctx_popover(gv);
+  on_btn_mode_clicked(NULL, gv);
+}
+
+static GtkWidget *make_gctx_btn(const gchar *label, GCallback cb, BtGraphView *gv)
+{
+  GtkWidget *btn = gtk_button_new_with_label(label);
+  GtkWidget *lbl = gtk_button_get_child(GTK_BUTTON(btn));
+  if (GTK_IS_LABEL(lbl))
+    gtk_label_set_xalign(GTK_LABEL(lbl), 0.0f);
+  gtk_widget_add_css_class(btn, "bt-ctx-item");
+  g_signal_connect(btn, "clicked", cb, gv);
+  return btn;
+}
+
+static GtkWidget *make_gctx_sep(void)
+{
+  GtkWidget *sep = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
+  gtk_widget_add_css_class(sep, "bt-ctx-sep");
+  return sep;
+}
+
+static void show_graph_context_menu(BtGraphView *gv, gdouble x, gdouble y)
+{
+  if (gv->canvas_stack == NULL)
+    return;
+  dismiss_ctx_popover(gv);
+
+  gint hit = pick_node_at(gv, x, y);
+  GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+  gtk_widget_add_css_class(box, "bt-ctx-menu");
+
+  if (hit >= 0 && gv->graph != NULL && (guint)hit < gv->graph->nodes->len) {
+    const BtGraphNode *nd = g_ptr_array_index(gv->graph->nodes, (guint)hit);
+    gv->selected_idx = hit;
+    gv->ctx_hit_idx = hit;
+    gv->ctx_relpath = g_strdup(nd->relpath);
+    gv->ctx_is_ghost = (nd->kind == BT_NODE_GHOST);
+    bt_graph_gl_mark_state_dirty(gv->gl);
+    queue_canvas_draw(gv);
+
+    gboolean has_note = (nd->relpath != NULL && !nd->broken);
+    gboolean is_real_note = has_note && (nd->kind != BT_NODE_GHOST);
+
+    if (has_note && gv->on_open != NULL)
+      gtk_box_append(GTK_BOX(box),
+                     make_gctx_btn(gv->ctx_is_ghost ? "Create note" : "Open note",
+                                   G_CALLBACK(on_gctx_open), gv));
+    if (is_real_note && gv->on_rename != NULL)
+      gtk_box_append(GTK_BOX(box), make_gctx_btn("Rename…", G_CALLBACK(on_gctx_rename), gv));
+    gtk_box_append(GTK_BOX(box), make_gctx_btn("Center on node", G_CALLBACK(on_gctx_center), gv));
+    if (is_real_note && gv->on_open_term != NULL) {
+      gtk_box_append(GTK_BOX(box), make_gctx_sep());
+      gtk_box_append(GTK_BOX(box),
+                     make_gctx_btn("Open terminal here", G_CALLBACK(on_gctx_term), gv));
+    }
+  } else {
+    gtk_box_append(GTK_BOX(box), make_gctx_btn("Fit graph", G_CALLBACK(on_gctx_fit), gv));
+    gtk_box_append(GTK_BOX(box), make_gctx_btn("Reset view", G_CALLBACK(on_gctx_reset), gv));
+    if (gv->active_backend == BT_GRAPH_BACKEND_GL) {
+      gtk_box_append(GTK_BOX(box), make_gctx_sep());
+      gtk_box_append(GTK_BOX(box),
+                     make_gctx_btn(gv->mode == BT_GRAPH_MODE_3D ? "Switch to 2D" : "Switch to 3D",
+                                   G_CALLBACK(on_gctx_toggle_mode), gv));
+    }
+  }
+
+  GtkWidget *pop = gtk_popover_new();
+  gtk_popover_set_has_arrow(GTK_POPOVER(pop), FALSE);
+  gtk_popover_set_autohide(GTK_POPOVER(pop), TRUE);
+  gtk_popover_set_position(GTK_POPOVER(pop), GTK_POS_BOTTOM);
+  gtk_widget_set_halign(pop, GTK_ALIGN_START);
+  gtk_popover_set_child(GTK_POPOVER(pop), box);
+  gtk_widget_set_parent(pop, gv->canvas_stack);
+
+  GdkRectangle rect = {(int)x, (int)y, 1, 1};
+  gtk_popover_set_pointing_to(GTK_POPOVER(pop), &rect);
+  g_signal_connect(pop, "closed", G_CALLBACK(on_ctx_closed), gv);
+
+  gv->ctx_popover = pop;
+  gtk_popover_popup(GTK_POPOVER(pop));
+}
+
 static void on_toplevel_active_notify(GObject *obj, GParamSpec *pspec, gpointer ud)
 {
   (void)pspec;
@@ -1475,6 +1661,7 @@ static void on_canvas_unmap(GtkWidget *area, gpointer ud)
 static void on_canvas_destroy(GtkWidget *area, gpointer ud)
 {
   BtGraphView *gv = ud;
+  dismiss_ctx_popover(gv);
   if (gv->tick_id != 0) {
     gtk_widget_remove_tick_callback(area, gv->tick_id);
     gv->tick_id = 0;
@@ -1526,6 +1713,7 @@ BtGraphView *bt_graphview_new(BtGraphOpenNoteFn on_open, BtGraphOpenTermFn on_op
   gv->hover_idx = -1;
   gv->selected_idx = -1;
   gv->focus_idx = -1;
+  gv->ctx_hit_idx = -1;
   gv->on_open = on_open;
   gv->on_open_term = on_open_term;
   gv->user_data = user_data;
@@ -1693,6 +1881,7 @@ void bt_graphview_free(BtGraphView *gv)
 {
   if (gv == NULL)
     return;
+  dismiss_ctx_popover(gv);
   if (gv->alive != NULL) {
     gv->alive->alive = FALSE;
     gv->alive->gv = NULL;
@@ -1730,6 +1919,7 @@ void bt_graphview_set_graph(BtGraphView *gv, BtGraph *graph, gboolean animate_gr
   gv->hover_idx = -1;
   gv->selected_idx = -1;
   gv->focus_idx = -1;
+  gv->ctx_hit_idx = -1;
   gv->hover_fade = 0.0;
   gv->needs_fit = TRUE;
   gv->hub_thresh = bt_graph_hub_degree_threshold(graph);
@@ -1851,6 +2041,14 @@ void bt_graphview_set_notice_cb(BtGraphView *gv, BtGraphNoticeFn on_notice, gpoi
   gv->notice_ud = user_data;
   if (gv->on_notice != NULL && gv->pending_notice != NULL)
     gv->on_notice(gv->pending_notice, gv->notice_ud);
+}
+
+void bt_graphview_set_rename_cb(BtGraphView *gv, BtGraphRenameNoteFn on_rename, gpointer user_data)
+{
+  if (gv == NULL)
+    return;
+  gv->on_rename = on_rename;
+  gv->rename_ud = user_data;
 }
 
 gboolean bt_graphview_has_graph(const BtGraphView *gv)

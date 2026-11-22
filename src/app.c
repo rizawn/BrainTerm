@@ -25,6 +25,10 @@
 #include <gtksourceview/gtksource.h>
 #include <stdio.h>
 #include <string.h>
+#ifdef G_OS_WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 
 struct BtApp {
   AdwApplication *adw_app;
@@ -925,6 +929,623 @@ static void on_graph_open_note(const gchar *relpath, gboolean is_ghost, gpointer
   }
 }
 
+/* --------------------------------- note file management & context menus -- */
+
+static gchar *normalize_note_relpath(const gchar *input, const gchar *default_dir)
+{
+  if (input == NULL)
+    return NULL;
+  gchar *clean = g_strdup(input);
+  g_strstrip(clean);
+  if (clean[0] == '\0') {
+    g_free(clean);
+    return NULL;
+  }
+  for (gchar *c = clean; *c != '\0'; c++) {
+    if (*c == '\\')
+      *c = '/';
+  }
+  const gchar *p = clean;
+  while (*p == '/')
+    p++;
+  if (p[0] == '\0') {
+    g_free(clean);
+    return NULL;
+  }
+
+  gchar *joined = NULL;
+  if (strchr(p, '/') == NULL && default_dir != NULL && default_dir[0] != '\0' &&
+      strcmp(default_dir, ".") != 0) {
+    joined = g_strdup_printf("%s/%s", default_dir, p);
+  } else {
+    joined = g_strdup(p);
+  }
+  g_free(clean);
+
+  gsize jlen = strlen(joined);
+  if (jlen < 3 || g_ascii_strcasecmp(joined + jlen - 3, ".md") != 0) {
+    gchar *with_ext = g_strconcat(joined, ".md", NULL);
+    g_free(joined);
+    joined = with_ext;
+  }
+
+  const gchar *slash = strrchr(joined, '/');
+  const gchar *base = slash ? (slash + 1) : joined;
+  if (strlen(base) <= 3 || base[0] == '.') {
+    g_free(joined);
+    return NULL;
+  }
+  return joined;
+}
+
+static gchar *yaml_quote_title(const gchar *raw)
+{
+  GString *out = g_string_new("\"");
+  for (const gchar *p = raw ? raw : ""; *p != '\0'; p++) {
+    if (*p == '"' || *p == '\\')
+      g_string_append_c(out, '\\');
+    g_string_append_c(out, *p);
+  }
+  g_string_append_c(out, '"');
+  return g_string_free(out, FALSE);
+}
+
+static gboolean rename_note_in_app(BtApp *app, const gchar *old_relpath,
+                                   const gchar *raw_new_name, GError **error)
+{
+  if (app == NULL || app->vault == NULL || old_relpath == NULL) {
+    g_set_error(error, BT_ERROR, BT_ERROR_INVALID, "No vault is currently open");
+    return FALSE;
+  }
+
+  gchar *old_dir = strchr(old_relpath, '/') ? g_path_get_dirname(old_relpath) : NULL;
+  gchar *new_rel = normalize_note_relpath(raw_new_name, old_dir);
+  g_free(old_dir);
+  if (new_rel == NULL) {
+    g_set_error(error, BT_ERROR, BT_ERROR_INVALID,
+                "Enter a valid note name (for example: my-note.md)");
+    return FALSE;
+  }
+
+  if (strcmp(old_relpath, new_rel) == 0) {
+    g_free(new_rel);
+    return TRUE;
+  }
+
+  gboolean was_open =
+      (app->editor != NULL && g_strcmp0(bt_editorpane_relpath(app->editor), old_relpath) == 0);
+  if (was_open && bt_editorpane_is_dirty(app->editor))
+    bt_editorpane_flush_save(app->editor);
+
+  if (!vault_rename_note(app->vault, old_relpath, new_rel, error)) {
+    g_free(new_rel);
+    return FALSE;
+  }
+
+  if (app->index != NULL) {
+    bt_index_delete_path(app->index, old_relpath, NULL);
+    bt_index_upsert_note(app->index, app->vault, new_rel, NULL, NULL);
+  }
+  vault_rescan(app->vault, NULL, NULL);
+  if (app->tree != NULL)
+    bt_filetree_populate(app->tree, app->vault);
+
+  if (was_open) {
+    gchar *text = NULL;
+    gsize len = 0;
+    if (vault_read(app->vault, new_rel, &text, &len, NULL)) {
+      bt_editorpane_load(app->editor, new_rel, text, len);
+      bt_editorpane_hide_conflict(app->editor);
+      g_free(text);
+    }
+  }
+  if (app->tree != NULL)
+    bt_filetree_select_path(app->tree, new_rel);
+
+  refresh_graph(app, FALSE);
+  update_header(app);
+
+  gchar *msg = g_strdup_printf("Renamed to %s", new_rel);
+  show_toast(app, msg, 2);
+  g_free(msg);
+  g_free(new_rel);
+  return TRUE;
+}
+
+static gboolean create_named_note_in_app(BtApp *app, const gchar *parent_dir,
+                                         const gchar *raw_name, GError **error)
+{
+  if (app == NULL || app->vault == NULL) {
+    g_set_error(error, BT_ERROR, BT_ERROR_INVALID, "No vault is currently open");
+    return FALSE;
+  }
+
+  gchar *new_rel = normalize_note_relpath(raw_name, parent_dir);
+  if (new_rel == NULL) {
+    g_set_error(error, BT_ERROR, BT_ERROR_INVALID,
+                "Enter a valid note name (for example: my-note.md)");
+    return FALSE;
+  }
+
+  gchar *abs = vault_resolve(app->vault, new_rel, error);
+  if (abs == NULL) {
+    g_free(new_rel);
+    return FALSE;
+  }
+  gboolean exists = g_file_test(abs, G_FILE_TEST_EXISTS);
+  g_free(abs);
+  if (exists) {
+    g_set_error(error, BT_ERROR, BT_ERROR_IO, "A note named '%s' already exists", new_rel);
+    g_free(new_rel);
+    return FALSE;
+  }
+
+  gchar *base = g_path_get_basename(new_rel);
+  gsize blen = strlen(base);
+  gchar *stem = (blen > 3) ? g_strndup(base, blen - 3) : g_strdup(base);
+  g_free(base);
+
+  GDateTime *now = g_date_time_new_now_local();
+  gchar *id_ts = g_date_time_format(now, "%Y%m%d-%H%M%S");
+  gchar *iso = g_date_time_format_iso8601(now);
+  g_date_time_unref(now);
+
+  gchar *qtitle = yaml_quote_title(stem);
+  gchar *content = g_strdup_printf(
+      "---\n"
+      "id: bt-%s\n"
+      "title: %s\n"
+      "created: %s\n"
+      "updated: %s\n"
+      "source: human\n"
+      "tags: []\n"
+      "---\n\n"
+      "# %s\n\n",
+      id_ts ? id_ts : "note", qtitle, iso ? iso : "", iso ? iso : "", stem);
+  g_free(id_ts);
+  g_free(iso);
+  g_free(qtitle);
+  g_free(stem);
+
+  gboolean ok = vault_atomic_write(app->vault, new_rel, content, strlen(content), NULL, error);
+  g_free(content);
+  if (!ok) {
+    g_free(new_rel);
+    return FALSE;
+  }
+
+  if (app->index != NULL)
+    bt_index_upsert_note(app->index, app->vault, new_rel, NULL, NULL);
+  vault_rescan(app->vault, NULL, NULL);
+  if (app->tree != NULL)
+    bt_filetree_populate(app->tree, app->vault);
+  refresh_graph(app, TRUE);
+  bt_app_open_note(app, new_rel, NULL);
+
+  gchar *msg = g_strdup_printf("Created %s", new_rel);
+  show_toast(app, msg, 2);
+  g_free(msg);
+  g_free(new_rel);
+  return TRUE;
+}
+
+static void duplicate_note_in_app(BtApp *app, const gchar *relpath)
+{
+  if (app == NULL || app->vault == NULL || relpath == NULL)
+    return;
+  if (app->editor != NULL && g_strcmp0(bt_editorpane_relpath(app->editor), relpath) == 0 &&
+      bt_editorpane_is_dirty(app->editor)) {
+    bt_editorpane_flush_save(app->editor);
+  }
+
+  gchar *text = NULL;
+  gsize len = 0;
+  GError *err = NULL;
+  if (!vault_read(app->vault, relpath, &text, &len, &err)) {
+    bt_app_show_error(app, "Cannot duplicate note", err->message);
+    g_error_free(err);
+    return;
+  }
+
+  gsize rlen = strlen(relpath);
+  gchar *stem = (rlen > 3 && g_ascii_strcasecmp(relpath + rlen - 3, ".md") == 0)
+                    ? g_strndup(relpath, rlen - 3)
+                    : g_strdup(relpath);
+
+  gchar *dest = NULL;
+  for (guint n = 1; n <= 99; n++) {
+    gchar *cand = (n == 1) ? g_strdup_printf("%s-copy.md", stem)
+                           : g_strdup_printf("%s-copy-%u.md", stem, n);
+    gchar *abs = vault_resolve(app->vault, cand, NULL);
+    gboolean taken = (abs == NULL || g_file_test(abs, G_FILE_TEST_EXISTS));
+    g_free(abs);
+    if (!taken) {
+      dest = cand;
+      break;
+    }
+    g_free(cand);
+  }
+  g_free(stem);
+
+  if (dest == NULL) {
+    g_free(text);
+    bt_app_show_error(app, "Cannot duplicate note", "Too many copies already exist.");
+    return;
+  }
+
+  if (!vault_atomic_write(app->vault, dest, text, len, NULL, &err)) {
+    bt_app_show_error(app, "Cannot duplicate note", err->message);
+    g_error_free(err);
+    g_free(text);
+    g_free(dest);
+    return;
+  }
+  g_free(text);
+
+  if (app->index != NULL)
+    bt_index_upsert_note(app->index, app->vault, dest, NULL, NULL);
+  vault_rescan(app->vault, NULL, NULL);
+  if (app->tree != NULL)
+    bt_filetree_populate(app->tree, app->vault);
+  refresh_graph(app, TRUE);
+  bt_app_open_note(app, dest, NULL);
+
+  gchar *msg = g_strdup_printf("Duplicated to %s", dest);
+  show_toast(app, msg, 2);
+  g_free(msg);
+  g_free(dest);
+}
+
+static void copy_path_to_clipboard(BtApp *app, const gchar *relpath)
+{
+  if (app == NULL || app->window == NULL || relpath == NULL)
+    return;
+  GdkClipboard *cb = gtk_widget_get_clipboard(GTK_WIDGET(app->window));
+  gdk_clipboard_set_text(cb, relpath);
+  gchar *msg = g_strdup_printf("Copied: %s", relpath);
+  show_toast(app, msg, 2);
+  g_free(msg);
+}
+
+static void reveal_in_file_manager(BtApp *app, const gchar *relpath, gboolean is_dir)
+{
+  if (app == NULL || app->vault == NULL)
+    return;
+  gchar *abs = (relpath != NULL && relpath[0] != '\0')
+                   ? vault_resolve(app->vault, relpath, NULL)
+                   : g_strdup(vault_root(app->vault));
+  if (abs == NULL)
+    return;
+
+#ifdef G_OS_WIN32
+  gchar *cmd = (is_dir || relpath == NULL || relpath[0] == '\0')
+                   ? g_strdup_printf("explorer.exe \"%s\"", abs)
+                   : g_strdup_printf("explorer.exe /select,\"%s\"", abs);
+  gunichar2 *wcmd = g_utf8_to_utf16(cmd, -1, NULL, NULL, NULL);
+  if (wcmd != NULL) {
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    memset(&si, 0, sizeof(si));
+    memset(&pi, 0, sizeof(pi));
+    si.cb = sizeof(si);
+    if (CreateProcessW(NULL, (LPWSTR)wcmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+      CloseHandle(pi.hProcess);
+      CloseHandle(pi.hThread);
+    }
+    g_free(wcmd);
+  }
+  g_free(cmd);
+#else
+  gchar *target = (is_dir || relpath == NULL || relpath[0] == '\0') ? g_strdup(abs)
+                                                                    : g_path_get_dirname(abs);
+  const gchar *argv[] = {"xdg-open", target, NULL};
+  g_spawn_async(NULL, (gchar **)argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, NULL);
+  g_free(target);
+#endif
+  g_free(abs);
+}
+
+/* Modal prompt for Rename Note & New Note. */
+
+typedef struct {
+  BtApp *app;
+  GtkWindow *win;
+  GtkWidget *entry;
+  GtkWidget *err_lbl;
+  gchar *target_rel; /* old_relpath for rename, parent_dir for new note */
+  gboolean is_rename;
+  gint select_end_chars;
+} BtNameModal;
+
+static void bt_name_modal_free(gpointer ud)
+{
+  BtNameModal *m = ud;
+  if (m == NULL)
+    return;
+  g_free(m->target_rel);
+  g_free(m);
+}
+
+static gboolean on_name_modal_key(GtkEventControllerKey *c, guint keyval, guint keycode,
+                                  GdkModifierType state, gpointer ud)
+{
+  (void)c; (void)keycode; (void)state;
+  BtNameModal *m = ud;
+  if (keyval == GDK_KEY_Escape) {
+    gtk_window_close(m->win);
+    return TRUE;
+  }
+  return FALSE;
+}
+
+static void on_name_modal_entry_map(GtkWidget *entry, gpointer ud)
+{
+  BtNameModal *m = ud;
+  gtk_widget_grab_focus(entry);
+  if (m->is_rename && m->select_end_chars > 0)
+    gtk_editable_select_region(GTK_EDITABLE(entry), 0, m->select_end_chars);
+}
+
+static void on_name_modal_submit(GtkWidget *w, gpointer ud)
+{
+  (void)w;
+  BtNameModal *m = ud;
+  const gchar *txt = gtk_editable_get_text(GTK_EDITABLE(m->entry));
+  GError *err = NULL;
+  gboolean ok = m->is_rename
+                    ? rename_note_in_app(m->app, m->target_rel, txt, &err)
+                    : create_named_note_in_app(m->app, m->target_rel, txt, &err);
+  if (ok) {
+    gtk_window_close(m->win);
+  } else {
+    gtk_label_set_text(GTK_LABEL(m->err_lbl), err ? err->message : "Invalid file name");
+    gtk_widget_set_visible(m->err_lbl, TRUE);
+    g_clear_error(&err);
+    gtk_widget_grab_focus(m->entry);
+  }
+}
+
+static void on_name_modal_cancel(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  BtNameModal *m = ud;
+  gtk_window_close(m->win);
+}
+
+static void show_name_modal(BtApp *app, gboolean is_rename, const gchar *target_rel)
+{
+  if (app == NULL || app->window == NULL || app->vault == NULL || app->smoke_test)
+    return;
+
+  GtkWidget *win = adw_window_new();
+  gtk_widget_add_css_class(win, "bt-dialog");
+  gtk_window_set_title(GTK_WINDOW(win), is_rename ? "Rename Note" : "New Note");
+  gtk_window_set_transient_for(GTK_WINDOW(win), app->window);
+  gtk_window_set_modal(GTK_WINDOW(win), TRUE);
+  gtk_window_set_resizable(GTK_WINDOW(win), FALSE);
+  gtk_window_set_default_size(GTK_WINDOW(win), 420, -1);
+
+  BtNameModal *m = g_new0(BtNameModal, 1);
+  m->app = app;
+  m->win = GTK_WINDOW(win);
+  m->target_rel = g_strdup(target_rel);
+  m->is_rename = is_rename;
+  g_object_set_data_full(G_OBJECT(win), "bt-name-modal", m, bt_name_modal_free);
+
+  GtkWidget *tv = adw_toolbar_view_new();
+  GtkWidget *hb = adw_header_bar_new();
+  adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(tv), hb);
+
+  GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
+  gtk_widget_set_margin_top(box, 14);
+  gtk_widget_set_margin_bottom(box, 16);
+  gtk_widget_set_margin_start(box, 16);
+  gtk_widget_set_margin_end(box, 16);
+
+  gchar *hint_txt = NULL;
+  if (is_rename) {
+    gchar *dir = (target_rel && strchr(target_rel, '/')) ? g_path_get_dirname(target_rel) : NULL;
+    if (dir != NULL)
+      hint_txt = g_strdup_printf("Rename in %s/ (or enter folder/name.md to move)", dir);
+    else
+      hint_txt = g_strdup("Rename note (enter folder/name.md to move into a folder)");
+    g_free(dir);
+  } else {
+    if (target_rel != NULL && target_rel[0] != '\0')
+      hint_txt = g_strdup_printf("Create in %s/ (.md added automatically)", target_rel);
+    else
+      hint_txt = g_strdup("Create in vault root (.md added automatically, or folder/name)");
+  }
+
+  GtkWidget *hint = gtk_label_new(hint_txt);
+  g_free(hint_txt);
+  gtk_label_set_xalign(GTK_LABEL(hint), 0.0f);
+  gtk_label_set_wrap(GTK_LABEL(hint), TRUE);
+  gtk_widget_add_css_class(hint, "bt-dialog-hint");
+  gtk_box_append(GTK_BOX(box), hint);
+
+  m->entry = gtk_entry_new();
+  if (is_rename && target_rel != NULL) {
+    gchar *base = g_path_get_basename(target_rel);
+    gtk_editable_set_text(GTK_EDITABLE(m->entry), base);
+    gsize blen = strlen(base);
+    if (blen > 3 && g_ascii_strcasecmp(base + blen - 3, ".md") == 0)
+      m->select_end_chars = (gint)g_utf8_strlen(base, (gssize)(blen - 3));
+    else
+      m->select_end_chars = (gint)g_utf8_strlen(base, -1);
+    g_free(base);
+  } else {
+    gtk_entry_set_placeholder_text(GTK_ENTRY(m->entry), "my-note.md");
+  }
+  g_signal_connect(m->entry, "activate", G_CALLBACK(on_name_modal_submit), m);
+  g_signal_connect(m->entry, "map", G_CALLBACK(on_name_modal_entry_map), m);
+  gtk_box_append(GTK_BOX(box), m->entry);
+
+  m->err_lbl = gtk_label_new("");
+  gtk_label_set_xalign(GTK_LABEL(m->err_lbl), 0.0f);
+  gtk_label_set_wrap(GTK_LABEL(m->err_lbl), TRUE);
+  gtk_widget_add_css_class(m->err_lbl, "bt-dialog-error");
+  gtk_widget_set_visible(m->err_lbl, FALSE);
+  gtk_box_append(GTK_BOX(box), m->err_lbl);
+
+  GtkWidget *btns = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+  gtk_widget_set_halign(btns, GTK_ALIGN_END);
+  gtk_widget_set_margin_top(btns, 4);
+
+  GtkWidget *cancel = gtk_button_new_with_label("Cancel");
+  g_signal_connect(cancel, "clicked", G_CALLBACK(on_name_modal_cancel), m);
+
+  GtkWidget *ok_btn = gtk_button_new_with_label(is_rename ? "Rename" : "Create");
+  gtk_widget_add_css_class(ok_btn, "suggested-action");
+  g_signal_connect(ok_btn, "clicked", G_CALLBACK(on_name_modal_submit), m);
+
+  gtk_box_append(GTK_BOX(btns), cancel);
+  gtk_box_append(GTK_BOX(btns), ok_btn);
+  gtk_box_append(GTK_BOX(box), btns);
+
+  GtkEventController *key = gtk_event_controller_key_new();
+  g_signal_connect(key, "key-pressed", G_CALLBACK(on_name_modal_key), m);
+  gtk_widget_add_controller(win, key);
+
+  adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(tv), box);
+  adw_window_set_content(ADW_WINDOW(win), tv);
+  gtk_window_present(GTK_WINDOW(win));
+}
+
+static void show_rename_dialog(BtApp *app, const gchar *old_relpath)
+{
+  if (old_relpath != NULL && old_relpath[0] != '\0')
+    show_name_modal(app, TRUE, old_relpath);
+}
+
+static void show_new_note_dialog(BtApp *app, const gchar *parent_dir)
+{
+  show_name_modal(app, FALSE, parent_dir);
+}
+
+typedef struct {
+  BtApp *app;
+  gchar *relpath;
+} BtDeleteCtx;
+
+static void on_delete_confirm_response(GObject *src, GAsyncResult *res, gpointer ud)
+{
+  BtDeleteCtx *ctx = ud;
+  int choice = gtk_alert_dialog_choose_finish(GTK_ALERT_DIALOG(src), res, NULL);
+  if (choice == 1 && ctx->app->vault != NULL) {
+    GError *err = NULL;
+    if (!vault_delete_note(ctx->app->vault, ctx->relpath, &err)) {
+      bt_app_show_error(ctx->app, "Cannot delete note", err ? err->message : "");
+      g_clear_error(&err);
+    } else {
+      if (ctx->app->index != NULL)
+        bt_index_delete_path(ctx->app->index, ctx->relpath, NULL);
+      if (ctx->app->editor != NULL &&
+          g_strcmp0(bt_editorpane_relpath(ctx->app->editor), ctx->relpath) == 0) {
+        bt_editorpane_clear(ctx->app->editor);
+      }
+      vault_rescan(ctx->app->vault, NULL, NULL);
+      if (ctx->app->tree != NULL)
+        bt_filetree_populate(ctx->app->tree, ctx->app->vault);
+      refresh_graph(ctx->app, FALSE);
+      update_header(ctx->app);
+      gchar *msg = g_strdup_printf("Deleted %s", ctx->relpath);
+      show_toast(ctx->app, msg, 2);
+      g_free(msg);
+    }
+  }
+  g_free(ctx->relpath);
+  g_free(ctx);
+}
+
+static void show_delete_confirm_dialog(BtApp *app, const gchar *relpath)
+{
+  if (app == NULL || app->window == NULL || app->vault == NULL || relpath == NULL ||
+      app->smoke_test) {
+    return;
+  }
+  BtDeleteCtx *ctx = g_new0(BtDeleteCtx, 1);
+  ctx->app = app;
+  ctx->relpath = g_strdup(relpath);
+
+  GtkAlertDialog *dlg = gtk_alert_dialog_new("Delete note?");
+  gchar *detail = g_strdup_printf(
+      "Permanently delete '%s' from disk? You can restore it only if a git checkpoint exists.",
+      relpath);
+  gtk_alert_dialog_set_detail(dlg, detail);
+  const gchar *const buttons[] = {"Cancel", "Delete", NULL};
+  gtk_alert_dialog_set_buttons(dlg, buttons);
+  gtk_alert_dialog_set_cancel_button(dlg, 0);
+  gtk_alert_dialog_set_default_button(dlg, 0);
+  gtk_alert_dialog_choose(dlg, app->window, NULL, on_delete_confirm_response, ctx);
+  g_free(detail);
+  g_object_unref(dlg);
+}
+
+static void on_graph_rename_note(const gchar *relpath, gpointer ud)
+{
+  show_rename_dialog(ud, relpath);
+}
+
+static void on_tree_action(BtFileTreeAction action, const gchar *relpath, gboolean is_dir,
+                           gpointer ud)
+{
+  BtApp *app = ud;
+  if (app == NULL || app->vault == NULL)
+    return;
+
+  switch (action) {
+  case BT_TREE_ACT_OPEN:
+    if (!is_dir && relpath != NULL)
+      on_tree_select(relpath, app);
+    break;
+  case BT_TREE_ACT_RENAME:
+    if (!is_dir && relpath != NULL)
+      show_rename_dialog(app, relpath);
+    break;
+  case BT_TREE_ACT_DUPLICATE:
+    if (!is_dir && relpath != NULL)
+      duplicate_note_in_app(app, relpath);
+    break;
+  case BT_TREE_ACT_DELETE:
+    if (!is_dir && relpath != NULL)
+      show_delete_confirm_dialog(app, relpath);
+    break;
+  case BT_TREE_ACT_NEW_NOTE:
+    if (relpath == NULL || relpath[0] == '\0') {
+      show_new_note_dialog(app, NULL);
+    } else if (is_dir) {
+      show_new_note_dialog(app, relpath);
+    } else {
+      gchar *dir = g_path_get_dirname(relpath);
+      show_new_note_dialog(app, (dir && strcmp(dir, ".") != 0) ? dir : NULL);
+      g_free(dir);
+    }
+    break;
+  case BT_TREE_ACT_OPEN_TERM:
+    if (relpath == NULL || relpath[0] == '\0') {
+      on_tree_open_term(NULL, app);
+    } else if (is_dir) {
+      on_tree_open_term(relpath, app);
+    } else {
+      gchar *dir = g_path_get_dirname(relpath);
+      on_tree_open_term((dir && strcmp(dir, ".") != 0) ? dir : NULL, app);
+      g_free(dir);
+    }
+    break;
+  case BT_TREE_ACT_COPY_PATH:
+    if (relpath != NULL)
+      copy_path_to_clipboard(app, relpath);
+    break;
+  case BT_TREE_ACT_REVEAL:
+    reveal_in_file_manager(app, relpath, is_dir);
+    break;
+  case BT_TREE_ACT_RESCAN:
+    g_action_group_activate_action(G_ACTION_GROUP(app->adw_app), "rescan-vault", NULL);
+    break;
+  }
+}
+
 static void on_term_fullscreen(gpointer ud)
 {
   BtApp *app = ud;
@@ -1021,9 +1642,20 @@ static void act_new_note(GSimpleAction *a, GVariant *p, gpointer ud)
   (void)a; (void)p;
   BtApp *app = ud;
   if (app->vault == NULL) return;
-  gchar *name = g_strdup_printf("note-%" G_GINT64_FORMAT, g_get_real_time() / 1000000);
-  bt_app_open_or_create_wikilink(app, name, NULL);
-  g_free(name);
+  show_new_note_dialog(app, NULL);
+}
+
+static void act_rename_active(GSimpleAction *a, GVariant *p, gpointer ud)
+{
+  (void)a; (void)p;
+  BtApp *app = ud;
+  if (app->vault == NULL) return;
+  const gchar *rel = app->editor ? bt_editorpane_relpath(app->editor) : NULL;
+  gchar *tree_sel = (rel == NULL && app->tree != NULL) ? bt_filetree_selected_path(app->tree) : NULL;
+  const gchar *target = rel ? rel : tree_sel;
+  if (target != NULL)
+    show_rename_dialog(app, target);
+  g_free(tree_sel);
 }
 
 static void act_quick_open(GSimpleAction *a, GVariant *p, gpointer ud)
@@ -1199,6 +1831,7 @@ static void act_quit(GSimpleAction *a, GVariant *p, gpointer ud)
 static const GActionEntry app_actions[] = {
   {"open-vault", act_open_vault, NULL, NULL, NULL, {0}},
   {"new-note", act_new_note, NULL, NULL, NULL, {0}},
+  {"rename-active", act_rename_active, NULL, NULL, NULL, {0}},
   {"open-note", act_open_note, "s", NULL, NULL, {0}},
   {"save-active", act_save_active, NULL, NULL, NULL, {0}},
   {"quick-open", act_quick_open, NULL, NULL, NULL, {0}},
@@ -1422,9 +2055,11 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
 
   /* Content views */
   app->tree = bt_filetree_new(on_tree_select, on_tree_open_term, app);
+  bt_filetree_set_action_cb(app->tree, on_tree_action, app);
   app->editor = bt_editorpane_new(on_editor_save, on_editor_link, on_editor_dirty, app);
   bt_editorpane_set_conflict_cbs(app->editor, on_editor_conflict_diff, on_editor_conflict_reload);
   app->graphview = bt_graphview_new(on_graph_open_note, on_tree_open_term, app);
+  bt_graphview_set_rename_cb(app->graphview, on_graph_rename_note, app);
   app->tabs = bt_termtabs_new(BT_TERMTABS_MAX_DEFAULT, on_term_fullscreen, on_term_status,
                               on_session_ended, app);
   app->sessions_panel = bt_sessionspanel_new(on_session_resume, on_session_rollback, app);
@@ -1641,6 +2276,8 @@ static void on_startup(GApplication *gapp, gpointer ud)
   g_action_map_add_action_entries(G_ACTION_MAP(gapp), app_actions, G_N_ELEMENTS(app_actions), app);
 
   static const gchar *const save_accels[] = {"<Primary>s", NULL};
+  static const gchar *const new_accels[] = {"<Primary>n", NULL};
+  static const gchar *const rename_accels[] = {"F2", NULL};
   static const gchar *const quick_accels[] = {"<Primary>p", NULL};
   static const gchar *const ask_accels[] = {"<Primary>e", NULL};
   static const gchar *const open_accels[] = {"<Primary>o", NULL};
@@ -1650,6 +2287,8 @@ static void on_startup(GApplication *gapp, gpointer ud)
   static const gchar *const term_accels[] = {"<Primary>grave", NULL};
   static const gchar *const quit_accels[] = {"<Primary>q", NULL};
   gtk_application_set_accels_for_action(GTK_APPLICATION(app->adw_app), "app.save-active", save_accels);
+  gtk_application_set_accels_for_action(GTK_APPLICATION(app->adw_app), "app.new-note", new_accels);
+  gtk_application_set_accels_for_action(GTK_APPLICATION(app->adw_app), "app.rename-active", rename_accels);
   gtk_application_set_accels_for_action(GTK_APPLICATION(app->adw_app), "app.quick-open", quick_accels);
   gtk_application_set_accels_for_action(GTK_APPLICATION(app->adw_app), "app.ask", ask_accels);
   gtk_application_set_accels_for_action(GTK_APPLICATION(app->adw_app), "app.open-vault", open_accels);

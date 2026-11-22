@@ -20,6 +20,7 @@ struct BtTerminal {
   GtkWidget *info_bar;
   GtkWidget *info_label;
   GtkWidget *drawing_area;
+  GtkWidget *ctx_popover;
   GtkWidget *scrollbar;
   GtkAdjustment *vadj;
 
@@ -731,6 +732,108 @@ static void on_area_unrealize(GtkWidget *w, gpointer ud)
   gtk_im_context_set_client_widget(t->im_ctx, NULL);
 }
 
+static void on_term_ctx_copy(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  BtTerminal *t = ud;
+  if (t->ctx_popover != NULL)
+    gtk_popover_popdown(GTK_POPOVER(t->ctx_popover));
+  copy_selection(t);
+}
+
+static void on_term_ctx_paste(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  BtTerminal *t = ud;
+  if (t->ctx_popover != NULL)
+    gtk_popover_popdown(GTK_POPOVER(t->ctx_popover));
+  paste_clipboard(t);
+  gtk_widget_grab_focus(t->drawing_area);
+}
+
+static void on_term_ctx_find(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  BtTerminal *t = ud;
+  if (t->ctx_popover != NULL)
+    gtk_popover_popdown(GTK_POPOVER(t->ctx_popover));
+  gtk_widget_set_visible(t->search_bar, TRUE);
+  gtk_widget_grab_focus(t->search_entry);
+}
+
+static void on_term_ctx_clear(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  BtTerminal *t = ud;
+  if (t->ctx_popover != NULL)
+    gtk_popover_popdown(GTK_POPOVER(t->ctx_popover));
+  if (t->pty != NULL)
+    bt_pty_write(t->pty, (const guint8 *)"\x0c", 1);
+  gtk_widget_grab_focus(t->drawing_area);
+}
+
+static void on_term_ctx_closed(GtkPopover *pop, gpointer ud)
+{
+  BtTerminal *t = ud;
+  if (t->ctx_popover == GTK_WIDGET(pop)) {
+    t->ctx_popover = NULL;
+    gtk_widget_unparent(GTK_WIDGET(pop));
+  }
+}
+
+static GtkWidget *make_term_ctx_btn(const gchar *label, GCallback cb, gpointer ud, gboolean sens)
+{
+  GtkWidget *b = gtk_button_new_with_label(label);
+  gtk_widget_add_css_class(b, "bt-ctx-item");
+  GtkWidget *ch = gtk_button_get_child(GTK_BUTTON(b));
+  if (GTK_IS_LABEL(ch))
+    gtk_label_set_xalign(GTK_LABEL(ch), 0.0f);
+  gtk_widget_set_sensitive(b, sens);
+  g_signal_connect(b, "clicked", cb, ud);
+  return b;
+}
+
+static void on_term_right_click(GtkGestureClick *g, gint n_press, gdouble x, gdouble y, gpointer ud)
+{
+  if (n_press != 1)
+    return;
+  BtTerminal *t = ud;
+  gtk_gesture_set_state(GTK_GESTURE(g), GTK_EVENT_SEQUENCE_CLAIMED);
+  if (t->ctx_popover != NULL) {
+    GtkWidget *old = t->ctx_popover;
+    t->ctx_popover = NULL;
+    gtk_popover_popdown(GTK_POPOVER(old));
+    gtk_widget_unparent(old);
+  }
+  GtkWidget *pop = gtk_popover_new();
+  gtk_widget_add_css_class(pop, "bt-ctx-popover");
+  gtk_popover_set_has_arrow(GTK_POPOVER(pop), FALSE);
+  gtk_popover_set_autohide(GTK_POPOVER(pop), TRUE);
+  gtk_widget_set_halign(pop, GTK_ALIGN_START);
+
+  GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+  gtk_widget_add_css_class(box, "bt-ctx-menu");
+  gtk_box_append(GTK_BOX(box), make_term_ctx_btn("Copy   Ctrl+Shift+C",
+                                                 G_CALLBACK(on_term_ctx_copy), t, t->has_selection));
+  gtk_box_append(GTK_BOX(box), make_term_ctx_btn("Paste   Ctrl+Shift+V",
+                                                 G_CALLBACK(on_term_ctx_paste), t, t->pty != NULL));
+  gtk_box_append(GTK_BOX(box), make_term_ctx_btn("Find…   Ctrl+Shift+F",
+                                                 G_CALLBACK(on_term_ctx_find), t, TRUE));
+  GtkWidget *sep = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
+  gtk_widget_add_css_class(sep, "bt-ctx-sep");
+  gtk_box_append(GTK_BOX(box), sep);
+  gtk_box_append(GTK_BOX(box), make_term_ctx_btn("Clear   Ctrl+L",
+                                                 G_CALLBACK(on_term_ctx_clear), t, t->pty != NULL));
+
+  gtk_popover_set_child(GTK_POPOVER(pop), box);
+  gtk_widget_set_parent(pop, t->drawing_area);
+  GdkRectangle rect = {(int)x, (int)y, 1, 1};
+  gtk_popover_set_pointing_to(GTK_POPOVER(pop), &rect);
+  g_signal_connect(pop, "closed", G_CALLBACK(on_term_ctx_closed), t);
+  t->ctx_popover = pop;
+  gtk_popover_popup(GTK_POPOVER(pop));
+}
+
 /* ---------------------------------------------------------- public API -- */
 
 BtTerminal *bt_terminal_new(BtTerminalFullscreenFn on_fullscreen, BtTerminalStatusFn on_status,
@@ -824,6 +927,11 @@ BtTerminal *bt_terminal_new(BtTerminalFullscreenFn on_fullscreen, BtTerminalStat
   g_signal_connect(click, "released", G_CALLBACK(on_mouse_released), t);
   gtk_widget_add_controller(t->drawing_area, GTK_EVENT_CONTROLLER(click));
 
+  GtkGesture *rclick = gtk_gesture_click_new();
+  gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(rclick), GDK_BUTTON_SECONDARY);
+  g_signal_connect(rclick, "pressed", G_CALLBACK(on_term_right_click), t);
+  gtk_widget_add_controller(t->drawing_area, GTK_EVENT_CONTROLLER(rclick));
+
   GtkEventController *motion = gtk_event_controller_motion_new();
   g_signal_connect(motion, "motion", G_CALLBACK(on_mouse_motion), t);
   gtk_widget_add_controller(t->drawing_area, motion);
@@ -861,6 +969,10 @@ void bt_terminal_free(BtTerminal *term)
 {
   if (term == NULL)
     return;
+  if (term->ctx_popover != NULL) {
+    gtk_widget_unparent(term->ctx_popover);
+    term->ctx_popover = NULL;
+  }
   bt_terminal_close(term);
   if (term->search_hits != NULL)
     g_array_unref(term->search_hits);

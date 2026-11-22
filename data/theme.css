@@ -322,6 +322,55 @@ popover separator {
   margin: 4px 0;
 }
 
+.bt-ctx-menu {
+  min-width: 176px;
+  padding: 2px;
+}
+
+button.bt-ctx-item {
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 6px;
+  border: none;
+  background-color: transparent;
+  color: @bt_text_primary;
+  font-size: 12px;
+}
+
+button.bt-ctx-item:hover {
+  background-color: @bt_accent_soft;
+  color: @bt_accent;
+}
+
+button.bt-ctx-item:disabled {
+  color: @bt_text_muted;
+  background-color: transparent;
+}
+
+button.bt-ctx-danger {
+  color: @bt_danger;
+}
+
+button.bt-ctx-danger:hover {
+  background-color: alpha(@bt_danger, 0.14);
+  color: @bt_danger;
+}
+
+.bt-ctx-sep {
+  background-color: @bt_border;
+  margin: 3px 6px;
+}
+
+.bt-dialog-hint {
+  font-size: 12px;
+  color: @bt_text_secondary;
+}
+
+.bt-dialog-error {
+  font-size: 12px;
+  color: @bt_danger;
+}
+
 /* ---- Cards & layout ------------------------------------------------------ */
 .bt-card {
   background-color: @bt_surface_1;
