@@ -723,6 +723,7 @@ struct BtGraphView {
   GtkWidget *btn_tags;
   GtkWidget *btn_ghosts;
   GtkWidget *legend_lbl;
+  GtkWidget *hover_lbl;
   GtkWindow *toplevel;
   gulong toplevel_active_sig;
 
@@ -1354,6 +1355,8 @@ static void on_right_click(GtkGestureClick *g, gint n_press, gdouble x, gdouble 
   show_graph_context_menu(gv, x, y);
 }
 
+static void update_hover_readout(BtGraphView *gv);
+
 static void on_motion(GtkEventControllerMotion *c, gdouble x, gdouble y, gpointer ud)
 {
   (void)c;
@@ -1380,6 +1383,7 @@ static void on_motion(GtkEventControllerMotion *c, gdouble x, gdouble y, gpointe
     if (hit != gv->hover_idx) {
       gv->hover_idx = hit;
       refresh_neighbor_mask(gv);
+      update_hover_readout(gv);
       if (gv->reduce_motion) {
         gv->hover_fade = (hit >= 0 || gv->selected_idx >= 0 || gv->focus_idx >= 0) ? 1.0 : 0.0;
         queue_canvas_draw(gv);
@@ -1398,6 +1402,7 @@ static void on_motion_leave(GtkEventControllerMotion *c, gpointer ud)
   if (gv->hover_idx != -1) {
     gv->hover_idx = -1;
     refresh_neighbor_mask(gv);
+    update_hover_readout(gv);
     if (gv->reduce_motion) {
       gv->hover_fade = (gv->selected_idx >= 0 || gv->focus_idx >= 0) ? 1.0 : 0.0;
       queue_canvas_draw(gv);
@@ -1544,6 +1549,43 @@ static void sync_toolbar_buttons(BtGraphView *gv)
   }
 }
 
+static const gchar *node_kind_label(BtNodeKind k)
+{
+  switch (k) {
+  case BT_NODE_HUMAN_NOTE:  return "Note";
+  case BT_NODE_AI_NOTE:     return "AI note";
+  case BT_NODE_TAG:         return "Tag";
+  case BT_NODE_SESSION:     return "Session";
+  case BT_NODE_IMPORT_ROOT: return "Import root";
+  case BT_NODE_GHOST:       return "Ghost";
+  default:                  return "Node";
+  }
+}
+
+static void update_hover_readout(BtGraphView *gv)
+{
+  if (gv == NULL || gv->hover_lbl == NULL)
+    return;
+  if (gv->graph == NULL || gv->hover_idx < 0 || (guint)gv->hover_idx >= gv->graph->nodes->len) {
+    gtk_widget_set_visible(gv->hover_lbl, FALSE);
+    return;
+  }
+  const BtGraphNode *nd = g_ptr_array_index(gv->graph->nodes, (guint)gv->hover_idx);
+  if (!nd->visible) {
+    gtk_widget_set_visible(gv->hover_lbl, FALSE);
+    return;
+  }
+  const gchar *title = (nd->label != NULL && nd->label[0] != '\0') ? nd->label : nd->id;
+  gchar *txt = g_strdup_printf("%s · %u %s · %s",
+                               title ? title : "Untitled",
+                               nd->degree,
+                               nd->degree == 1u ? "link" : "links",
+                               node_kind_label(nd->kind));
+  gtk_label_set_text(GTK_LABEL(gv->hover_lbl), txt);
+  gtk_widget_set_visible(gv->hover_lbl, TRUE);
+  g_free(txt);
+}
+
 static void update_legend(BtGraphView *gv)
 {
   if (gv == NULL || gv->legend_lbl == NULL)
@@ -1553,7 +1595,8 @@ static void update_legend(BtGraphView *gv)
       "<span foreground='#8B7CF6'>●</span> AI  "
       "<span foreground='%s'>● Tag%s</span>  "
       "<span foreground='%s'>◌ Ghost%s</span>  "
-      "<span foreground='#4ADE80'>●</span> Folder",
+      "<span foreground='#9AA1AD'>■</span> Session  "
+      "<span foreground='#4ADE80'>■</span> Import",
       gv->show_tags ? "#FBBF24" : "#666D79",
       gv->show_tags ? "" : " (off)",
       gv->show_ghosts ? "#9AA1AD" : "#666D79",
@@ -1587,6 +1630,7 @@ static void apply_kind_visibility(BtGraphView *gv, gboolean upload_gl)
   if (upload_gl)
     bt_graph_gl_set_graph(gv->gl, gv->graph);
   refresh_neighbor_mask(gv);
+  update_hover_readout(gv);
 }
 
 static void on_btn_mode_clicked(GtkButton *b, gpointer ud)
@@ -1895,6 +1939,7 @@ static void on_canvas_destroy(GtkWidget *area, gpointer ud)
   gv->btn_tags = NULL;
   gv->btn_ghosts = NULL;
   gv->legend_lbl = NULL;
+  gv->hover_lbl = NULL;
 }
 
 static GtkWidget *make_ctrl_btn(const gchar *icon, const gchar *tip, GCallback cb, gpointer ud)
@@ -2081,6 +2126,19 @@ BtGraphView *bt_graphview_new(BtGraphOpenNoteFn on_open, BtGraphOpenTermFn on_op
   gtk_widget_set_can_target(gv->legend_lbl, FALSE);
   update_legend(gv);
   gtk_overlay_add_overlay(GTK_OVERLAY(gv->overlay), gv->legend_lbl);
+
+  gv->hover_lbl = gtk_label_new("");
+  gtk_widget_set_name(gv->hover_lbl, "bt-graph-hover-readout");
+  gtk_widget_add_css_class(gv->hover_lbl, "bt-graph-legend");
+  gtk_label_set_ellipsize(GTK_LABEL(gv->hover_lbl), PANGO_ELLIPSIZE_END);
+  gtk_label_set_max_width_chars(GTK_LABEL(gv->hover_lbl), 52);
+  gtk_widget_set_halign(gv->hover_lbl, GTK_ALIGN_END);
+  gtk_widget_set_valign(gv->hover_lbl, GTK_ALIGN_END);
+  gtk_widget_set_margin_bottom(gv->hover_lbl, 10);
+  gtk_widget_set_margin_end(gv->hover_lbl, 10);
+  gtk_widget_set_can_target(gv->hover_lbl, FALSE);
+  gtk_widget_set_visible(gv->hover_lbl, FALSE);
+  gtk_overlay_add_overlay(GTK_OVERLAY(gv->overlay), gv->hover_lbl);
 
   /* Calm empty state when graph has 0 nodes. */
   GtkWidget *empty = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
