@@ -22,6 +22,7 @@ void bt_editorpane_set_conflict_cbs(BtEditorPane *pane, BtEditorDiffFn on_diff,
 void bt_editorpane_show_conflict(BtEditorPane *pane, gboolean deleted);
 void bt_editorpane_hide_conflict(BtEditorPane *pane);
 void bt_editorpane_set_dark(BtEditorPane *pane, gboolean dark);
+void bt_editorpane_set_line_numbers(BtEditorPane *pane, gboolean show);
 gchar *bt_editorpane_buffer_hash(const BtEditorPane *pane);
 void bt_editorpane_free(BtEditorPane *pane);
 

@@ -1,62 +1,65 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- bt-ink-dark.xml — BrainTerm Monochrome Ink StyleScheme (Dark, zero hue). -->
-<style-scheme id="bt-ink-dark" _name="BrainTerm Ink Dark" version="1.0">
+<!-- bt-ink-dark.xml — BrainTerm "Dusk" StyleScheme (aligned with data/theme.css). -->
+<style-scheme id="bt-ink-dark" _name="BrainTerm Dusk" version="1.0">
   <author>BrainTerm</author>
-  <_description>Flat monochrome near-black Markdown scheme (R == G == B).</_description>
+  <_description>Calm dark Markdown scheme using BrainTerm Dusk tokens.</_description>
 
-  <color name="surface"  value="#0B0B0B"/>
-  <color name="raised"   value="#101010"/>
-  <color name="curline"  value="#141414"/>
-  <color name="selbg"    value="#262626"/>
-  <color name="hairline" value="#1C1C1C"/>
-  <color name="faint"    value="#6E6E6E"/>
-  <color name="mid"      value="#8B8B8B"/>
-  <color name="ink"      value="#ECECEC"/>
-  <color name="bright"   value="#FAFAFA"/>
+  <color name="surface"   value="#15171C"/>
+  <color name="raised"    value="#1B1E24"/>
+  <color name="curline"   value="#1B1E24"/>
+  <color name="selbg"     value="#343052"/>
+  <color name="hairline"  value="#262A32"/>
+  <color name="muted"     value="#666D79"/>
+  <color name="secondary" value="#9AA1AD"/>
+  <color name="primary"   value="#E6E8EC"/>
+  <color name="accent"    value="#8B7CF6"/>
+  <color name="success"   value="#4ADE80"/>
+  <color name="warning"   value="#FBBF24"/>
+  <color name="danger"    value="#F87171"/>
 
   <!-- Global -->
-  <style name="text"                 foreground="ink" background="surface"/>
-  <style name="selection"            foreground="bright" background="selbg"/>
-  <style name="cursor"               foreground="bright"/>
+  <style name="text"                 foreground="primary" background="surface"/>
+  <style name="selection"            foreground="primary" background="selbg"/>
+  <style name="cursor"               foreground="accent"/>
   <style name="current-line"         background="curline"/>
-  <style name="line-numbers"         foreground="faint" background="surface"/>
-  <style name="current-line-number"  foreground="ink" background="curline" bold="true"/>
-  <style name="bracket-match"        foreground="bright" background="selbg" bold="true"/>
+  <style name="line-numbers"         foreground="muted" background="surface"/>
+  <style name="current-line-number"  foreground="secondary" background="curline"/>
+  <style name="bracket-match"        foreground="accent" background="selbg" bold="true"/>
 
-  <!-- Generic defs (all strictly achromatic) -->
-  <style name="def:comment"          foreground="faint" italic="true"/>
-  <style name="def:constant"         foreground="mid"/>
-  <style name="def:string"           foreground="ink"/>
-  <style name="def:identifier"       foreground="mid"/>
-  <style name="def:statement"        foreground="mid" bold="true"/>
-  <style name="def:keyword"          foreground="mid"/>
-  <style name="def:type"             foreground="mid"/>
-  <style name="def:preprocessor"     foreground="faint"/>
-  <style name="def:special-char"     foreground="faint"/>
-  <style name="def:underlined"       foreground="bright" underline="single"/>
-  <style name="def:heading"          foreground="bright" bold="true"/>
+  <!-- Generic defs -->
+  <style name="def:comment"          foreground="muted" italic="true"/>
+  <style name="def:constant"         foreground="warning"/>
+  <style name="def:string"           foreground="success"/>
+  <style name="def:identifier"       foreground="secondary"/>
+  <style name="def:statement"        foreground="accent" bold="true"/>
+  <style name="def:keyword"          foreground="accent"/>
+  <style name="def:type"             foreground="secondary"/>
+  <style name="def:preprocessor"     foreground="muted"/>
+  <style name="def:special-char"     foreground="muted"/>
+  <style name="def:underlined"       foreground="accent" underline="single"/>
+  <style name="def:heading"          foreground="primary" bold="true"/>
   <style name="def:emphasis"         italic="true"/>
-  <style name="def:strong-emphasis"  foreground="bright" bold="true"/>
-  <style name="def:inline-code"      foreground="ink" background="raised"/>
-  <style name="def:warning"          foreground="mid" bold="true"/>
-  <style name="def:note"             foreground="mid" italic="true"/>
-  <style name="def:error"            foreground="bright" underline="single"/>
+  <style name="def:strong-emphasis"  foreground="primary" bold="true"/>
+  <style name="def:inline-code"      foreground="primary" background="raised"/>
+  <style name="def:warning"          foreground="warning" bold="true"/>
+  <style name="def:note"             foreground="secondary" italic="true"/>
+  <style name="def:error"            foreground="danger" underline="single"/>
 
   <!-- BrainTerm Markdown & YAML frontmatter -->
-  <style name="bt-markdown:frontmatter-delim" foreground="faint"/>
-  <style name="bt-markdown:wikilink"          foreground="bright" underline="single"/>
-  <style name="bt-markdown:wikilink-bracket"  foreground="faint"/>
-  <style name="bt-markdown:tag"               foreground="mid"/>
-  <style name="bt-markdown:ai-draft-header"   foreground="mid" bold="true"/>
-  <style name="bt-markdown:ai-draft-body"     foreground="mid" italic="true"/>
-  <style name="markdown:header"               foreground="bright" bold="true"/>
-  <style name="markdown:code"                 foreground="ink" background="raised"/>
-  <style name="markdown:code-span"            foreground="ink" background="raised"/>
-  <style name="markdown:blockquote"           foreground="mid" italic="true"/>
-  <style name="markdown:link-text"            foreground="bright" underline="single"/>
-  <style name="markdown:url"                  foreground="faint"/>
-  <style name="yaml:map-key"                  foreground="mid"/>
-  <style name="yaml:string"                   foreground="ink"/>
-  <style name="yaml:int"                      foreground="mid"/>
-  <style name="yaml:bool"                     foreground="mid"/>
+  <style name="bt-markdown:frontmatter-delim" foreground="muted"/>
+  <style name="bt-markdown:wikilink"          foreground="accent" underline="single"/>
+  <style name="bt-markdown:wikilink-bracket"  foreground="muted"/>
+  <style name="bt-markdown:tag"               foreground="accent"/>
+  <style name="bt-markdown:ai-draft-header"   foreground="accent" bold="true"/>
+  <style name="bt-markdown:ai-draft-body"     foreground="secondary"/>
+  <style name="markdown:header"               foreground="primary" bold="true"/>
+  <style name="markdown:code"                 foreground="primary" background="raised"/>
+  <style name="markdown:code-span"            foreground="primary" background="raised"/>
+  <style name="markdown:blockquote"           foreground="secondary" italic="true"/>
+  <style name="markdown:link-text"            foreground="accent" underline="single"/>
+  <style name="markdown:url"                  foreground="muted"/>
+  <style name="yaml:map-key"                  foreground="secondary"/>
+  <style name="yaml:string"                   foreground="primary"/>
+  <style name="yaml:int"                      foreground="warning"/>
+  <style name="yaml:bool"                     foreground="accent"/>
 </style-scheme>
