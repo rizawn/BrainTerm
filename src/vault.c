@@ -31,6 +31,7 @@ struct BtVault {
   gchar *root;         /* canonical absolute root */
   GPtrArray *notes;    /* gchar* relpaths, sorted */
   GPtrArray *patterns; /* GPatternSpec* user ignore patterns */
+  gboolean readonly;
 };
 
 static const gchar *const default_ignored_names[] = {
@@ -231,10 +232,12 @@ static void scan_dir(BtVault *v, const gchar *abs, const gchar *rel, guint depth
 
     if (has_suffix_ci(d->name, ".md.tmp") && d->kind != BT_DIRENT_DIR) {
       /* R1: residue of a crashed atomic write. The target is intact. */
-      gchar *full = g_build_filename(abs, d->name, NULL);
-      if (g_remove(full) == 0)
-        st->tmp_removed++;
-      g_free(full);
+      if (!v->readonly) {
+        gchar *full = g_build_filename(abs, d->name, NULL);
+        if (g_remove(full) == 0)
+          st->tmp_removed++;
+        g_free(full);
+      }
     } else if (is_ignored_name(v, d->name, child_rel)) {
       /* skipped */
     } else if (d->kind == BT_DIRENT_DIR) {
@@ -280,7 +283,8 @@ gboolean vault_rescan(BtVault *vault, BtScanStats *stats, GError **error)
   return TRUE;
 }
 
-BtVault *vault_open(const gchar *path, BtScanStats *stats, GError **error)
+static BtVault *vault_open_internal(const gchar *path, gboolean readonly,
+                                    BtScanStats *stats, GError **error)
 {
   if (path == NULL || path[0] == '\0') {
     g_set_error(error, BT_ERROR, BT_ERROR_INVALID, "No vault path given");
@@ -296,12 +300,23 @@ BtVault *vault_open(const gchar *path, BtScanStats *stats, GError **error)
 
   BtVault *v = g_new0(BtVault, 1);
   v->root = real;
+  v->readonly = readonly;
   v->patterns = g_ptr_array_new_with_free_func((GDestroyNotify)g_pattern_spec_free);
   if (!vault_rescan(v, stats, error)) {
     vault_free(v);
     return NULL;
   }
   return v;
+}
+
+BtVault *vault_open(const gchar *path, BtScanStats *stats, GError **error)
+{
+  return vault_open_internal(path, FALSE, stats, error);
+}
+
+BtVault *vault_open_readonly(const gchar *path, BtScanStats *stats, GError **error)
+{
+  return vault_open_internal(path, TRUE, stats, error);
 }
 
 void vault_free(BtVault *vault)

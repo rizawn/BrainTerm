@@ -39,6 +39,8 @@ typedef struct {
 /* Opens a directory as a vault: canonicalizes the root, removes atomic-write
  * residue and performs the first scan. stats may be NULL. */
 BtVault *vault_open(const gchar *path, BtScanStats *stats, GError **error);
+/* Strictly read-only vault open: scans tree without deleting .md.tmp residue. */
+BtVault *vault_open_readonly(const gchar *path, BtScanStats *stats, GError **error);
 void vault_free(BtVault *vault);
 
 /* Canonical (link-resolved) absolute root. */

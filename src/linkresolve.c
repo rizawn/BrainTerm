@@ -4,6 +4,8 @@
 #include "math/mathtok.h"
 #include "platform.h"
 
+#include <locale.h>
+#include <stdio.h>
 #include <string.h>
 
 #define BT_LINK_MAX_TARGET_BYTES 1024u
@@ -1829,7 +1831,123 @@ gboolean bt_link_dispatch_open(const BtLinkResolution *res, const BtVault *vault
 
 int bt_link_selftest_cli(const char *vault_dir)
 {
-  (void)vault_dir;
-  /* Wired in Step 6 with vault_open_readonly(). */
-  return 1;
+  if (vault_dir == NULL || vault_dir[0] == '\0') {
+    fprintf(stderr, "BT_SELFTEST_LINKS error: missing vault directory\n");
+    return 1;
+  }
+  setlocale(LC_NUMERIC, "C");
+
+  g_autoptr(GError) err = NULL;
+  BtVault *vault = vault_open_readonly(vault_dir, NULL, &err);
+  if (vault == NULL) {
+    fprintf(stderr, "BT_SELFTEST_LINKS error: %s\n", err ? err->message : "cannot open vault");
+    return 1;
+  }
+
+  gint64 t0 = g_get_monotonic_time();
+  BtIndexSnapshot *snap = bt_index_snapshot_from_vault(vault);
+  const GPtrArray *notes = vault_notes(vault);
+
+  guint notes_with_links = 0;
+  guint total_links = 0;
+  guint by_syntax[4] = {0};
+  guint by_status[5] = {0};
+  guint by_kind[5] = {0};
+  guint notes_with_math = 0;
+  guint math_inline = 0;
+  guint math_display = 0;
+
+  GPtrArray *unresolved_lines = g_ptr_array_new_with_free_func(g_free);
+  GPtrArray *ambiguous_lines = g_ptr_array_new_with_free_func(g_free);
+
+  for (guint ni = 0; ni < notes->len; ni++) {
+    const gchar *rel = g_ptr_array_index(notes, ni);
+    g_autofree gchar *raw = NULL;
+    gsize rlen = 0;
+    g_autoptr(GError) rerr = NULL;
+    if (!vault_read(vault, rel, &raw, &rlen, &rerr)) {
+      fprintf(stderr, "BT_SELFTEST_LINKS read error '%s': %s\n", rel, rerr ? rerr->message : "io");
+      continue;
+    }
+
+    GArray *mspans = bt_math_scan(raw, rlen, NULL);
+    if (mspans->len > 0)
+      notes_with_math++;
+    for (guint mi = 0; mi < mspans->len; mi++) {
+      const BtMathSpan *ms = &g_array_index(mspans, BtMathSpan, mi);
+      if (ms->mode == BT_MATH_DISPLAY)
+        math_display++;
+      else
+        math_inline++;
+    }
+    g_array_unref(mspans);
+
+    GArray *lspans = bt_link_scan(raw, rlen);
+    if (lspans->len > 0)
+      notes_with_links++;
+    for (guint li = 0; li < lspans->len; li++) {
+      const BtLinkSpan *sp = &g_array_index(lspans, BtLinkSpan, li);
+      total_links++;
+      if ((guint)sp->syntax < G_N_ELEMENTS(by_syntax))
+        by_syntax[sp->syntax]++;
+
+      BtLinkResolution *res = bt_link_resolve(snap, rel, sp->raw_target);
+      if (res == NULL)
+        continue;
+      if ((guint)res->status < G_N_ELEMENTS(by_status))
+        by_status[res->status]++;
+      if ((guint)res->kind < G_N_ELEMENTS(by_kind))
+        by_kind[res->kind]++;
+
+      if (res->status == BT_LINK_UNRESOLVED && unresolved_lines->len < 50u) {
+        g_ptr_array_add(unresolved_lines,
+                        g_strdup_printf("%s:%u %s", rel, sp->line_no, sp->raw_target));
+      } else if (res->status == BT_LINK_AMBIGUOUS) {
+        GString *line = g_string_new(NULL);
+        g_string_append_printf(line, "%s:%u %s ->", rel, sp->line_no, sp->raw_target);
+        for (guint ci = 0; res->candidates != NULL && res->candidates[ci] != NULL; ci++) {
+          g_string_append_printf(line, "%s %s", ci == 0 ? "" : ",", res->candidates[ci]);
+        }
+        g_ptr_array_add(ambiguous_lines, g_string_free(line, FALSE));
+      }
+      bt_link_resolution_free(res);
+    }
+    g_array_unref(lspans);
+  }
+
+  double total_ms = (double)(g_get_monotonic_time() - t0) / 1000.0;
+  double per_1k = (total_links > 0) ? (total_ms * 1000.0 / (double)total_links) : 0.0;
+
+  printf("BT_SELFTEST_LINKS vault=\"%s\"\n", vault_root(vault));
+  printf("notes=%u notes_with_links=%u total_links=%u total_ms=%.2f ms_per_1000_links=%.2f\n",
+         notes->len, notes_with_links, total_links, total_ms, per_1k);
+  printf("by_syntax: wikilink=%u markdown=%u bare_url=%u frontmatter=%u\n",
+         by_syntax[BT_LINK_SYNTAX_WIKILINK], by_syntax[BT_LINK_SYNTAX_MARKDOWN],
+         by_syntax[BT_LINK_SYNTAX_BARE_URL], by_syntax[BT_LINK_SYNTAX_FRONTMATTER]);
+  printf("by_status: RESOLVED=%u AMBIGUOUS=%u UNRESOLVED=%u EXTERNAL=%u BLOCKED=%u\n",
+         by_status[BT_LINK_RESOLVED], by_status[BT_LINK_AMBIGUOUS],
+         by_status[BT_LINK_UNRESOLVED], by_status[BT_LINK_EXTERNAL],
+         by_status[BT_LINK_BLOCKED]);
+  printf("by_kind: note=%u file=%u dir=%u url=%u same_note=%u\n",
+         by_kind[BT_LINK_KIND_NOTE], by_kind[BT_LINK_KIND_FILE],
+         by_kind[BT_LINK_KIND_DIR], by_kind[BT_LINK_KIND_URL],
+         by_kind[BT_LINK_KIND_SAME_NOTE]);
+  printf("math_tok: notes_with_math=%u inline=%u display=%u total=%u\n",
+         notes_with_math, math_inline, math_display, math_inline + math_display);
+
+  printf("--- UNRESOLVED (first %u of %u) ---\n",
+         unresolved_lines->len, by_status[BT_LINK_UNRESOLVED]);
+  for (guint i = 0; i < unresolved_lines->len; i++)
+    printf("UNRESOLVED %s\n", (const char *)g_ptr_array_index(unresolved_lines, i));
+
+  printf("--- AMBIGUOUS (%u) ---\n", ambiguous_lines->len);
+  for (guint i = 0; i < ambiguous_lines->len; i++)
+    printf("AMBIGUOUS %s\n", (const char *)g_ptr_array_index(ambiguous_lines, i));
+
+  fflush(stdout);
+  g_ptr_array_unref(ambiguous_lines);
+  g_ptr_array_unref(unresolved_lines);
+  bt_index_snapshot_free(snap);
+  vault_free(vault);
+  return 0;
 }

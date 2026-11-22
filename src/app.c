@@ -8,6 +8,7 @@
 #include "graph.h"
 #include "graphview.h"
 #include "index.h"
+#include "linkresolve.h"
 #include "noteutil.h"
 #include "organizer.h"
 #include "sessions.h"
@@ -2386,6 +2387,12 @@ static gint on_handle_local_options(GApplication *gapp, GVariantDict *opts, gpoi
     fflush(stdout);
     return 0;
   }
+  gchar *selftest_links_dir = NULL;
+  if (g_variant_dict_lookup(opts, "selftest-links", "s", &selftest_links_dir)) {
+    int rc = bt_link_selftest_cli(selftest_links_dir);
+    g_free(selftest_links_dir);
+    return rc;
+  }
   g_printerr("BrainTerm build %s\n", BT_BUILD_STAMP);
   gchar *vault = NULL;
   if (g_variant_dict_lookup(opts, "vault", "s", &vault)) {
@@ -2472,6 +2479,7 @@ BtApp *bt_app_new(void)
     {"graph-capture", 0, 0, G_OPTION_ARG_STRING, NULL, "Capture graph PNG + JSON evidence to DIR and exit", "DIR"},
     {"graph-state", 0, 0, G_OPTION_ARG_STRING, NULL, "Named capture state (default-fit|hover-hub|hover-small|selected|zoom2x|3d|reduce-motion-on|reduce-motion-off|all)", "NAME"},
     {"graph-size", 0, 0, G_OPTION_ARG_STRING, NULL, "Window size WxH for --graph-capture (e.g. 1000x700 or 1920x1080)", "WxH"},
+    {"selftest-links", 0, 0, G_OPTION_ARG_STRING, NULL, "Run read-only link resolver self-test on DIR and exit", "DIR"},
     {"version", 'V', 0, G_OPTION_ARG_NONE, NULL, "Print version and build stamp and exit", NULL},
     {NULL, 0, 0, 0, NULL, NULL, NULL},
   };
