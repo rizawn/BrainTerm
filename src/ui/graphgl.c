@@ -769,10 +769,12 @@ void bt_graph_gl_render_state(BtGraphGL *gl, const BtGraphRenderState *st)
       bt = (float)n0->birth_t;
   }
 
-  gint focus_idx = (st->hover_idx >= 0) ? st->hover_idx : st->focus_idx;
+  gint focus_idx = (st->hover_idx >= 0)
+                       ? st->hover_idx
+                       : ((st->focus_idx >= 0) ? st->focus_idx : st->selected_idx);
   gboolean has_focus = (focus_idx >= 0 && (guint)focus_idx < gl->node_count);
   float hf = has_focus ? (float)CLAMP(st->hover_fade, 0.0, 1.0) : 0.0f;
-  if (st->hover_idx < 0 && st->focus_idx >= 0)
+  if (st->hover_idx < 0 && (st->focus_idx >= 0 || st->selected_idx >= 0))
     hf = 1.0f;
 
   if (st->graph != NULL && gl->node_count > 0) {

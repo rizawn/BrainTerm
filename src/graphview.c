@@ -314,10 +314,12 @@ static void cairo_backend_render(BtGraphRenderer *r, cairo_t *cr, const BtGraphR
     }
   }
 
-  gint focus_idx = (st->hover_idx >= 0) ? st->hover_idx : st->focus_idx;
+  gint focus_idx = (st->hover_idx >= 0)
+                       ? st->hover_idx
+                       : ((st->focus_idx >= 0) ? st->focus_idx : st->selected_idx);
   gboolean has_focus = (focus_idx >= 0 && (guint)focus_idx < g->nodes->len);
   gdouble hf = has_focus ? CLAMP(st->hover_fade, 0.0, 1.0) : 0.0;
-  if (st->hover_idx < 0 && st->focus_idx >= 0)
+  if (st->hover_idx < 0 && (st->focus_idx >= 0 || st->selected_idx >= 0))
     hf = 1.0;
   gdouble dim_factor = has_focus ? (1.0 - 0.75 * hf) : 1.0;
   gboolean use_curved_edges = (high && g->edges->len <= 600u);
@@ -759,6 +761,7 @@ struct BtGraphView {
   gboolean show_ghosts;
 
   gboolean dragging;
+  gboolean drag_moved;
   gdouble drag_start_x, drag_start_y;
   gdouble pan_start_x, pan_start_y;
   gdouble yaw_start, pitch_start;
@@ -821,7 +824,9 @@ static void refresh_neighbor_mask(BtGraphView *gv)
     return;
   guint n = gv->graph->nodes->len;
   ensure_nbr_mask(gv, n);
-  gint foc = (gv->hover_idx >= 0) ? gv->hover_idx : gv->focus_idx;
+  gint foc = (gv->hover_idx >= 0)
+                 ? gv->hover_idx
+                 : ((gv->focus_idx >= 0) ? gv->focus_idx : gv->selected_idx);
   bt_graph_compute_neighbors(gv->graph, foc, gv->nbr_mask, n);
   bt_graph_gl_mark_state_dirty(gv->gl);
 }
@@ -1006,8 +1011,8 @@ static gboolean on_tick(GtkWidget *widget, GdkFrameClock *clock, gpointer ud)
     }
   }
 
-  /* 2. Hover fade animation. */
-  gdouble target_hf = (gv->hover_idx >= 0) ? 1.0 : 0.0;
+  /* 2. Hover / pinned selection fade animation. */
+  gdouble target_hf = (gv->hover_idx >= 0 || gv->focus_idx >= 0 || gv->selected_idx >= 0) ? 1.0 : 0.0;
   if (gv->reduce_motion) {
     gv->hover_fade = target_hf;
   } else if (fabs(gv->hover_fade - target_hf) > 0.02) {
@@ -1255,17 +1260,47 @@ static void center_on_node(BtGraphView *gv, gint hit)
 
 static void show_graph_context_menu(BtGraphView *gv, gdouble x, gdouble y);
 
+static void clear_selection(BtGraphView *gv)
+{
+  if (gv == NULL || gv->selected_idx < 0)
+    return;
+  gv->selected_idx = -1;
+  refresh_neighbor_mask(gv);
+  sync_toolbar_buttons(gv);
+  if (gv->reduce_motion) {
+    gv->hover_fade = (gv->hover_idx >= 0 || gv->focus_idx >= 0) ? 1.0 : 0.0;
+    queue_canvas_draw(gv);
+  } else {
+    ensure_tick(gv);
+  }
+}
+
+static gboolean on_key_pressed(GtkEventControllerKey *c, guint keyval, guint keycode,
+                               GdkModifierType state, gpointer ud)
+{
+  (void)c; (void)keycode; (void)state;
+  BtGraphView *gv = ud;
+  if (keyval == GDK_KEY_Escape && gv->selected_idx >= 0) {
+    clear_selection(gv);
+    return TRUE;
+  }
+  return FALSE;
+}
+
 static void on_click_pressed(GtkGestureClick *g, gint n_press, gdouble x, gdouble y, gpointer ud)
 {
   (void)g;
   BtGraphView *gv = ud;
+  if (gv->canvas_stack != NULL)
+    gtk_widget_grab_focus(gv->canvas_stack);
   if (gv->graph == NULL)
     return;
   gint hit = pick_node_at(gv, x, y);
   if (hit >= 0) {
     gv->selected_idx = hit;
     gv->pulse_phase = 0.0;
-    bt_graph_gl_mark_state_dirty(gv->gl);
+    refresh_neighbor_mask(gv);
+    sync_toolbar_buttons(gv);
     const BtGraphNode *nd = g_ptr_array_index(gv->graph->nodes, (guint)hit);
     if (n_press == 2) {
       center_on_node(gv, hit);
@@ -1273,9 +1308,12 @@ static void on_click_pressed(GtkGestureClick *g, gint n_press, gdouble x, gdoubl
     }
     if (n_press == 1 && nd->relpath != NULL && !nd->broken && gv->on_open != NULL)
       gv->on_open(nd->relpath, nd->kind == BT_NODE_GHOST, gv->user_data);
-    if (needs_pulse_tick(gv))
+    if (gv->reduce_motion) {
+      gv->hover_fade = 1.0;
+      queue_canvas_draw(gv);
+    } else {
       ensure_tick(gv);
-    queue_canvas_draw(gv);
+    }
     return;
   }
   if (n_press != 1)
@@ -1283,6 +1321,7 @@ static void on_click_pressed(GtkGestureClick *g, gint n_press, gdouble x, gdoubl
   gv->animating_cam = FALSE;
   gv->animating_3d = FALSE;
   gv->dragging = TRUE;
+  gv->drag_moved = FALSE;
   gv->drag_start_x = x;
   gv->drag_start_y = y;
   gv->pan_start_x = gv->pan_x;
@@ -1296,7 +1335,12 @@ static void on_click_pressed(GtkGestureClick *g, gint n_press, gdouble x, gdoubl
 static void on_click_released(GtkGestureClick *g, gint n_press, gdouble x, gdouble y, gpointer ud)
 {
   (void)g; (void)n_press; (void)x; (void)y;
-  ((BtGraphView *)ud)->dragging = FALSE;
+  BtGraphView *gv = ud;
+  gboolean was_clean_bg_click = gv->dragging && !gv->drag_moved;
+  gv->dragging = FALSE;
+  gv->drag_moved = FALSE;
+  if (was_clean_bg_click && gv->selected_idx >= 0)
+    clear_selection(gv);
 }
 
 static void on_right_click(GtkGestureClick *g, gint n_press, gdouble x, gdouble y, gpointer ud)
@@ -1313,6 +1357,8 @@ static void on_motion(GtkEventControllerMotion *c, gdouble x, gdouble y, gpointe
   (void)c;
   BtGraphView *gv = ud;
   if (gv->dragging) {
+    if (hypot(x - gv->drag_start_x, y - gv->drag_start_y) > 4.0)
+      gv->drag_moved = TRUE;
     if (gv->mode == BT_GRAPH_MODE_3D && gv->active_backend == BT_GRAPH_BACKEND_GL) {
       gv->user_interacted_3d = TRUE;
       gv->yaw = gv->yaw_start - (x - gv->drag_start_x) * 0.0075;
@@ -1330,7 +1376,7 @@ static void on_motion(GtkEventControllerMotion *c, gdouble x, gdouble y, gpointe
       gv->hover_idx = hit;
       refresh_neighbor_mask(gv);
       if (gv->reduce_motion) {
-        gv->hover_fade = (hit >= 0) ? 1.0 : 0.0;
+        gv->hover_fade = (hit >= 0 || gv->selected_idx >= 0 || gv->focus_idx >= 0) ? 1.0 : 0.0;
         queue_canvas_draw(gv);
       } else {
         ensure_tick(gv);
@@ -1347,7 +1393,7 @@ static void on_motion_leave(GtkEventControllerMotion *c, gpointer ud)
     gv->hover_idx = -1;
     refresh_neighbor_mask(gv);
     if (gv->reduce_motion) {
-      gv->hover_fade = 0.0;
+      gv->hover_fade = (gv->selected_idx >= 0 || gv->focus_idx >= 0) ? 1.0 : 0.0;
       queue_canvas_draw(gv);
     } else {
       ensure_tick(gv);
@@ -1897,6 +1943,7 @@ BtGraphView *bt_graphview_new(BtGraphOpenNoteFn on_open, BtGraphOpenTermFn on_op
 
   gv->canvas_stack = gtk_stack_new();
   gtk_widget_set_name(gv->canvas_stack, "bt-graph-area");
+  gtk_widget_set_focusable(gv->canvas_stack, TRUE);
   gtk_widget_set_hexpand(gv->canvas_stack, TRUE);
   gtk_widget_set_vexpand(gv->canvas_stack, TRUE);
   gtk_widget_set_size_request(gv->canvas_stack, 200, 160);
@@ -1936,6 +1983,10 @@ BtGraphView *bt_graphview_new(BtGraphOpenNoteFn on_open, BtGraphOpenTermFn on_op
   GtkEventController *scr = gtk_event_controller_scroll_new(GTK_EVENT_CONTROLLER_SCROLL_VERTICAL);
   g_signal_connect(scr, "scroll", G_CALLBACK(on_scroll), gv);
   gtk_widget_add_controller(gv->canvas_stack, scr);
+
+  GtkEventController *key = gtk_event_controller_key_new();
+  g_signal_connect(key, "key-pressed", G_CALLBACK(on_key_pressed), gv);
+  gtk_widget_add_controller(gv->canvas_stack, key);
 
   gv->overlay = gtk_overlay_new();
   gtk_widget_set_hexpand(gv->overlay, TRUE);
