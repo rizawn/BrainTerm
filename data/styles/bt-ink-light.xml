@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- bt-ink-light.xml — BrainTerm Monochrome Ink StyleScheme (Light, zero hue). -->
+<style-scheme id="bt-ink-light" _name="BrainTerm Ink Light" version="1.0">
+  <author>BrainTerm</author>
+  <_description>Flat monochrome paper-white Markdown scheme (R == G == B).</_description>
+
+  <color name="surface"  value="#FFFFFF"/>
+  <color name="raised"   value="#F5F5F5"/>
+  <color name="curline"  value="#F5F5F5"/>
+  <color name="selbg"    value="#E0E0E0"/>
+  <color name="hairline" value="#E0E0E0"/>
+  <color name="faint"    value="#B0B0B0"/>
+  <color name="mid"      value="#757575"/>
+  <color name="ink"      value="#1A1A1A"/>
+  <color name="bright"   value="#000000"/>
+
+  <!-- Global -->
+  <style name="text"                 foreground="ink" background="surface"/>
+  <style name="selection"            foreground="bright" background="selbg"/>
+  <style name="cursor"               foreground="bright"/>
+  <style name="current-line"         background="curline"/>
+  <style name="line-numbers"         foreground="faint" background="surface"/>
+  <style name="current-line-number"  foreground="ink" background="curline" bold="true"/>
+  <style name="bracket-match"        foreground="bright" background="selbg" bold="true"/>
+
+  <!-- Generic defs (all strictly achromatic) -->
+  <style name="def:comment"          foreground="faint" italic="true"/>
+  <style name="def:constant"         foreground="mid"/>
+  <style name="def:string"           foreground="ink"/>
+  <style name="def:identifier"       foreground="mid"/>
+  <style name="def:statement"        foreground="mid" bold="true"/>
+  <style name="def:keyword"          foreground="mid"/>
+  <style name="def:type"             foreground="mid"/>
+  <style name="def:preprocessor"     foreground="faint"/>
+  <style name="def:special-char"     foreground="faint"/>
+  <style name="def:underlined"       foreground="bright" underline="single"/>
+  <style name="def:heading"          foreground="bright" bold="true"/>
+  <style name="def:emphasis"         italic="true"/>
+  <style name="def:strong-emphasis"  foreground="bright" bold="true"/>
+  <style name="def:inline-code"      foreground="ink" background="raised"/>
+  <style name="def:warning"          foreground="mid" bold="true"/>
+  <style name="def:note"             foreground="mid" italic="true"/>
+  <style name="def:error"            foreground="bright" underline="single"/>
+
+  <!-- BrainTerm Markdown & YAML frontmatter -->
+  <style name="bt-markdown:frontmatter-delim" foreground="faint"/>
+  <style name="bt-markdown:wikilink"          foreground="bright" underline="single"/>
+  <style name="bt-markdown:wikilink-bracket"  foreground="faint"/>
+  <style name="bt-markdown:tag"               foreground="mid"/>
+  <style name="bt-markdown:ai-draft-header"   foreground="mid" bold="true"/>
+  <style name="bt-markdown:ai-draft-body"     foreground="mid" italic="true"/>
+  <style name="markdown:header"               foreground="bright" bold="true"/>
+  <style name="markdown:code"                 foreground="ink" background="raised"/>
+  <style name="markdown:code-span"            foreground="ink" background="raised"/>
+  <style name="markdown:blockquote"           foreground="mid" italic="true"/>
+  <style name="markdown:link-text"            foreground="bright" underline="single"/>
+  <style name="markdown:url"                  foreground="faint"/>
+  <style name="yaml:map-key"                  foreground="mid"/>
+  <style name="yaml:string"                   foreground="ink"/>
+  <style name="yaml:int"                      foreground="mid"/>
+  <style name="yaml:bool"                     foreground="mid"/>
+</style-scheme>

@@ -1,0 +1,8 @@
+build/
+dist/
+*.exe
+*.dll
+*.o
+*.obj
+*.tmp
+.bt/

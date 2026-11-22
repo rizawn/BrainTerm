@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  bt-markdown.lang — BrainTerm extended Markdown syntax for GtkSourceView 5 (ADR-004).
+  Extends built-in markdown with:
+    1. YAML frontmatter block at start of document (delegated to yaml:yaml)
+    2. [[wiki-link]] inline context
+    3. #tag inline context
+    4. ## AI draft section context (distinct visual style per P3)
+-->
+<language id="bt-markdown" name="BrainTerm Markdown" version="2.0" _section="Markup">
+  <metadata>
+    <property name="mimetypes">text/markdown;text/x-markdown</property>
+    <property name="globs">*.md;*.markdown</property>
+  </metadata>
+
+  <styles>
+    <style id="frontmatter-delim" name="Frontmatter Delimiter" map-to="def:preprocessor"/>
+    <style id="wikilink"          name="Wiki Link"             map-to="def:underlined"/>
+    <style id="wikilink-bracket"  name="Wiki Link Bracket"     map-to="def:special-char"/>
+    <style id="tag"               name="Inline Tag"            map-to="def:keyword"/>
+    <style id="ai-draft-header"   name="AI Draft Heading"      map-to="def:warning"/>
+    <style id="ai-draft-body"     name="AI Draft Body"         map-to="def:note"/>
+  </styles>
+
+  <definitions>
+    <context id="frontmatter" style-ref="frontmatter-delim" once-only="true">
+      <start>^---\s*$</start>
+      <end>^---\s*$</end>
+      <include>
+        <context ref="yaml:yaml"/>
+      </include>
+    </context>
+
+    <context id="ai-draft-section" style-ref="ai-draft-body" end-at-line-end="false">
+      <start>^##\s+AI draft\b.*$</start>
+      <end>(?=^##?\s+)</end>
+      <include>
+        <context sub-pattern="0" where="start" style-ref="ai-draft-header"/>
+        <context ref="wikilink"/>
+        <context ref="inline-tag"/>
+        <context ref="markdown:markdown"/>
+      </include>
+    </context>
+
+    <context id="wikilink" style-ref="wikilink">
+      <match>(\[\[)([^\]\r\n]+)(\]\])</match>
+      <include>
+        <context sub-pattern="1" style-ref="wikilink-bracket"/>
+        <context sub-pattern="3" style-ref="wikilink-bracket"/>
+      </include>
+    </context>
+
+    <context id="inline-tag" style-ref="tag">
+      <match>(?:^|(?&lt;=\s))#[A-Za-z][A-Za-z0-9_/-]*</match>
+    </context>
+
+    <context id="bt-markdown">
+      <include>
+        <context ref="frontmatter"/>
+        <context ref="ai-draft-section"/>
+        <context ref="wikilink"/>
+        <context ref="inline-tag"/>
+        <context ref="markdown:markdown"/>
+      </include>
+    </context>
+  </definitions>
+</language>

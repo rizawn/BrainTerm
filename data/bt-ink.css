@@ -1,0 +1,316 @@
+/* bt-ink.css — BrainTerm Monochrome ("Ink") Theme
+ * Strictly achromatic (R == G == B on every hex token). Flat, minimal, zero hue.
+ *
+ * Dark tokens (default, measured against docs/mock-ink.png):
+ *   surface  #0B0B0B   raised   #101010   ink      #ECECEC   bright   #FAFAFA
+ *   mid      #8B8B8B   faint    #6E6E6E   hairline #1C1C1C   deep     #000000
+ *
+ * Light tokens (mirrored):
+ *   surface  #FFFFFF   raised   #F5F5F5   ink      #1A1A1A   bright   #000000
+ *   mid      #757575   faint    #B0B0B0   hairline #E0E0E0   deep     #ECECEC
+ */
+
+@define-color bt_surface  #0B0B0B;
+@define-color bt_raised   #101010;
+@define-color bt_ink      #ECECEC;
+@define-color bt_bright   #FAFAFA;
+@define-color bt_mid      #8B8B8B;
+@define-color bt_faint    #6E6E6E;
+@define-color bt_hairline #1C1C1C;
+@define-color bt_deep     #000000;
+
+/* Override Adwaita accent & chrome colors to pure grayscale */
+@define-color accent_color @bt_ink;
+@define-color accent_bg_color @bt_hairline;
+@define-color accent_fg_color @bt_bright;
+@define-color window_bg_color @bt_surface;
+@define-color window_fg_color @bt_ink;
+@define-color view_bg_color @bt_surface;
+@define-color view_fg_color @bt_ink;
+@define-color headerbar_bg_color @bt_surface;
+@define-color headerbar_fg_color @bt_ink;
+@define-color headerbar_border_color @bt_hairline;
+@define-color popover_bg_color @bt_raised;
+@define-color popover_fg_color @bt_ink;
+@define-color card_bg_color @bt_raised;
+@define-color card_fg_color @bt_ink;
+@define-color sidebar_bg_color @bt_raised;
+@define-color sidebar_fg_color @bt_ink;
+@define-color sidebar_backdrop_color @bt_surface;
+
+window,
+window.background,
+.background {
+  background-color: @bt_surface;
+  color: @bt_ink;
+}
+
+headerbar {
+  background-color: @bt_surface;
+  color: @bt_ink;
+  border-bottom: 1px solid @bt_hairline;
+  box-shadow: none;
+  min-height: 40px;
+}
+
+/* Flat buttons: no bevels, no gradients, no drop shadows */
+button {
+  background-image: none;
+  background-color: transparent;
+  color: @bt_ink;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  box-shadow: none;
+  transition: background-color 120ms ease;
+}
+
+button:hover {
+  background-color: @bt_raised;
+  border-color: @bt_hairline;
+}
+
+button:active,
+button:checked {
+  background-color: @bt_hairline;
+  color: @bt_bright;
+  border-color: @bt_faint;
+}
+
+button.bt-hairline {
+  border: 1px solid @bt_hairline;
+  padding: 2px 8px;
+}
+
+/* Accessible 2px mid-gray keyboard focus ring */
+*:focus-visible {
+  outline: 2px solid @bt_mid;
+  outline-offset: -1px;
+}
+
+/* Sidebar / File tree: flat rows, hover fill, selected = fill + 2px ink left edge */
+.bt-sidebar {
+  background-color: @bt_raised;
+  border-right: 1px solid @bt_hairline;
+}
+
+.bt-sidebar-header {
+  padding: 8px 12px;
+  border-bottom: 1px solid @bt_hairline;
+  color: @bt_mid;
+  font-size: 12px;
+}
+
+listview.navigation-sidebar {
+  background-color: transparent;
+  padding: 4px 0;
+}
+
+listview.navigation-sidebar > row {
+  border-radius: 0;
+  border-left: 2px solid transparent;
+  padding: 4px 10px;
+  margin: 0;
+  background-color: transparent;
+  color: @bt_ink;
+}
+
+listview.navigation-sidebar > row:hover {
+  background-color: @bt_hairline;
+}
+
+listview.navigation-sidebar > row:selected {
+  background-color: @bt_hairline;
+  border-left: 2px solid @bt_bright;
+  color: @bt_bright;
+}
+
+/* Paned splitters: 1px hairline */
+paned > separator {
+  background-color: @bt_hairline;
+  min-width: 1px;
+  min-height: 1px;
+}
+
+separator {
+  background-color: @bt_hairline;
+}
+
+/* Editor surface */
+textview,
+textview text {
+  background-color: @bt_surface;
+  color: @bt_ink;
+}
+
+textview border.left {
+  background-color: @bt_surface;
+  color: @bt_faint;
+}
+
+/* Terminal chrome (notebook tabs, search bar, exit banner): flat monochrome */
+notebook > header {
+  background-color: @bt_raised;
+  border-top: 1px solid @bt_hairline;
+  border-bottom: 1px solid @bt_hairline;
+  box-shadow: none;
+}
+
+notebook > header tab {
+  background-color: transparent;
+  color: @bt_mid;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: 4px 10px;
+  box-shadow: none;
+}
+
+notebook > header tab:hover {
+  color: @bt_ink;
+  background-color: @bt_surface;
+}
+
+notebook > header tab:checked {
+  color: @bt_bright;
+  background-color: @bt_surface;
+  border-bottom: 2px solid @bt_bright;
+}
+
+/* Entries, search bars, popovers, conflict banners */
+entry,
+searchentry {
+  background-color: @bt_raised;
+  color: @bt_ink;
+  border: 1px solid @bt_hairline;
+  border-radius: 4px;
+  box-shadow: none;
+}
+
+popover > contents {
+  background-color: @bt_raised;
+  color: @bt_ink;
+  border: 1px solid @bt_hairline;
+  box-shadow: none;
+}
+
+.bt-banner {
+  background-color: @bt_raised;
+  color: @bt_ink;
+  border-bottom: 1px solid @bt_hairline;
+  padding: 6px 10px;
+}
+
+.bt-chip {
+  background-color: @bt_hairline;
+  color: @bt_mid;
+  border-radius: 3px;
+  padding: 1px 6px;
+  font-size: 11px;
+}
+
+.dim-label,
+.subtitle {
+  color: @bt_mid;
+}
+
+/* Light mode override (mirrored pure grayscale tokens) */
+window.bt-light {
+  background-color: #FFFFFF;
+  color: #1A1A1A;
+}
+
+window.bt-light headerbar {
+  background-color: #FFFFFF;
+  color: #1A1A1A;
+  border-bottom: 1px solid #E0E0E0;
+}
+
+window.bt-light .bt-sidebar {
+  background-color: #F5F5F5;
+  border-right: 1px solid #E0E0E0;
+}
+
+window.bt-light .bt-sidebar-header {
+  border-bottom: 1px solid #E0E0E0;
+  color: #757575;
+}
+
+window.bt-light listview.navigation-sidebar > row {
+  color: #1A1A1A;
+}
+
+window.bt-light listview.navigation-sidebar > row:hover {
+  background-color: #E0E0E0;
+}
+
+window.bt-light listview.navigation-sidebar > row:selected {
+  background-color: #E0E0E0;
+  border-left: 2px solid #000000;
+  color: #000000;
+}
+
+window.bt-light paned > separator,
+window.bt-light separator {
+  background-color: #E0E0E0;
+}
+
+window.bt-light textview,
+window.bt-light textview text {
+  background-color: #FFFFFF;
+  color: #1A1A1A;
+}
+
+window.bt-light textview border.left {
+  background-color: #FFFFFF;
+  color: #B0B0B0;
+}
+
+window.bt-light notebook > header {
+  background-color: #F5F5F5;
+  border-top: 1px solid #E0E0E0;
+  border-bottom: 1px solid #E0E0E0;
+}
+
+window.bt-light notebook > header tab {
+  color: #757575;
+}
+
+window.bt-light notebook > header tab:checked {
+  color: #000000;
+  background-color: #FFFFFF;
+  border-bottom: 2px solid #000000;
+}
+
+window.bt-light entry,
+window.bt-light searchentry,
+window.bt-light .bt-banner {
+  background-color: #F5F5F5;
+  color: #1A1A1A;
+  border-color: #E0E0E0;
+}
+
+window.bt-light button {
+  color: #1A1A1A;
+}
+
+window.bt-light button:hover {
+  background-color: #F5F5F5;
+  border-color: #E0E0E0;
+}
+
+window.bt-light button:active,
+window.bt-light button:checked {
+  background-color: #E0E0E0;
+  color: #000000;
+  border-color: #B0B0B0;
+}
+
+window.bt-light .dim-label,
+window.bt-light .subtitle {
+  color: #757575;
+}
+
+window.bt-light .bt-chip {
+  background-color: #ECECEC;
+  color: #757575;
+}

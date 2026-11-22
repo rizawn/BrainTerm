@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/local/brainterm">
+    <file>bt-ink.css</file>
+    <file>language-specs/bt-markdown.lang</file>
+    <file>styles/bt-ink-dark.xml</file>
+    <file>styles/bt-ink-light.xml</file>
+  </gresource>
+</gresources>

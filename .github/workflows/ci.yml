@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-meson
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-gtk4
+            mingw-w64-ucrt-x86_64-libadwaita
+            mingw-w64-ucrt-x86_64-gtksourceview5
+            mingw-w64-ucrt-x86_64-libyaml
+            mingw-w64-ucrt-x86_64-sqlite3
+            mingw-w64-ucrt-x86_64-libgit2
+            mingw-w64-ucrt-x86_64-libvterm
+            mingw-w64-ucrt-x86_64-md4c
+            mingw-w64-ucrt-x86_64-cjson
+            mingw-w64-ucrt-x86_64-cmocka
+      - name: Configure & Build
+        run: |
+          meson setup build -Dwerror=true
+          meson compile -C build
+      - name: Test
+        run: meson test -C build --print-errorlogs
+      - name: Packaging Smoke Test (§11.7)
+        shell: pwsh
+        run: ./scripts/package-win.ps1 -BuildDir build -OutDir dist/brainterm -SmokeTest
+
+  ubuntu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc meson ninja-build pkg-config \
+            libgtk-4-dev libadwaita-1-dev libgtksourceview-5-dev \
+            libyaml-dev libsqlite3-dev libgit2-dev \
+            libvterm-dev libmd4c-dev libcjson-dev libcmocka-dev
+      - name: Configure & Build
+        run: |
+          meson setup build -Dwerror=true
+          meson compile -C build
+      - name: Test
+        run: meson test -C build --print-errorlogs
