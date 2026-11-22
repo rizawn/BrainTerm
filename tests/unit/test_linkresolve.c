@@ -183,6 +183,20 @@ static void test_group_r_resolver_table(void **state)
   assert_string_equal(r08_nested->candidates[1], "projects/conpty.md");
   bt_link_resolution_free(r08_nested);
 
+  /* P-4: source-subtree and non-hidden dot-folder preference over shallower .raw/. */
+  BtIndexSnapshot *p4_snap = bt_index_snapshot_new();
+  bt_index_snapshot_add_entry(p4_snap, "claude-obsidian/wiki/index.md", FALSE, NULL, NULL);
+  bt_index_snapshot_add_entry(p4_snap, "claude-obsidian/.raw/claude-obsidian-ecosystem-research.md", FALSE, NULL, NULL);
+  bt_index_snapshot_add_entry(p4_snap, "claude-obsidian/wiki/sources/claude-obsidian-ecosystem-research.md", FALSE, NULL, NULL);
+  bt_index_snapshot_finalize(p4_snap);
+  BtLinkResolution *p4_res = bt_link_resolve(p4_snap, "claude-obsidian/wiki/index.md", "claude-obsidian-ecosystem-research");
+  assert_non_null(p4_res);
+  assert_int_equal(p4_res->status, BT_LINK_AMBIGUOUS);
+  assert_string_equal(p4_res->candidates[0], "claude-obsidian/wiki/sources/claude-obsidian-ecosystem-research.md");
+  assert_string_equal(p4_res->candidates[1], "claude-obsidian/.raw/claude-obsidian-ecosystem-research.md");
+  bt_link_resolution_free(p4_res);
+  bt_index_snapshot_free(p4_snap);
+
   /* Snapshot build timing for 3,000 notes (< 20 ms budget per §A.4). */
   BtIndexSnapshot *s3k = bt_index_snapshot_new();
   gint64 s0 = g_get_monotonic_time();

@@ -1211,8 +1211,38 @@ static guint count_slashes(const char *p)
 typedef struct {
   const SnapEntry *entry;
   gboolean same_dir;
+  gboolean in_source_subtree;
+  gboolean has_dot_segment;
   guint depth;
 } RankedCand;
+
+static gboolean relpath_has_dot_segment(const char *relpath)
+{
+  if (relpath == NULL)
+    return FALSE;
+  const char *p = relpath;
+  while (*p != '\0') {
+    if (p[0] == '.' && p[1] != '/' && p[1] != '\0')
+      return TRUE;
+    const char *sl = strchr(p, '/');
+    if (sl == NULL)
+      break;
+    p = sl + 1;
+  }
+  return FALSE;
+}
+
+static gboolean dir_is_in_subtree(const char *cand_dir, const char *src_dir, gboolean case_sensitive)
+{
+  if (src_dir == NULL || src_dir[0] == '\0' || cand_dir == NULL || cand_dir[0] == '\0')
+    return FALSE;
+  gsize sl = strlen(src_dir);
+  gsize cl = strlen(cand_dir);
+  if (cl <= sl || cand_dir[sl] != '/')
+    return FALSE;
+  return case_sensitive ? (strncmp(cand_dir, src_dir, sl) == 0)
+                        : (g_ascii_strncasecmp(cand_dir, src_dir, sl) == 0);
+}
 
 static gint cmp_ranked_cand(gconstpointer a, gconstpointer b)
 {
@@ -1220,6 +1250,10 @@ static gint cmp_ranked_cand(gconstpointer a, gconstpointer b)
   const RankedCand *rb = b;
   if (ra->same_dir != rb->same_dir)
     return ra->same_dir ? -1 : 1;
+  if (ra->in_source_subtree != rb->in_source_subtree)
+    return ra->in_source_subtree ? -1 : 1;
+  if (ra->has_dot_segment != rb->has_dot_segment)
+    return ra->has_dot_segment ? 1 : -1;
   if (ra->depth != rb->depth)
     return (ra->depth < rb->depth) ? -1 : 1;
   return strcmp(ra->entry->relpath, rb->entry->relpath);
@@ -1569,7 +1603,7 @@ BtLinkResolution *bt_link_resolve(const BtIndexSnapshot *idx, const char *source
     return res;
   }
 
-  /* Ambiguous: rank by (same dir as source_note, fewer segments, lexical). */
+  /* Ambiguous: rank by (same dir, in source subtree, non-dot segment, fewer segments, lexical). */
   g_autoptr(GArray) ranked = g_array_new(FALSE, FALSE, sizeof(RankedCand));
   for (guint i = 0; i < matches->len; i++) {
     const SnapEntry *e = g_ptr_array_index(idx->entries, g_array_index(matches, guint, i));
@@ -1583,6 +1617,8 @@ BtLinkResolution *bt_link_resolve(const BtIndexSnapshot *idx, const char *source
     RankedCand rc = {
       .entry = e,
       .same_dir = sdir,
+      .in_source_subtree = dir_is_in_subtree(cdir, source_dir, idx->case_sensitive),
+      .has_dot_segment = relpath_has_dot_segment(e->relpath),
       .depth = count_slashes(e->relpath),
     };
     g_array_append_val(ranked, rc);
