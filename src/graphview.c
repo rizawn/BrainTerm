@@ -333,7 +333,7 @@ BtGraphView *bt_graphview_new(BtGraphOpenNoteFn on_open, BtGraphOpenTermFn on_op
   gtk_widget_set_name(gv->area, "bt-graph-area");
   gtk_widget_set_hexpand(gv->area, TRUE);
   gtk_widget_set_vexpand(gv->area, TRUE);
-  gtk_widget_set_size_request(gv->area, 280, 200);
+  gtk_widget_set_size_request(gv->area, 200, 160);
   gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(gv->area), on_draw, gv, NULL);
   g_signal_connect(gv->area, "map", G_CALLBACK(on_area_map), gv);
   g_signal_connect(gv->area, "destroy", G_CALLBACK(on_area_destroy), gv);

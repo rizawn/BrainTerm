@@ -788,7 +788,7 @@ BtTerminal *bt_terminal_new(BtTerminalFullscreenFn on_fullscreen, BtTerminalStat
   gtk_widget_set_hexpand(t->drawing_area, TRUE);
   gtk_widget_set_vexpand(t->drawing_area, TRUE);
   gtk_widget_set_focusable(t->drawing_area, TRUE);
-  gtk_widget_set_size_request(t->drawing_area, 320, 160);
+  gtk_widget_set_size_request(t->drawing_area, 200, 140);
   gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(t->drawing_area), on_draw, t, NULL);
   g_signal_connect(t->drawing_area, "resize", G_CALLBACK(on_area_resize), t);
 

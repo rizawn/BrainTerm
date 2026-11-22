@@ -37,7 +37,7 @@ BtSessionsPanel *bt_sessionspanel_new(BtSessionActionFn on_resume, BtSessionActi
   gtk_widget_set_name(p->root, "bt-sessions-box");
   gtk_widget_set_hexpand(p->root, TRUE);
   gtk_widget_set_vexpand(p->root, TRUE);
-  gtk_widget_set_size_request(p->root, 240, -1);
+  gtk_widget_set_size_request(p->root, 200, -1);
 
   GtkWidget *hdr = gtk_label_new("Agent Sessions");
   gtk_label_set_xalign(GTK_LABEL(hdr), 0.0f);

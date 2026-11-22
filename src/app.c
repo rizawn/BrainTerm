@@ -36,7 +36,11 @@ struct BtApp {
   GtkWidget *sidebar_vault_lbl;
   GtkWidget *top_paned;
   GtkWidget *right_paned;
-  GtkWidget *graph_toggle;
+  GtkWidget *graph_card;
+  GtkWidget *term_card;
+  GtkWidget *seg_editor;
+  GtkWidget *seg_sessions;
+  GtkWidget *seg_graph;
   BtThemeLoader *themeloader;
 
   BtVault *vault;
@@ -52,7 +56,7 @@ struct BtApp {
 
   BtUiScheme scheme;
   gboolean graph_visible;
-  gboolean syncing_graph_toggle;
+  gboolean syncing_nav;
   gboolean term_fullscreen;
   gboolean allow_launch_without_checkpoint; /* R10: FALSE by default */
 
@@ -229,20 +233,19 @@ static void update_header(BtApp *app)
   if (app->vault != NULL) {
     gchar *base = g_path_get_basename(vault_root(app->vault));
     adw_window_title_set_title(app->win_title, base);
-    gchar *sub = note ? g_strdup_printf("%s %s · %u notes", dirty ? "○" : "●", note,
+    gchar *sub = note ? g_strdup_printf("%s%s · %u notes", dirty ? "● " : "", note,
                                         vault_notes(app->vault)->len)
                       : g_strdup_printf("%u notes", vault_notes(app->vault)->len);
     adw_window_title_set_subtitle(app->win_title, sub);
-    if (app->sidebar_vault_lbl != NULL) {
-      gchar *sl = g_strdup_printf("● %s", base);
-      gtk_label_set_text(GTK_LABEL(app->sidebar_vault_lbl), sl);
-      g_free(sl);
-    }
+    if (app->sidebar_vault_lbl != NULL)
+      gtk_label_set_text(GTK_LABEL(app->sidebar_vault_lbl), base);
     g_free(sub);
     g_free(base);
   } else {
     adw_window_title_set_title(app->win_title, "BrainTerm");
     adw_window_title_set_subtitle(app->win_title, "No vault open");
+    if (app->sidebar_vault_lbl != NULL)
+      gtk_label_set_text(GTK_LABEL(app->sidebar_vault_lbl), "Vault");
   }
 }
 
@@ -379,18 +382,38 @@ static void ensure_view_stack_visible(BtApp *app)
     gtk_widget_set_visible(GTK_WIDGET(app->view_stack), TRUE);
 }
 
+static void sync_nav_buttons(BtApp *app)
+{
+  if (app == NULL)
+    return;
+  app->syncing_nav = TRUE;
+  const gchar *cur = app->view_stack ? adw_view_stack_get_visible_child_name(app->view_stack) : "editor";
+  if (app->seg_editor != NULL)
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->seg_editor), g_strcmp0(cur, "sessions") != 0);
+  if (app->seg_sessions != NULL)
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->seg_sessions), g_strcmp0(cur, "sessions") == 0);
+  if (app->seg_graph != NULL)
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->seg_graph), app->graph_visible);
+  app->syncing_nav = FALSE;
+}
+
+static void set_term_visible(BtApp *app, gboolean vis)
+{
+  GtkWidget *target = app->term_card ? app->term_card : bt_termtabs_widget(app->tabs);
+  if (target != NULL)
+    gtk_widget_set_visible(target, vis);
+}
+
 static void set_graph_visible(BtApp *app, gboolean vis, gboolean persist)
 {
   app->graph_visible = vis;
   if (vis)
     ensure_view_stack_visible(app);
-  if (app->graphview != NULL)
-    gtk_widget_set_visible(bt_graphview_widget(app->graphview), vis);
-  if (app->graph_toggle != NULL) {
-    app->syncing_graph_toggle = TRUE;
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->graph_toggle), vis);
-    app->syncing_graph_toggle = FALSE;
-  }
+  GtkWidget *target = app->graph_card ? app->graph_card :
+                      (app->graphview ? bt_graphview_widget(app->graphview) : NULL);
+  if (target != NULL)
+    gtk_widget_set_visible(target, vis);
+  sync_nav_buttons(app);
   if (vis && app->graphview != NULL) {
     if (!bt_graphview_has_graph(app->graphview))
       refresh_graph(app, !app->smoke_test);
@@ -401,10 +424,34 @@ static void set_graph_visible(BtApp *app, gboolean vis, gboolean persist)
     save_graph_visible(vis);
 }
 
-static void on_graph_toggle_toggled(GtkToggleButton *btn, gpointer ud)
+static void on_seg_editor_toggled(GtkToggleButton *btn, gpointer ud)
 {
   BtApp *app = ud;
-  if (app->syncing_graph_toggle)
+  if (app->syncing_nav)
+    return;
+  if (gtk_toggle_button_get_active(btn) && app->view_stack != NULL) {
+    ensure_view_stack_visible(app);
+    adw_view_stack_set_visible_child_name(app->view_stack, "editor");
+  }
+  sync_nav_buttons(app);
+}
+
+static void on_seg_sessions_toggled(GtkToggleButton *btn, gpointer ud)
+{
+  BtApp *app = ud;
+  if (app->syncing_nav)
+    return;
+  if (gtk_toggle_button_get_active(btn) && app->view_stack != NULL) {
+    ensure_view_stack_visible(app);
+    adw_view_stack_set_visible_child_name(app->view_stack, "sessions");
+  }
+  sync_nav_buttons(app);
+}
+
+static void on_seg_graph_toggled(GtkToggleButton *btn, gpointer ud)
+{
+  BtApp *app = ud;
+  if (app->syncing_nav)
     return;
   set_graph_visible(app, gtk_toggle_button_get_active(btn), TRUE);
 }
@@ -414,6 +461,7 @@ static void on_view_stack_page_changed(GObject *obj, GParamSpec *pspec, gpointer
   (void)pspec;
   BtApp *app = ud;
   const gchar *name = adw_view_stack_get_visible_child_name(ADW_VIEW_STACK(obj));
+  sync_nav_buttons(app);
   if (name == NULL)
     return;
   if (!app->smoke_test)
@@ -554,7 +602,7 @@ static void launch_agent(BtApp *app, BtAgentKind kind)
   gchar *cmd = bt_agents_format_launch_cmd(kind, active_rel ? active_rel : "this vault");
   bt_termtabs_write_active(app->tabs, (const guint8 *)cmd, strlen(cmd));
   g_free(cmd);
-  gtk_widget_set_visible(bt_termtabs_widget(app->tabs), TRUE);
+  set_term_visible(app, TRUE);
   bt_termtabs_focus_active(app->tabs);
 }
 
@@ -582,7 +630,7 @@ static void on_tree_open_term(const gchar *rel_dir, gpointer ud)
     g_error_free(err);
     return;
   }
-  gtk_widget_set_visible(bt_termtabs_widget(app->tabs), TRUE);
+  set_term_visible(app, TRUE);
 }
 
 static void on_editor_save(const gchar *relpath, const gchar *text, gsize length, gpointer ud)
@@ -656,7 +704,7 @@ static void on_session_resume(const gchar *session_id, gpointer ud)
   }
   if (s->resume_cmd != NULL && s->resume_cmd[0] != '\0')
     bt_termtabs_write_active(app->tabs, (const guint8 *)s->resume_cmd, strlen(s->resume_cmd));
-  gtk_widget_set_visible(bt_termtabs_widget(app->tabs), TRUE);
+  set_term_visible(app, TRUE);
 }
 
 static void on_session_rollback(const gchar *session_id, gpointer ud)
@@ -833,7 +881,7 @@ static void on_term_fullscreen(gpointer ud)
   adw_overlay_split_view_set_show_sidebar(app->split_view, !app->term_fullscreen);
   if (app->top_paned != NULL)
     gtk_widget_set_visible(app->top_paned, !app->term_fullscreen);
-  gtk_widget_set_visible(bt_termtabs_widget(app->tabs), TRUE);
+  set_term_visible(app, TRUE);
   bt_termtabs_focus_active(app->tabs);
 }
 
@@ -904,7 +952,7 @@ static void on_ask_send_agent(const gchar *cmd_line, gpointer ud)
   if (bt_termtabs_count(app->tabs) == 0)
     bt_termtabs_open(app->tabs, app->vault, NULL, NULL, NULL, NULL);
   bt_termtabs_write_active(app->tabs, (const guint8 *)cmd_line, strlen(cmd_line));
-  gtk_widget_set_visible(bt_termtabs_widget(app->tabs), TRUE);
+  set_term_visible(app, TRUE);
   bt_termtabs_focus_active(app->tabs);
 }
 
@@ -964,11 +1012,11 @@ static void act_toggle_terminal(GSimpleAction *a, GVariant *p, gpointer ud)
   (void)a; (void)p;
   BtApp *app = ud;
   if (app->tabs == NULL) return;
-  GtkWidget *tw = bt_termtabs_widget(app->tabs);
+  GtkWidget *tw = app->term_card ? app->term_card : bt_termtabs_widget(app->tabs);
   gboolean vis = !gtk_widget_get_visible(tw);
   if (!vis && app->term_fullscreen)
     on_term_fullscreen(app);
-  gtk_widget_set_visible(tw, vis);
+  set_term_visible(app, vis);
   if (vis) bt_termtabs_focus_active(app->tabs);
 }
 
@@ -1237,6 +1285,32 @@ static GMenu *build_agent_menu(void)
   return m;
 }
 
+static GtkWidget *wrap_in_card(GtkWidget *child, const gchar *name)
+{
+  GtkWidget *card = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+  if (name != NULL)
+    gtk_widget_set_name(card, name);
+  gtk_widget_add_css_class(card, "bt-card");
+  gtk_widget_set_overflow(card, GTK_OVERFLOW_HIDDEN);
+  gtk_widget_set_hexpand(card, TRUE);
+  gtk_widget_set_vexpand(card, TRUE);
+  gtk_box_append(GTK_BOX(card), child);
+  return card;
+}
+
+static GtkWidget *make_nav_toggle(const gchar *icon_name, const gchar *label, const gchar *tooltip)
+{
+  GtkWidget *btn = gtk_toggle_button_new();
+  GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+  GtkWidget *img = gtk_image_new_from_icon_name(icon_name);
+  gtk_image_set_pixel_size(GTK_IMAGE(img), 16);
+  gtk_box_append(GTK_BOX(box), img);
+  gtk_box_append(GTK_BOX(box), gtk_label_new(label));
+  gtk_button_set_child(GTK_BUTTON(btn), box);
+  gtk_widget_set_tooltip_text(btn, tooltip);
+  return btn;
+}
+
 static void on_activate(GtkApplication *gtk_app, gpointer ud)
 {
   BtApp *app = ud;
@@ -1252,12 +1326,16 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
   gtk_window_set_default_size(app->window, 1280, 800);
   g_signal_connect(app->window, "close-request", G_CALLBACK(on_window_close), app);
 
-  /* Single flat AdwHeaderBar (§B.3–B.4): left = sidebar + vault title; center = empty; right = switcher + Agent + menu */
+  /* Header bar: left = sidebar + vault title; right = segmented nav + Agent + menu + Win11 controls */
   GtkWidget *header = adw_header_bar_new();
   gtk_widget_set_name(header, "bt-header");
+  adw_header_bar_set_show_start_title_buttons(ADW_HEADER_BAR(header), FALSE);
+  adw_header_bar_set_show_end_title_buttons(ADW_HEADER_BAR(header), TRUE);
+  adw_header_bar_set_decoration_layout(ADW_HEADER_BAR(header), ":minimize,maximize,close");
   adw_header_bar_set_title_widget(ADW_HEADER_BAR(header), gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0));
 
-  GtkWidget *sb_btn = gtk_button_new_from_icon_name("sidebar-show-symbolic");
+  GtkWidget *sb_btn = gtk_button_new_from_icon_name("bt-sidebar-symbolic");
+  gtk_widget_add_css_class(sb_btn, "bt-iconbtn");
   gtk_widget_set_tooltip_text(sb_btn, "Toggle Sidebar (F9)");
   gtk_actionable_set_action_name(GTK_ACTIONABLE(sb_btn), "app.toggle-sidebar");
   adw_header_bar_pack_start(ADW_HEADER_BAR(header), sb_btn);
@@ -1265,23 +1343,31 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
   app->win_title = ADW_WINDOW_TITLE(adw_window_title_new("BrainTerm", "No vault open"));
   adw_header_bar_pack_start(ADW_HEADER_BAR(header), GTK_WIDGET(app->win_title));
 
-  /* Right side: MenuButton, Agent SplitButton, ViewSwitcher */
+  /* Right side: MenuButton, Agent SplitButton, unified Segmented Control */
   GtkWidget *menu_btn = gtk_menu_button_new();
-  gtk_menu_button_set_icon_name(GTK_MENU_BUTTON(menu_btn), "open-menu-symbolic");
+  gtk_widget_add_css_class(menu_btn, "bt-iconbtn");
+  gtk_menu_button_set_icon_name(GTK_MENU_BUTTON(menu_btn), "bt-menu-symbolic");
+  gtk_widget_set_tooltip_text(menu_btn, "Menu");
   GMenu *pmenu = build_primary_menu();
   gtk_menu_button_set_menu_model(GTK_MENU_BUTTON(menu_btn), G_MENU_MODEL(pmenu));
   g_object_unref(pmenu);
   adw_header_bar_pack_end(ADW_HEADER_BAR(header), menu_btn);
 
   app->agent_split = ADW_SPLIT_BUTTON(adw_split_button_new());
-  adw_split_button_set_label(app->agent_split, "Agent");
+  GtkWidget *ab_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+  GtkWidget *ab_img = gtk_image_new_from_icon_name("bt-agent-symbolic");
+  gtk_image_set_pixel_size(GTK_IMAGE(ab_img), 16);
+  gtk_box_append(GTK_BOX(ab_box), ab_img);
+  gtk_box_append(GTK_BOX(ab_box), gtk_label_new("Agent"));
+  adw_split_button_set_child(app->agent_split, ab_box);
+  gtk_widget_set_tooltip_text(GTK_WIDGET(app->agent_split), "Launch AI Agent (auto-checkpoint)");
   gtk_actionable_set_action_name(GTK_ACTIONABLE(app->agent_split), "app.launch-claude");
   GMenu *amenu = build_agent_menu();
   adw_split_button_set_menu_model(app->agent_split, G_MENU_MODEL(amenu));
   g_object_unref(amenu);
   adw_header_bar_pack_end(ADW_HEADER_BAR(header), GTK_WIDGET(app->agent_split));
 
-  /* Content views inside AdwViewStack: Editor / Graph / Sessions */
+  /* Content views */
   app->tree = bt_filetree_new(on_tree_select, on_tree_open_term, app);
   app->editor = bt_editorpane_new(on_editor_save, on_editor_link, on_editor_dirty, app);
   bt_editorpane_set_conflict_cbs(app->editor, on_editor_conflict_diff, on_editor_conflict_reload);
@@ -1295,69 +1381,81 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
   gtk_widget_set_hexpand(GTK_WIDGET(app->view_stack), TRUE);
   gtk_widget_set_vexpand(GTK_WIDGET(app->view_stack), TRUE);
   adw_view_stack_add_titled_with_icon(app->view_stack, bt_editorpane_widget(app->editor),
-                                      "editor", "Editor", "document-edit-symbolic");
+                                      "editor", "Editor", "bt-editor-symbolic");
   adw_view_stack_add_titled_with_icon(app->view_stack, bt_sessionspanel_widget(app->sessions_panel),
-                                      "sessions", "Sessions", "utilities-terminal-symbolic");
+                                      "sessions", "Sessions", "bt-sessions-symbolic");
 
   gchar *saved_page = app->smoke_test ? g_strdup("editor") : bt_app_load_saved_page();
   const gchar *stack_page = (g_strcmp0(saved_page, "sessions") == 0) ? "sessions" : "editor";
   adw_view_stack_set_visible_child_name(app->view_stack, stack_page);
 
-  /* Dual-pane toggle button for the side-by-side Brain Graph on the right. */
   app->graph_visible = app->smoke_test ? TRUE : load_saved_graph_visible();
   if (g_strcmp0(saved_page, "graph") == 0)
     app->graph_visible = TRUE;
 
-  app->graph_toggle = gtk_toggle_button_new();
-  GtkWidget *gbtn_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
-  gtk_box_append(GTK_BOX(gbtn_box), gtk_image_new_from_icon_name("network-workgroup-symbolic"));
-  gtk_box_append(GTK_BOX(gbtn_box), gtk_label_new("Graph"));
-  gtk_button_set_child(GTK_BUTTON(app->graph_toggle), gbtn_box);
-  gtk_widget_add_css_class(app->graph_toggle, "bt-hairline");
-  gtk_widget_set_tooltip_text(app->graph_toggle, "Toggle Side-by-Side Graph (Ctrl+G)");
-  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app->graph_toggle), app->graph_visible);
-  g_signal_connect(app->graph_toggle, "toggled", G_CALLBACK(on_graph_toggle_toggled), app);
-  adw_header_bar_pack_end(ADW_HEADER_BAR(header), app->graph_toggle);
+  /* Single segmented control: Editor | Sessions | Graph (Graph toggles side-by-side split) */
+  GtkWidget *seg = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
+  gtk_widget_set_name(seg, "bt-segmented");
+  gtk_widget_add_css_class(seg, "bt-segmented");
+  app->seg_editor = make_nav_toggle("bt-editor-symbolic", "Editor", "Markdown Editor");
+  app->seg_sessions = make_nav_toggle("bt-sessions-symbolic", "Sessions", "Agent Sessions");
+  app->seg_graph = make_nav_toggle("bt-graph-symbolic", "Graph", "Toggle Side-by-Side Graph (Ctrl+G)");
+  gtk_box_append(GTK_BOX(seg), app->seg_editor);
+  gtk_box_append(GTK_BOX(seg), app->seg_sessions);
+  gtk_box_append(GTK_BOX(seg), app->seg_graph);
+  sync_nav_buttons(app);
+  g_signal_connect(app->seg_editor, "toggled", G_CALLBACK(on_seg_editor_toggled), app);
+  g_signal_connect(app->seg_sessions, "toggled", G_CALLBACK(on_seg_sessions_toggled), app);
+  g_signal_connect(app->seg_graph, "toggled", G_CALLBACK(on_seg_graph_toggled), app);
+  adw_header_bar_pack_end(ADW_HEADER_BAR(header), seg);
 
-  GtkWidget *switcher = adw_view_switcher_new();
-  adw_view_switcher_set_stack(ADW_VIEW_SWITCHER(switcher), app->view_stack);
-  adw_view_switcher_set_policy(ADW_VIEW_SWITCHER(switcher), ADW_VIEW_SWITCHER_POLICY_WIDE);
-  adw_header_bar_pack_end(ADW_HEADER_BAR(header), switcher);
+  /* Rounded cards on bg-base with 8px transparent hover-accent paned splitters */
+  GtkWidget *left_card = wrap_in_card(GTK_WIDGET(app->view_stack), "bt-editor-card");
+  app->graph_card = wrap_in_card(bt_graphview_widget(app->graphview), "bt-graph-card");
+  app->term_card = wrap_in_card(bt_termtabs_widget(app->tabs), "bt-term-card");
 
-  /* Top dual-pane split: Editor/Sessions (left) | Brain Graph (right) */
   app->top_paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
   gtk_widget_set_name(app->top_paned, "bt-top-paned");
+  gtk_widget_add_css_class(app->top_paned, "bt-hsplit");
   gtk_widget_set_hexpand(app->top_paned, TRUE);
   gtk_widget_set_vexpand(app->top_paned, TRUE);
-  gtk_paned_set_start_child(GTK_PANED(app->top_paned), GTK_WIDGET(app->view_stack));
-  gtk_paned_set_end_child(GTK_PANED(app->top_paned), bt_graphview_widget(app->graphview));
-  gtk_paned_set_position(GTK_PANED(app->top_paned), 620);
+  gtk_paned_set_start_child(GTK_PANED(app->top_paned), left_card);
+  gtk_paned_set_end_child(GTK_PANED(app->top_paned), app->graph_card);
+  gtk_paned_set_position(GTK_PANED(app->top_paned), 610);
   gtk_paned_set_resize_start_child(GTK_PANED(app->top_paned), TRUE);
   gtk_paned_set_resize_end_child(GTK_PANED(app->top_paned), TRUE);
   gtk_paned_set_shrink_start_child(GTK_PANED(app->top_paned), FALSE);
   gtk_paned_set_shrink_end_child(GTK_PANED(app->top_paned), FALSE);
-  gtk_widget_set_visible(bt_graphview_widget(app->graphview), app->graph_visible);
+  gtk_widget_set_visible(app->graph_card, app->graph_visible);
 
-  /* Right workspace: Dual-pane Editor|Graph (top) / Multi-tab Terminal (bottom) */
   app->right_paned = gtk_paned_new(GTK_ORIENTATION_VERTICAL);
   gtk_widget_set_name(app->right_paned, "bt-right-paned");
+  gtk_widget_add_css_class(app->right_paned, "bt-vsplit");
   gtk_widget_set_hexpand(app->right_paned, TRUE);
   gtk_widget_set_vexpand(app->right_paned, TRUE);
+  gtk_widget_set_margin_start(app->right_paned, 8);
+  gtk_widget_set_margin_end(app->right_paned, 8);
+  gtk_widget_set_margin_bottom(app->right_paned, 8);
   gtk_paned_set_start_child(GTK_PANED(app->right_paned), app->top_paned);
-  gtk_paned_set_end_child(GTK_PANED(app->right_paned), bt_termtabs_widget(app->tabs));
+  gtk_paned_set_end_child(GTK_PANED(app->right_paned), app->term_card);
   gtk_paned_set_position(GTK_PANED(app->right_paned), 460);
   gtk_paned_set_resize_start_child(GTK_PANED(app->right_paned), TRUE);
   gtk_paned_set_resize_end_child(GTK_PANED(app->right_paned), TRUE);
   gtk_paned_set_shrink_start_child(GTK_PANED(app->right_paned), FALSE);
   gtk_paned_set_shrink_end_child(GTK_PANED(app->right_paned), FALSE);
 
-  /* Collapsible notes sidebar (§B.5) */
+  /* Collapsible notes sidebar card */
   GtkWidget *sb_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
   gtk_widget_set_name(sb_box, "bt-sidebar");
+  gtk_widget_add_css_class(sb_box, "bt-card");
   gtk_widget_add_css_class(sb_box, "bt-sidebar");
-  app->sidebar_vault_lbl = gtk_label_new("● vault");
+  gtk_widget_set_overflow(sb_box, GTK_OVERFLOW_HIDDEN);
+  gtk_widget_set_margin_start(sb_box, 8);
+  gtk_widget_set_margin_bottom(sb_box, 8);
+  app->sidebar_vault_lbl = gtk_label_new("Vault");
   gtk_label_set_xalign(GTK_LABEL(app->sidebar_vault_lbl), 0.0f);
   gtk_widget_add_css_class(app->sidebar_vault_lbl, "bt-sidebar-header");
+  gtk_widget_add_css_class(app->sidebar_vault_lbl, "bt-vault-name");
   gtk_box_append(GTK_BOX(sb_box), app->sidebar_vault_lbl);
   gtk_box_append(GTK_BOX(sb_box), bt_filetree_widget(app->tree));
 
@@ -1365,7 +1463,8 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
   gtk_widget_set_name(GTK_WIDGET(app->split_view), "bt-split-view");
   adw_overlay_split_view_set_sidebar(app->split_view, sb_box);
   adw_overlay_split_view_set_content(app->split_view, app->right_paned);
-  adw_overlay_split_view_set_max_sidebar_width(app->split_view, 260.0);
+  adw_overlay_split_view_set_min_sidebar_width(app->split_view, 180.0);
+  adw_overlay_split_view_set_max_sidebar_width(app->split_view, 240.0);
 
   app->toast_overlay = ADW_TOAST_OVERLAY(adw_toast_overlay_new());
   adw_toast_overlay_set_child(app->toast_overlay, GTK_WIDGET(app->split_view));

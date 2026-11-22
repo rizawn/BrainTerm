@@ -189,7 +189,7 @@ BtFileTree *bt_filetree_new(BtFileTreeSelectFn on_select, BtFileTreeOpenTermFn o
   gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(tree->scrolled), GTK_POLICY_AUTOMATIC,
                                  GTK_POLICY_AUTOMATIC);
   gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(tree->scrolled), tree->list_view);
-  gtk_widget_set_size_request(tree->scrolled, 220, -1);
+  gtk_widget_set_size_request(tree->scrolled, 190, -1);
 
   return tree;
 }
