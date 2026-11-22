@@ -7,6 +7,7 @@ core_sources = files(
   'vault.c',
   'noteutil.c',
   'linkresolve.c',
+  'navhistory.c',
   'vtermbridge.c',
   'checkpoint.c',
   'agents.c',

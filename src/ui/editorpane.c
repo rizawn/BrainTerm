@@ -99,6 +99,12 @@ struct BtEditorPane {
   gdouble last_click_x;
   gdouble last_click_y;
   gboolean has_last_click;
+
+  /* Scroll position tracking & asynchronous restoration (L2-6). */
+  gdouble tracked_scroll_y;
+  gdouble pending_scroll_y;
+  gboolean has_pending_scroll;
+  guint scroll_idle_id;
 };
 
 /* ----------------------------------------------------- autosave & dirty -- */
@@ -1013,10 +1019,52 @@ static void on_scrolled_page_size(GObject *obj, GParamSpec *pspec, gpointer ud)
   update_column_margins(ud);
 }
 
-static void on_vscroll_changed(GtkAdjustment *adj, gpointer ud)
+static gboolean apply_pending_scroll(BtEditorPane *p)
+{
+  if (p == NULL || !p->has_pending_scroll || p->scrolled == NULL)
+    return TRUE;
+  GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(p->scrolled));
+  if (vadj == NULL)
+    return TRUE;
+  gdouble upper = gtk_adjustment_get_upper(vadj);
+  gdouble page = gtk_adjustment_get_page_size(vadj);
+  if (p->pending_scroll_y <= 0.0) {
+    gtk_adjustment_set_value(vadj, 0.0);
+    p->tracked_scroll_y = 0.0;
+    p->has_pending_scroll = FALSE;
+    return TRUE;
+  }
+  if (upper > page) {
+    gdouble clamped = CLAMP(p->pending_scroll_y, 0.0, upper - page);
+    gtk_adjustment_set_value(vadj, clamped);
+    p->tracked_scroll_y = clamped;
+    if (upper - page + 0.5 >= p->pending_scroll_y) {
+      p->has_pending_scroll = FALSE;
+      return TRUE;
+    }
+  }
+  return FALSE;
+}
+
+static gboolean on_scroll_idle(gpointer ud)
+{
+  BtEditorPane *p = ud;
+  p->scroll_idle_id = 0;
+  apply_pending_scroll(p);
+  return G_SOURCE_REMOVE;
+}
+
+static void on_vadj_changed(GtkAdjustment *adj, gpointer ud)
 {
   (void)adj;
+  apply_pending_scroll((BtEditorPane *)ud);
+}
+
+static void on_vscroll_changed(GtkAdjustment *adj, gpointer ud)
+{
   BtEditorPane *p = ud;
+  if (!p->has_pending_scroll && adj != NULL)
+    p->tracked_scroll_y = gtk_adjustment_get_value(adj);
   if (p->decor_area != NULL)
     gtk_widget_queue_draw(p->decor_area);
 }
@@ -1808,8 +1856,10 @@ BtEditorPane *bt_editorpane_new(BtEditorSaveFn on_save, BtEditorLinkFn on_link,
   if (hadj != NULL)
     g_signal_connect(hadj, "notify::page-size", G_CALLBACK(on_scrolled_page_size), pane);
   GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(pane->scrolled));
-  if (vadj != NULL)
+  if (vadj != NULL) {
     g_signal_connect(vadj, "value-changed", G_CALLBACK(on_vscroll_changed), pane);
+    g_signal_connect(vadj, "changed", G_CALLBACK(on_vadj_changed), pane);
+  }
 
   pane->decor_area = gtk_drawing_area_new();
   gtk_widget_set_can_target(pane->decor_area, FALSE);
@@ -2036,6 +2086,8 @@ gboolean bt_editorpane_scroll_to_anchor(BtEditorPane *pane, const gchar *anchor,
       }
     }
     gtk_text_view_scroll_to_iter(GTK_TEXT_VIEW(pane->view), &hs, 0.0, TRUE, 0.0, 0.33);
+    pane->tracked_scroll_y = ty;
+    pane->has_pending_scroll = FALSE;
   }
   if (out_target_y != NULL)
     *out_target_y = ty;
@@ -2123,6 +2175,10 @@ void bt_editorpane_free(BtEditorPane *pane)
   clear_anchor_flash(pane);
   clear_hover_state(pane);
   cancel_autosave(pane);
+  if (pane->scroll_idle_id != 0) {
+    g_source_remove(pane->scroll_idle_id);
+    pane->scroll_idle_id = 0;
+  }
   g_clear_pointer(&pane->link_spans, g_array_unref);
   g_free(pane->relpath);
   g_clear_object(&pane->buffer);
@@ -2145,7 +2201,19 @@ void bt_editorpane_load(BtEditorPane *pane, const gchar *relpath, const gchar *t
   clear_anchor_flash(pane);
   clear_hover_state(pane);
   cancel_autosave(pane);
+  if (pane->scroll_idle_id != 0) {
+    g_source_remove(pane->scroll_idle_id);
+    pane->scroll_idle_id = 0;
+  }
   pane->has_last_click = FALSE;
+  pane->tracked_scroll_y = 0.0;
+  pane->pending_scroll_y = 0.0;
+  pane->has_pending_scroll = FALSE;
+  if (pane->scrolled != NULL) {
+    GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(pane->scrolled));
+    if (vadj != NULL)
+      gtk_adjustment_set_value(vadj, 0.0);
+  }
   g_free(pane->relpath);
   pane->relpath = g_strdup(relpath);
 
@@ -2181,7 +2249,14 @@ void bt_editorpane_clear(BtEditorPane *pane)
   clear_anchor_flash(pane);
   clear_hover_state(pane);
   cancel_autosave(pane);
+  if (pane->scroll_idle_id != 0) {
+    g_source_remove(pane->scroll_idle_id);
+    pane->scroll_idle_id = 0;
+  }
   pane->has_last_click = FALSE;
+  pane->tracked_scroll_y = 0.0;
+  pane->pending_scroll_y = 0.0;
+  pane->has_pending_scroll = FALSE;
   g_clear_pointer(&pane->relpath, g_free);
   pane->loading = TRUE;
   gtk_text_buffer_set_text(GTK_TEXT_BUFFER(pane->buffer), "", 0);
@@ -2316,6 +2391,62 @@ gsize bt_editorpane_caret_byte_offset(const BtEditorPane *pane)
 void bt_editorpane_set_caret_byte_offset(BtEditorPane *pane, gsize byte_offset)
 {
   place_caret_byte_in_buffer(pane, byte_offset);
+}
+
+gdouble bt_editorpane_scroll_y(const BtEditorPane *pane)
+{
+  if (pane == NULL)
+    return 0.0;
+  if (pane->has_pending_scroll)
+    return pane->pending_scroll_y;
+  if (pane->scrolled != NULL) {
+    GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(pane->scrolled));
+    if (vadj != NULL) {
+      gdouble upper = gtk_adjustment_get_upper(vadj);
+      gdouble page = gtk_adjustment_get_page_size(vadj);
+      gdouble val = gtk_adjustment_get_value(vadj);
+      if (val > 0.0 || upper > page)
+        return val;
+    }
+  }
+  return pane->tracked_scroll_y;
+}
+
+void bt_editorpane_set_scroll_y(BtEditorPane *pane, gdouble scroll_y)
+{
+  if (pane == NULL)
+    return;
+  if (scroll_y < 0.0)
+    scroll_y = 0.0;
+  pane->tracked_scroll_y = scroll_y;
+  pane->pending_scroll_y = scroll_y;
+  pane->has_pending_scroll = TRUE;
+  if (!apply_pending_scroll(pane) && pane->scroll_idle_id == 0)
+    pane->scroll_idle_id = g_idle_add(on_scroll_idle, pane);
+}
+
+gdouble bt_editorpane_viewport_height(const BtEditorPane *pane)
+{
+  if (pane == NULL)
+    return 0.0;
+  if (pane->scrolled != NULL) {
+    GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(pane->scrolled));
+    if (vadj != NULL) {
+      gdouble page = gtk_adjustment_get_page_size(vadj);
+      if (page > 1.0)
+        return page;
+    }
+    int h = gtk_widget_get_height(pane->scrolled);
+    if (h > 1)
+      return (gdouble)h;
+  }
+  if (pane->view != NULL) {
+    GdkRectangle vis = {0};
+    gtk_text_view_get_visible_rect(GTK_TEXT_VIEW(pane->view), &vis);
+    if (vis.height > 1)
+      return (gdouble)vis.height;
+  }
+  return 600.0;
 }
 
 gboolean bt_editorpane_simulate_click(BtEditorPane *pane, gsize target_byte_offset, guint button,

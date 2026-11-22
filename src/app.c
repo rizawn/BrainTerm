@@ -9,6 +9,7 @@
 #include "graphview.h"
 #include "index.h"
 #include "linkresolve.h"
+#include "navhistory.h"
 #include "noteutil.h"
 #include "organizer.h"
 #include "sessions.h"
@@ -24,6 +25,7 @@
 
 #include <adwaita.h>
 #include <gtksourceview/gtksource.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 #ifdef G_OS_WIN32
@@ -95,6 +97,9 @@ struct BtApp {
   gchar *active_confirm_detail;
   BtLinkResolution *pending_confirm_res;
   gboolean pending_confirm_dont_ask;
+
+  BtNavHistory *nav;
+  gboolean nav_replaying;
 };
 
 /* ----------------------------------------------------- state.ini (§7.5) -- */
@@ -732,8 +737,21 @@ gboolean bt_app_activate_link(BtApp *app, const gchar *raw_target)
     bt_app_set_statusbar_notice(app, pol.reason_msg ? pol.reason_msg : "Blocked");
     ok = FALSE;
   } else if (res->kind == BT_LINK_KIND_SAME_NOTE) {
-    if (res->anchor != NULL && app->editor != NULL)
-      bt_editorpane_scroll_to_anchor(app->editor, res->anchor, NULL);
+    if (res->anchor != NULL && app->editor != NULL) {
+      gdouble old_scroll = bt_editorpane_scroll_y(app->editor);
+      gsize old_caret = bt_editorpane_caret_byte_offset(app->editor);
+      gdouble vh = bt_editorpane_viewport_height(app->editor);
+      gdouble target_y = old_scroll;
+      if (bt_editorpane_scroll_to_anchor(app->editor, res->anchor, &target_y)) {
+        gdouble new_scroll = bt_editorpane_scroll_y(app->editor);
+        gsize new_caret = bt_editorpane_caret_byte_offset(app->editor);
+        if (vh > 0.0 && fabs(new_scroll - old_scroll) >= vh &&
+            !app->nav_replaying && app->nav != NULL && src != NULL) {
+          bt_nav_history_push_jump(app->nav, src, old_caret, old_scroll,
+                                   src, new_caret, new_scroll);
+        }
+      }
+    }
     bt_app_set_statusbar_notice(app, "");
   } else if (res->kind == BT_LINK_KIND_NOTE) {
     g_autoptr(GError) nerr = NULL;
@@ -741,8 +759,14 @@ gboolean bt_app_activate_link(BtApp *app, const gchar *raw_target)
     if (!ok) {
       bt_app_set_statusbar_notice(app, nerr ? nerr->message : "Cannot open note");
     } else {
-      if (res->anchor != NULL && app->editor != NULL)
-        bt_editorpane_scroll_to_anchor(app->editor, res->anchor, NULL);
+      if (res->anchor != NULL && app->editor != NULL) {
+        gdouble ty = 0.0;
+        if (bt_editorpane_scroll_to_anchor(app->editor, res->anchor, &ty) &&
+            !app->nav_replaying && app->nav != NULL) {
+          bt_nav_history_update_current(app->nav, res->path,
+                                        bt_editorpane_caret_byte_offset(app->editor), ty);
+        }
+      }
       bt_app_set_statusbar_notice(app, "");
     }
   } else if (pol.action == BT_LINK_OPEN_ALLOW) {
@@ -856,6 +880,8 @@ gboolean bt_app_open_vault(BtApp *app, const gchar *path, GError **error)
 
   if (app->editor != NULL)
     bt_editorpane_clear(app->editor);
+  if (app->nav != NULL)
+    bt_nav_history_clear(app->nav);
   if (app->tree != NULL)
     bt_filetree_populate(app->tree, app->vault);
   rebuild_link_snapshot(app);
@@ -1026,11 +1052,105 @@ gboolean bt_app_open_note(BtApp *app, const gchar *relpath, GError **error)
     return FALSE;
   }
 
+  if (!app->nav_replaying && app->nav != NULL) {
+    const gchar *prev_rel = app->editor ? bt_editorpane_relpath(app->editor) : NULL;
+    gsize prev_caret = app->editor ? bt_editorpane_caret_byte_offset(app->editor) : 0;
+    gdouble prev_scroll = app->editor ? bt_editorpane_scroll_y(app->editor) : 0.0;
+    bt_nav_history_push_jump(app->nav, prev_rel, prev_caret, prev_scroll, relpath, 0, 0.0);
+  }
+
   bt_editorpane_load(app->editor, relpath, text, len);
   bt_filetree_select_path(app->tree, relpath);
   update_header(app);
   g_free(text);
   return TRUE;
+}
+
+static gboolean nav_entry_exists_in_vault(BtVault *vault, const gchar *relpath)
+{
+  if (vault == NULL || relpath == NULL || relpath[0] == '\0')
+    return FALSE;
+  g_autofree gchar *abs = vault_resolve(vault, relpath, NULL);
+  return abs != NULL && g_file_test(abs, G_FILE_TEST_IS_REGULAR);
+}
+
+static gboolean navigate_history_step(BtApp *app, gint dir)
+{
+  g_return_val_if_fail(app != NULL, FALSE);
+  if (app->vault == NULL || app->nav == NULL || app->editor == NULL)
+    return FALSE;
+
+  const gchar *cur_rel = bt_editorpane_relpath(app->editor);
+  gsize cur_caret = bt_editorpane_caret_byte_offset(app->editor);
+  gdouble cur_scroll = bt_editorpane_scroll_y(app->editor);
+  if (cur_rel != NULL)
+    bt_nav_history_update_current(app->nav, cur_rel, cur_caret, cur_scroll);
+
+  if (dir < 0 && !bt_nav_history_can_go_back(app->nav))
+    return FALSE;
+  if (dir > 0 && !bt_nav_history_can_go_forward(app->nav))
+    return FALSE;
+
+  /* Flush dirty edits BEFORE mutating history cursor so write errors abort cleanly. */
+  if (bt_editorpane_is_dirty(app->editor) && !bt_editorpane_flush_save(app->editor)) {
+    bt_app_set_statusbar_notice(app, "Save failed — navigation aborted");
+    return FALSE;
+  }
+
+  gint idx = bt_nav_history_cursor(app->nav) + dir;
+  while (idx >= 0 && (gsize)idx < bt_nav_history_count(app->nav)) {
+    const BtNavEntry *ent = bt_nav_history_at(app->nav, (gsize)idx);
+    if (ent == NULL || !nav_entry_exists_in_vault(app->vault, ent->relpath)) {
+      bt_nav_history_remove_at(app->nav, (gsize)idx);
+      if (dir < 0)
+        idx--;
+      continue;
+    }
+    g_autofree gchar *target_rel = g_strdup(ent->relpath);
+    gsize target_caret = ent->caret_offset;
+    gdouble target_scroll = ent->scroll_y;
+    gboolean need_reload = (g_strcmp0(cur_rel, target_rel) != 0);
+
+    app->nav_replaying = TRUE;
+    gboolean ok = TRUE;
+    if (need_reload) {
+      GError *err = NULL;
+      ok = bt_app_open_note(app, target_rel, &err);
+      if (!ok) {
+        bt_app_set_statusbar_notice(app, err ? err->message : "Cannot open note");
+        g_clear_error(&err);
+      }
+    }
+    app->nav_replaying = FALSE;
+
+    if (!ok) {
+      bt_nav_history_remove_at(app->nav, (gsize)idx);
+      if (dir < 0)
+        idx--;
+      continue;
+    }
+
+    bt_nav_history_set_cursor(app->nav, idx);
+    bt_editorpane_set_caret_byte_offset(app->editor, target_caret);
+    bt_editorpane_set_scroll_y(app->editor, target_scroll);
+    return TRUE;
+  }
+  return FALSE;
+}
+
+gboolean bt_app_navigate_back(BtApp *app)
+{
+  return navigate_history_step(app, -1);
+}
+
+gboolean bt_app_navigate_forward(BtApp *app)
+{
+  return navigate_history_step(app, 1);
+}
+
+BtNavHistory *bt_app_nav_history(const BtApp *app)
+{
+  return app ? app->nav : NULL;
 }
 
 gboolean bt_app_open_or_create_wikilink(BtApp *app, const gchar *target, GError **error)
@@ -2222,6 +2342,18 @@ static void act_toggle_graph_debug(GSimpleAction *a, GVariant *p, gpointer ud)
     bt_graphview_toggle_debug_overlay(app->graphview);
 }
 
+static void act_nav_back(GSimpleAction *a, GVariant *p, gpointer ud)
+{
+  (void)a; (void)p;
+  bt_app_navigate_back((BtApp *)ud);
+}
+
+static void act_nav_forward(GSimpleAction *a, GVariant *p, gpointer ud)
+{
+  (void)a; (void)p;
+  bt_app_navigate_forward((BtApp *)ud);
+}
+
 static void act_checkpoint(GSimpleAction *a, GVariant *p, gpointer ud)
 {
   (void)a; (void)p;
@@ -2351,6 +2483,8 @@ static const GActionEntry app_actions[] = {
   {"organize-now", act_organize_now, NULL, NULL, NULL, {0}},
   {"toggle-graph", act_toggle_graph, NULL, NULL, NULL, {0}},
   {"toggle-graph-debug", act_toggle_graph_debug, NULL, NULL, NULL, {0}},
+  {"nav-back", act_nav_back, NULL, NULL, NULL, {0}},
+  {"nav-forward", act_nav_forward, NULL, NULL, NULL, {0}},
   {"preferences", act_preferences, NULL, NULL, NULL, {0}},
   {"about", act_about, NULL, NULL, NULL, {0}},
   {"quit", act_quit, NULL, NULL, NULL, {0}},
@@ -2564,6 +2698,21 @@ static GtkWidget *make_nav_toggle(const gchar *icon_name, const gchar *label, co
   return btn;
 }
 
+static void on_window_nav_mouse_pressed(GtkGestureClick *gesture, gint n_press, gdouble x, gdouble y,
+                                        gpointer ud)
+{
+  (void)n_press; (void)x; (void)y;
+  BtApp *app = ud;
+  guint button = gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(gesture));
+  if (button == 8) {
+    bt_app_navigate_back(app);
+    gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+  } else if (button == 9) {
+    bt_app_navigate_forward(app);
+    gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+  }
+}
+
 static void on_activate(GtkApplication *gtk_app, gpointer ud)
 {
   BtApp *app = ud;
@@ -2580,6 +2729,12 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
   int def_h = (app->capture_h > 200) ? app->capture_h : 800;
   gtk_window_set_default_size(app->window, def_w, def_h);
   g_signal_connect(app->window, "close-request", G_CALLBACK(on_window_close), app);
+
+  GtkGesture *nav_mouse = gtk_gesture_click_new();
+  gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(nav_mouse), 0);
+  gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(nav_mouse), GTK_PHASE_CAPTURE);
+  g_signal_connect(nav_mouse, "pressed", G_CALLBACK(on_window_nav_mouse_pressed), app);
+  gtk_widget_add_controller(GTK_WIDGET(app->window), GTK_EVENT_CONTROLLER(nav_mouse));
 
   /* Header bar: left = sidebar + vault title; right = segmented nav + Agent + menu + Win11 controls */
   GtkWidget *header = adw_header_bar_new();
@@ -2911,6 +3066,8 @@ static void on_startup(GApplication *gapp, gpointer ud)
   static const gchar *const sidebar_accels[] = {"F9", NULL};
   static const gchar *const graph_accels[] = {"<Primary>g", NULL};
   static const gchar *const graph_dbg_accels[] = {"<Primary><Shift>f", NULL};
+  static const gchar *const nav_back_accels[] = {"<Alt>Left", NULL};
+  static const gchar *const nav_forward_accels[] = {"<Alt>Right", NULL};
   static const gchar *const term_accels[] = {"<Primary>grave", NULL};
   static const gchar *const quit_accels[] = {"<Primary>q", NULL};
   gtk_application_set_accels_for_action(GTK_APPLICATION(app->adw_app), "app.save-active", save_accels);
@@ -2923,6 +3080,8 @@ static void on_startup(GApplication *gapp, gpointer ud)
   gtk_application_set_accels_for_action(GTK_APPLICATION(app->adw_app), "app.toggle-sidebar", sidebar_accels);
   gtk_application_set_accels_for_action(GTK_APPLICATION(app->adw_app), "app.toggle-graph", graph_accels);
   gtk_application_set_accels_for_action(GTK_APPLICATION(app->adw_app), "app.toggle-graph-debug", graph_dbg_accels);
+  gtk_application_set_accels_for_action(GTK_APPLICATION(app->adw_app), "app.nav-back", nav_back_accels);
+  gtk_application_set_accels_for_action(GTK_APPLICATION(app->adw_app), "app.nav-forward", nav_forward_accels);
   gtk_application_set_accels_for_action(GTK_APPLICATION(app->adw_app), "app.toggle-terminal", term_accels);
   gtk_application_set_accels_for_action(GTK_APPLICATION(app->adw_app), "app.quit", quit_accels);
 }
@@ -2932,6 +3091,7 @@ BtApp *bt_app_new(void)
   bt_checkpoint_init();
   BtApp *app = g_new0(BtApp, 1);
   bt_agents_detect(&app->agents);
+  app->nav = bt_nav_history_new();
   app->scheme = BT_SCHEME_DARK;
   app->confirm_external_urls = TRUE;
   app->adw_app = adw_application_new("local.brainterm.App", G_APPLICATION_NON_UNIQUE);
@@ -2960,6 +3120,7 @@ void bt_app_free(BtApp *app)
   if (app == NULL)
     return;
   clear_active_confirm(app);
+  g_clear_pointer(&app->nav, bt_nav_history_free);
   if (app->editor != NULL)
     bt_editorpane_set_index_snapshot(app->editor, NULL, NULL);
   g_clear_pointer(&app->link_snap, bt_index_snapshot_free);

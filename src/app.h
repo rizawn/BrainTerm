@@ -5,6 +5,7 @@
 #include <gtk/gtk.h>
 
 #include "linkresolve.h"
+#include "navhistory.h"
 #include "vault.h"
 
 G_BEGIN_DECLS
@@ -35,6 +36,9 @@ gboolean bt_app_open_note(BtApp *app, const gchar *relpath, GError **error);
 gboolean bt_app_activate_link(BtApp *app, const gchar *raw_target);
 gboolean bt_app_open_or_create_wikilink(BtApp *app, const gchar *target, GError **error);
 gboolean bt_app_save_active(BtApp *app, GError **error);
+gboolean bt_app_navigate_back(BtApp *app);
+gboolean bt_app_navigate_forward(BtApp *app);
+BtNavHistory *bt_app_nav_history(const BtApp *app);
 
 void bt_app_show_error(BtApp *app, const gchar *title, const gchar *detail);
 void bt_app_set_status(BtApp *app, const gchar *message);

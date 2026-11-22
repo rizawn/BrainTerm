@@ -57,6 +57,9 @@ const GArray *bt_editorpane_link_spans(const BtEditorPane *pane);
 gboolean bt_editorpane_link_at_offset(const BtEditorPane *pane, gsize byte_offset, BtLinkSpan *out_span);
 gsize bt_editorpane_caret_byte_offset(const BtEditorPane *pane);
 void bt_editorpane_set_caret_byte_offset(BtEditorPane *pane, gsize byte_offset);
+gdouble bt_editorpane_scroll_y(const BtEditorPane *pane);
+void bt_editorpane_set_scroll_y(BtEditorPane *pane, gdouble scroll_y);
+gdouble bt_editorpane_viewport_height(const BtEditorPane *pane);
 gboolean bt_editorpane_simulate_click(BtEditorPane *pane, gsize target_byte_offset, guint button,
                                       gint n_press, gdouble drag_dx, gdouble drag_dy,
                                       GdkModifierType mods);

@@ -6,12 +6,15 @@
 #include <cmocka.h>
 
 #include <adwaita.h>
+#include <glib/gstdio.h>
 #include <gtk/gtk.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
 #include "app.h"
 #include "linkresolve.h"
+#include "navhistory.h"
 #include "testutil.h"
 #include "ui/editorpane.h"
 #include "vault.h"
@@ -552,6 +555,135 @@ static void test_l2_8_unresolved_click_does_not_call_stub_writer(void **state)
   g_free(cfg);
 }
 
+static gchar *make_tall_note(const gchar *title, const gchar *next_link)
+{
+  GString *s = g_string_new(NULL);
+  g_string_append_printf(s, "# %s\nJump to %s\n## NearAnchor\nIntro paragraph.\n",
+                         title, next_link ? next_link : "end");
+  for (int i = 0; i < 80; i++)
+    g_string_append_printf(s, "Line %03d padding text so scrolled window has vertical extent.\n", i);
+  return g_string_free(s, FALSE);
+}
+
+static void test_l2_6_nav_history_5_jumps_and_deleted_skip(void **state)
+{
+  (void)state;
+  if (!gtk_init_check()) {
+    skip();
+    return;
+  }
+  adw_init();
+
+  /* Part A: Pure unit check on BT_NAV_HISTORY_CAP (100). */
+  BtNavHistory *cap = bt_nav_history_new();
+  bt_nav_history_push_jump(cap, NULL, 0, 0.0, "n000.md", 0, 0.0);
+  for (int i = 1; i <= 105; i++) {
+    g_autofree gchar *prev = g_strdup_printf("n%03d.md", i - 1);
+    g_autofree gchar *next = g_strdup_printf("n%03d.md", i);
+    bt_nav_history_push_jump(cap, prev, (gsize)i, (gdouble)i * 10.0, next, 0, 0.0);
+  }
+  assert_int_equal((int)bt_nav_history_count(cap), BT_NAV_HISTORY_CAP);
+  assert_int_equal(bt_nav_history_cursor(cap), BT_NAV_HISTORY_CAP - 1);
+  assert_string_equal(bt_nav_history_at(cap, 0)->relpath, "n006.md");
+  assert_string_equal(bt_nav_history_at(cap, BT_NAV_HISTORY_CAP - 1)->relpath, "n105.md");
+  bt_nav_history_free(cap);
+
+  /* Part B: Real 5-jump navigation across 6 notes (n1..n6) + deleted note skip. */
+  gchar *root = g_dir_make_tmp("bt-l26-XXXXXX", NULL);
+  gchar *cfg = g_dir_make_tmp("bt-cfg26-XXXXXX", NULL);
+  g_setenv("BT_CONFIG_DIR", cfg, TRUE);
+
+  const gchar *names[6] = {"n1.md", "n2.md", "n3.md", "n4.md", "n5.md", "n6.md"};
+  const gchar *links[6] = {"[[n2]]", "[[n3]]", "[[n4]]", "[[n5]]", "[[n6]]", "[[#NearAnchor]]"};
+  for (int i = 0; i < 6; i++) {
+    g_autofree gchar *txt = make_tall_note(names[i], links[i]);
+    bt_test_put(root, names[i], txt);
+  }
+
+  BtApp *app = bt_app_new();
+  bt_app_prepare_ui_for_test(app);
+  assert_true(bt_app_open_vault(app, root, NULL));
+  assert_true(bt_app_open_note(app, "n1.md", NULL));
+
+  BtEditorPane *ed = (BtEditorPane *)bt_app_editor(app);
+  assert_non_null(ed);
+
+  const gsize carets[6] = {18, 24, 30, 36, 42, 12};
+  const gdouble scrolls[6] = {120.0, 210.0, 300.0, 390.0, 480.0, 50.0};
+
+  bt_editorpane_set_caret_byte_offset(ed, carets[0]);
+  bt_editorpane_set_scroll_y(ed, scrolls[0]);
+  assert_true(bt_app_activate_link(app, "n2"));
+
+  bt_editorpane_set_caret_byte_offset(ed, carets[1]);
+  bt_editorpane_set_scroll_y(ed, scrolls[1]);
+  assert_true(bt_app_open_note(app, "n3.md", NULL)); /* Sidebar / Ctrl+P style direct open */
+
+  bt_editorpane_set_caret_byte_offset(ed, carets[2]);
+  bt_editorpane_set_scroll_y(ed, scrolls[2]);
+  assert_true(bt_app_activate_link(app, "n4"));
+
+  bt_editorpane_set_caret_byte_offset(ed, carets[3]);
+  bt_editorpane_set_scroll_y(ed, scrolls[3]);
+  assert_true(bt_app_activate_link(app, "n5"));
+
+  bt_editorpane_set_caret_byte_offset(ed, carets[4]);
+  bt_editorpane_set_scroll_y(ed, scrolls[4]);
+  assert_true(bt_app_activate_link(app, "n6"));
+
+  bt_editorpane_set_caret_byte_offset(ed, carets[5]);
+  bt_editorpane_set_scroll_y(ed, scrolls[5]);
+
+  /* Short same-note scroll (< 1 viewport) must NOT push onto nav stack. */
+  gsize hist_before = bt_nav_history_count(bt_app_nav_history(app));
+  assert_int_equal((int)hist_before, 6);
+  assert_true(bt_app_activate_link(app, "#NearAnchor"));
+  assert_int_equal((int)bt_nav_history_count(bt_app_nav_history(app)), (int)hist_before);
+  bt_editorpane_set_caret_byte_offset(ed, carets[5]);
+  bt_editorpane_set_scroll_y(ed, scrolls[5]);
+
+  /* 5 consecutive Back steps restore note + caret + scroll_y. */
+  for (int i = 4; i >= 0; i--) {
+    assert_true(bt_app_navigate_back(app));
+    assert_string_equal(bt_app_active_note(app), names[i]);
+    assert_int_equal((int)bt_editorpane_caret_byte_offset(ed), (int)carets[i]);
+    assert_true(fabs(bt_editorpane_scroll_y(ed) - scrolls[i]) < 1.0);
+  }
+  assert_false(bt_app_navigate_back(app));
+  assert_string_equal(bt_app_active_note(app), "n1.md");
+
+  /* 5 consecutive Forward steps restore n2..n6 + caret + scroll_y. */
+  for (int i = 1; i <= 5; i++) {
+    assert_true(bt_app_navigate_forward(app));
+    assert_string_equal(bt_app_active_note(app), names[i]);
+    assert_int_equal((int)bt_editorpane_caret_byte_offset(ed), (int)carets[i]);
+    assert_true(fabs(bt_editorpane_scroll_y(ed) - scrolls[i]) < 1.0);
+  }
+  assert_false(bt_app_navigate_forward(app));
+
+  /* Delete n4.md from disk -> Back from n5 skips deleted n4 silently and lands on n3; Forward skips to n5. */
+  assert_true(bt_app_navigate_back(app));
+  assert_string_equal(bt_app_active_note(app), "n5.md");
+  g_autofree gchar *dead_n4 = g_build_filename(root, "n4.md", NULL);
+  assert_int_equal(g_remove(dead_n4), 0);
+
+  assert_true(bt_app_navigate_back(app));
+  assert_string_equal(bt_app_active_note(app), "n3.md");
+  assert_int_equal((int)bt_editorpane_caret_byte_offset(ed), (int)carets[2]);
+  assert_true(bt_app_navigate_forward(app));
+  assert_string_equal(bt_app_active_note(app), "n5.md");
+  assert_int_equal((int)bt_editorpane_caret_byte_offset(ed), (int)carets[4]);
+
+  printf("BT_TEST_L2_6 nav_cap=%d back_forward_jumps=5 deleted_skip=1\n", BT_NAV_HISTORY_CAP);
+  GtkWindow *win = bt_app_window(app);
+  if (win) gtk_window_destroy(win);
+  bt_app_free(app);
+  bt_test_rm_rf(root);
+  bt_test_rm_rf(cfg);
+  g_free(root);
+  g_free(cfg);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -561,6 +693,7 @@ int main(void)
     cmocka_unit_test(test_l2_5_flush_before_navigation),
     cmocka_unit_test(test_l2_4_dispatcher_and_launcher_mock),
     cmocka_unit_test(test_l2_8_unresolved_click_does_not_call_stub_writer),
+    cmocka_unit_test(test_l2_6_nav_history_5_jumps_and_deleted_skip),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }
