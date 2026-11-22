@@ -66,6 +66,9 @@ void bt_graph_compute_neighbors(const BtGraph *g, gint focus_idx, guint8 *mask, 
     return;
 
   guint f = (guint)focus_idx;
+  const BtGraphNode *fnd = g_ptr_array_index(g->nodes, f);
+  if (!fnd->visible)
+    return;
   if (f < mask_len)
     mask[f] = BT_NBR_FOCUS;
 
@@ -73,10 +76,17 @@ void bt_graph_compute_neighbors(const BtGraph *g, gint focus_idx, guint8 *mask, 
     return;
   for (guint i = 0; i < g->edges->len; i++) {
     const BtGraphEdge *e = &g_array_index(g->edges, BtGraphEdge, i);
-    if (e->src_idx == f && e->dst_idx != f && e->dst_idx < mask_len)
-      mask[e->dst_idx] = BT_NBR_NEIGHBOR;
-    else if (e->dst_idx == f && e->src_idx != f && e->src_idx < mask_len)
-      mask[e->src_idx] = BT_NBR_NEIGHBOR;
+    if (e->src_idx == f && e->dst_idx != f && e->dst_idx < mask_len &&
+        e->dst_idx < g->nodes->len) {
+      const BtGraphNode *dn = g_ptr_array_index(g->nodes, e->dst_idx);
+      if (dn->visible)
+        mask[e->dst_idx] = BT_NBR_NEIGHBOR;
+    } else if (e->dst_idx == f && e->src_idx != f && e->src_idx < mask_len &&
+               e->src_idx < g->nodes->len) {
+      const BtGraphNode *sn = g_ptr_array_index(g->nodes, e->src_idx);
+      if (sn->visible)
+        mask[e->src_idx] = BT_NBR_NEIGHBOR;
+    }
   }
 }
 

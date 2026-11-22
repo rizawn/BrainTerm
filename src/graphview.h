@@ -18,6 +18,7 @@ typedef void (*BtGraphOpenNoteFn)(const gchar *relpath, gboolean is_ghost, gpoin
 typedef void (*BtGraphOpenTermFn)(const gchar *rel_dir, gpointer user_data);
 typedef void (*BtGraphRenameNoteFn)(const gchar *relpath, gpointer user_data);
 typedef void (*BtGraphNoticeFn)(const gchar *message, gpointer user_data);
+typedef void (*BtGraphPrefsChangedFn)(gboolean show_tags, gboolean show_ghosts, gpointer user_data);
 
 BtGraphView *bt_graphview_new(BtGraphOpenNoteFn on_open, BtGraphOpenTermFn on_open_term,
                               gpointer user_data);
@@ -34,6 +35,11 @@ void bt_graphview_set_pulse(BtGraphView *gv, gboolean enabled);
 gboolean bt_graphview_get_pulse(const BtGraphView *gv);
 void bt_graphview_set_reduce_motion(BtGraphView *gv, gboolean reduce_motion);
 gboolean bt_graphview_get_reduce_motion(const BtGraphView *gv);
+void bt_graphview_set_show_tags(BtGraphView *gv, gboolean show_tags);
+gboolean bt_graphview_get_show_tags(const BtGraphView *gv);
+void bt_graphview_set_show_ghosts(BtGraphView *gv, gboolean show_ghosts);
+gboolean bt_graphview_get_show_ghosts(const BtGraphView *gv);
+void bt_graphview_set_prefs_cb(BtGraphView *gv, BtGraphPrefsChangedFn on_prefs, gpointer user_data);
 void bt_graphview_set_notice_cb(BtGraphView *gv, BtGraphNoticeFn on_notice, gpointer user_data);
 void bt_graphview_set_rename_cb(BtGraphView *gv, BtGraphRenameNoteFn on_rename, gpointer user_data);
 gboolean bt_graphview_has_graph(const BtGraphView *gv);

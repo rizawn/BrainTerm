@@ -718,6 +718,9 @@ struct BtGraphView {
   GtkWidget *btn_quality;
   GtkWidget *btn_pulse;
   GtkWidget *btn_motion;
+  GtkWidget *btn_tags;
+  GtkWidget *btn_ghosts;
+  GtkWidget *legend_lbl;
   GtkWindow *toplevel;
   gulong toplevel_active_sig;
 
@@ -752,6 +755,8 @@ struct BtGraphView {
   BtGraphMode mode;
   gboolean pulse_enabled;
   gboolean reduce_motion;
+  gboolean show_tags;
+  gboolean show_ghosts;
 
   gboolean dragging;
   gdouble drag_start_x, drag_start_y;
@@ -776,9 +781,11 @@ struct BtGraphView {
   BtGraphOpenTermFn on_open_term;
   BtGraphRenameNoteFn on_rename;
   BtGraphNoticeFn on_notice;
+  BtGraphPrefsChangedFn on_prefs;
   gpointer user_data;
   gpointer rename_ud;
   gpointer notice_ud;
+  gpointer prefs_ud;
 };
 
 static void queue_canvas_draw(BtGraphView *gv)
@@ -1472,6 +1479,57 @@ static void sync_toolbar_buttons(BtGraphView *gv)
   if (gv->btn_motion != NULL) {
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(gv->btn_motion), gv->reduce_motion);
   }
+  if (gv->btn_tags != NULL) {
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(gv->btn_tags), gv->show_tags);
+  }
+  if (gv->btn_ghosts != NULL) {
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(gv->btn_ghosts), gv->show_ghosts);
+  }
+}
+
+static void update_legend(BtGraphView *gv)
+{
+  if (gv == NULL || gv->legend_lbl == NULL)
+    return;
+  gchar *markup = g_strdup_printf(
+      "<span foreground='#E6E8EC'>●</span> Note  "
+      "<span foreground='#8B7CF6'>●</span> AI  "
+      "<span foreground='%s'>● Tag%s</span>  "
+      "<span foreground='%s'>◌ Ghost%s</span>  "
+      "<span foreground='#4ADE80'>●</span> Folder",
+      gv->show_tags ? "#FBBF24" : "#666D79",
+      gv->show_tags ? "" : " (off)",
+      gv->show_ghosts ? "#9AA1AD" : "#666D79",
+      gv->show_ghosts ? "" : " (off)");
+  gtk_label_set_markup(GTK_LABEL(gv->legend_lbl), markup);
+  g_free(markup);
+}
+
+static void apply_kind_visibility(BtGraphView *gv, gboolean upload_gl)
+{
+  if (gv == NULL || gv->graph == NULL)
+    return;
+  for (guint i = 0; i < gv->graph->nodes->len; i++) {
+    BtGraphNode *nd = g_ptr_array_index(gv->graph->nodes, i);
+    if (nd->kind == BT_NODE_TAG)
+      nd->visible = gv->show_tags;
+    else if (nd->kind == BT_NODE_GHOST)
+      nd->visible = gv->show_ghosts;
+  }
+  if (gv->hover_idx >= 0 && (guint)gv->hover_idx < gv->graph->nodes->len &&
+      !((const BtGraphNode *)g_ptr_array_index(gv->graph->nodes, (guint)gv->hover_idx))->visible)
+    gv->hover_idx = -1;
+  if (gv->selected_idx >= 0 && (guint)gv->selected_idx < gv->graph->nodes->len &&
+      !((const BtGraphNode *)g_ptr_array_index(gv->graph->nodes, (guint)gv->selected_idx))->visible)
+    gv->selected_idx = -1;
+  if (gv->focus_idx >= 0 && (guint)gv->focus_idx < gv->graph->nodes->len &&
+      !((const BtGraphNode *)g_ptr_array_index(gv->graph->nodes, (guint)gv->focus_idx))->visible)
+    gv->focus_idx = -1;
+
+  gv->hub_thresh = bt_graph_hub_degree_threshold(gv->graph);
+  if (upload_gl)
+    bt_graph_gl_set_graph(gv->gl, gv->graph);
+  refresh_neighbor_mask(gv);
 }
 
 static void on_btn_mode_clicked(GtkButton *b, gpointer ud)
@@ -1503,6 +1561,28 @@ static void on_btn_motion_toggled(GtkToggleButton *b, gpointer ud)
   gboolean rm = gtk_toggle_button_get_active(b);
   if (rm != gv->reduce_motion)
     bt_graphview_set_reduce_motion(gv, rm);
+}
+
+static void on_btn_tags_toggled(GtkToggleButton *b, gpointer ud)
+{
+  BtGraphView *gv = ud;
+  gboolean en = gtk_toggle_button_get_active(b);
+  if (en != gv->show_tags) {
+    bt_graphview_set_show_tags(gv, en);
+    if (gv->on_prefs != NULL)
+      gv->on_prefs(gv->show_tags, gv->show_ghosts, gv->prefs_ud);
+  }
+}
+
+static void on_btn_ghosts_toggled(GtkToggleButton *b, gpointer ud)
+{
+  BtGraphView *gv = ud;
+  gboolean en = gtk_toggle_button_get_active(b);
+  if (en != gv->show_ghosts) {
+    bt_graphview_set_show_ghosts(gv, en);
+    if (gv->on_prefs != NULL)
+      gv->on_prefs(gv->show_tags, gv->show_ghosts, gv->prefs_ud);
+  }
 }
 
 /* ------------------------------------------- right-click context menu -- */
@@ -1755,6 +1835,9 @@ static void on_canvas_destroy(GtkWidget *area, gpointer ud)
   gv->btn_quality = NULL;
   gv->btn_pulse = NULL;
   gv->btn_motion = NULL;
+  gv->btn_tags = NULL;
+  gv->btn_ghosts = NULL;
+  gv->legend_lbl = NULL;
 }
 
 static GtkWidget *make_ctrl_btn(const gchar *icon, const gchar *tip, GCallback cb, gpointer ud)
@@ -1890,8 +1973,21 @@ BtGraphView *bt_graphview_new(BtGraphOpenNoteFn on_open, BtGraphOpenTermFn on_op
                               "Reduce motion: stops dust, pulses, and 3D idle rotation");
   g_signal_connect(gv->btn_motion, "toggled", G_CALLBACK(on_btn_motion_toggled), gv);
 
+  gv->btn_tags = gtk_toggle_button_new_with_label("Tags");
+  gtk_widget_add_css_class(gv->btn_tags, "bt-graph-pill");
+  gtk_widget_set_tooltip_text(gv->btn_tags, "Show or hide tag nodes and tag edges");
+  g_signal_connect(gv->btn_tags, "toggled", G_CALLBACK(on_btn_tags_toggled), gv);
+
+  gv->btn_ghosts = gtk_toggle_button_new_with_label("Ghosts");
+  gtk_widget_add_css_class(gv->btn_ghosts, "bt-graph-pill");
+  gtk_widget_set_tooltip_text(gv->btn_ghosts,
+                              "Show or hide unresolved [[wiki-link]] ghost nodes");
+  g_signal_connect(gv->btn_ghosts, "toggled", G_CALLBACK(on_btn_ghosts_toggled), gv);
+
   gtk_box_append(GTK_BOX(mode_bar), gv->btn_mode);
   gtk_box_append(GTK_BOX(mode_bar), gv->btn_quality);
+  gtk_box_append(GTK_BOX(mode_bar), gv->btn_tags);
+  gtk_box_append(GTK_BOX(mode_bar), gv->btn_ghosts);
   gtk_box_append(GTK_BOX(mode_bar), gv->btn_pulse);
   gtk_box_append(GTK_BOX(mode_bar), gv->btn_motion);
   gtk_overlay_add_overlay(GTK_OVERLAY(gv->overlay), mode_bar);
@@ -1914,20 +2010,15 @@ BtGraphView *bt_graphview_new(BtGraphOpenNoteFn on_open, BtGraphOpenTermFn on_op
                                                G_CALLBACK(on_btn_reset), gv));
   gtk_overlay_add_overlay(GTK_OVERLAY(gv->overlay), ctrls);
 
-  GtkWidget *legend = gtk_label_new(NULL);
-  gtk_label_set_markup(
-      GTK_LABEL(legend),
-      "<span foreground='#E6E8EC'>●</span> Note  "
-      "<span foreground='#8B7CF6'>●</span> AI  "
-      "<span foreground='#FBBF24'>●</span> Tag  "
-      "<span foreground='#4ADE80'>●</span> Folder");
-  gtk_widget_add_css_class(legend, "bt-graph-legend");
-  gtk_widget_set_halign(legend, GTK_ALIGN_START);
-  gtk_widget_set_valign(legend, GTK_ALIGN_END);
-  gtk_widget_set_margin_bottom(legend, 10);
-  gtk_widget_set_margin_start(legend, 10);
-  gtk_widget_set_can_target(legend, FALSE);
-  gtk_overlay_add_overlay(GTK_OVERLAY(gv->overlay), legend);
+  gv->legend_lbl = gtk_label_new(NULL);
+  gtk_widget_add_css_class(gv->legend_lbl, "bt-graph-legend");
+  gtk_widget_set_halign(gv->legend_lbl, GTK_ALIGN_START);
+  gtk_widget_set_valign(gv->legend_lbl, GTK_ALIGN_END);
+  gtk_widget_set_margin_bottom(gv->legend_lbl, 10);
+  gtk_widget_set_margin_start(gv->legend_lbl, 10);
+  gtk_widget_set_can_target(gv->legend_lbl, FALSE);
+  update_legend(gv);
+  gtk_overlay_add_overlay(GTK_OVERLAY(gv->overlay), gv->legend_lbl);
 
   /* Calm empty state when graph has 0 nodes. */
   GtkWidget *empty = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
@@ -1998,7 +2089,7 @@ void bt_graphview_set_graph(BtGraphView *gv, BtGraph *graph, gboolean animate_gr
   gv->ctx_hit_idx = -1;
   gv->hover_fade = 0.0;
   gv->needs_fit = TRUE;
-  gv->hub_thresh = bt_graph_hub_degree_threshold(graph);
+  apply_kind_visibility(gv, FALSE);
   bt_graph_gl_set_graph(gv->gl, graph);
   schedule_layout3d_worker(gv);
 
@@ -2107,6 +2198,46 @@ void bt_graphview_set_reduce_motion(BtGraphView *gv, gboolean reduce_motion)
 gboolean bt_graphview_get_reduce_motion(const BtGraphView *gv)
 {
   return gv ? gv->reduce_motion : FALSE;
+}
+
+void bt_graphview_set_show_tags(BtGraphView *gv, gboolean show_tags)
+{
+  if (gv == NULL)
+    return;
+  gv->show_tags = show_tags ? TRUE : FALSE;
+  sync_toolbar_buttons(gv);
+  update_legend(gv);
+  apply_kind_visibility(gv, TRUE);
+  queue_canvas_draw(gv);
+}
+
+gboolean bt_graphview_get_show_tags(const BtGraphView *gv)
+{
+  return gv ? gv->show_tags : FALSE;
+}
+
+void bt_graphview_set_show_ghosts(BtGraphView *gv, gboolean show_ghosts)
+{
+  if (gv == NULL)
+    return;
+  gv->show_ghosts = show_ghosts ? TRUE : FALSE;
+  sync_toolbar_buttons(gv);
+  update_legend(gv);
+  apply_kind_visibility(gv, TRUE);
+  queue_canvas_draw(gv);
+}
+
+gboolean bt_graphview_get_show_ghosts(const BtGraphView *gv)
+{
+  return gv ? gv->show_ghosts : FALSE;
+}
+
+void bt_graphview_set_prefs_cb(BtGraphView *gv, BtGraphPrefsChangedFn on_prefs, gpointer user_data)
+{
+  if (gv == NULL)
+    return;
+  gv->on_prefs = on_prefs;
+  gv->prefs_ud = user_data;
 }
 
 void bt_graphview_set_notice_cb(BtGraphView *gv, BtGraphNoticeFn on_notice, gpointer user_data)

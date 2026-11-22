@@ -171,6 +171,13 @@ static void test_hover_neighbors(void **state)
   assert_int_equal(mask[0], BT_NBR_NONE);
   assert_int_equal(mask[1], BT_NBR_NONE);
 
+  /* Hidden neighbor excluded from mask */
+  ((BtGraphNode *)g_ptr_array_index(g->nodes, 2))->visible = FALSE;
+  bt_graph_compute_neighbors(g, 1, mask, 6);
+  assert_int_equal(mask[0], BT_NBR_NEIGHBOR);
+  assert_int_equal(mask[1], BT_NBR_FOCUS);
+  assert_int_equal(mask[2], BT_NBR_NONE);
+
   /* Invalid / negative focus -> all zeroed */
   bt_graph_compute_neighbors(g, -1, mask, 6);
   for (guint i = 0; i < 6; i++)

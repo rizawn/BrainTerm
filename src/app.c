@@ -182,6 +182,32 @@ static void save_graph_visible(gboolean vis)
   save_state_str("ui", "graph_visible", vis ? "1" : "0", NULL);
 }
 
+static gboolean load_saved_graph_bool(const gchar *key, gboolean def_val)
+{
+  gchar *path = bt_app_state_file_path();
+  GKeyFile *kf = g_key_file_new();
+  gboolean val = def_val;
+  if (g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL)) {
+    gchar *v = g_key_file_get_string(kf, "graph", key, NULL);
+    if (v != NULL) {
+      val = (g_strcmp0(v, "1") == 0 || g_ascii_strcasecmp(v, "true") == 0);
+      g_free(v);
+    }
+  }
+  g_key_file_unref(kf);
+  g_free(path);
+  return val;
+}
+
+static void on_graph_prefs_changed(gboolean show_tags, gboolean show_ghosts, gpointer ud)
+{
+  BtApp *app = ud;
+  if (app == NULL || app->smoke_test)
+    return;
+  save_state_str("graph", "show_tags", show_tags ? "1" : "0", NULL);
+  save_state_str("graph", "show_ghosts", show_ghosts ? "1" : "0", NULL);
+}
+
 static BtUiScheme load_saved_scheme(void)
 {
   gchar *path = bt_app_state_file_path();
@@ -2060,6 +2086,11 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
   bt_editorpane_set_conflict_cbs(app->editor, on_editor_conflict_diff, on_editor_conflict_reload);
   app->graphview = bt_graphview_new(on_graph_open_note, on_tree_open_term, app);
   bt_graphview_set_rename_cb(app->graphview, on_graph_rename_note, app);
+  if (!app->smoke_test) {
+    bt_graphview_set_show_tags(app->graphview, load_saved_graph_bool("show_tags", FALSE));
+    bt_graphview_set_show_ghosts(app->graphview, load_saved_graph_bool("show_ghosts", FALSE));
+  }
+  bt_graphview_set_prefs_cb(app->graphview, on_graph_prefs_changed, app);
   app->tabs = bt_termtabs_new(BT_TERMTABS_MAX_DEFAULT, on_term_fullscreen, on_term_status,
                               on_session_ended, app);
   app->sessions_panel = bt_sessionspanel_new(on_session_resume, on_session_rollback, app);
