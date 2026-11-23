@@ -2121,14 +2121,25 @@ static void on_editor_conflict_reload(const gchar *relpath, gpointer ud)
 static void on_graph_open_note(const gchar *relpath, gboolean is_ghost, gpointer ud)
 {
   BtApp *app = ud;
+  if (app == NULL || app->vault == NULL || relpath == NULL)
+    return;
+  if (is_ghost) {
+    g_autofree gchar *existing = bt_wikilink_find_note(vault_notes(app->vault), relpath);
+    if (existing != NULL) {
+      GError *err = NULL;
+      if (!bt_app_open_note(app, existing, &err) && err != NULL) {
+        bt_app_show_error(app, "Cannot open graph node", err->message);
+        g_error_free(err);
+      }
+    } else {
+      set_statusbar_notice_timed(app, "Note not found", 4u);
+    }
+    return;
+  }
   GError *err = NULL;
-  gboolean ok = is_ghost ? bt_app_open_or_create_wikilink(app, relpath, &err)
-                         : bt_app_open_note(app, relpath, &err);
-  if (!ok && err != NULL) {
+  if (!bt_app_open_note(app, relpath, &err) && err != NULL) {
     bt_app_show_error(app, "Cannot open graph node", err->message);
     g_error_free(err);
-  } else if (is_ghost) {
-    refresh_graph(app, TRUE);
   }
 }
 
