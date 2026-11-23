@@ -8,6 +8,7 @@ core_sources = files(
   'noteutil.c',
   'linkresolve.c',
   'createnote.c',
+  'choosermodel.c',
   'navhistory.c',
   'vtermbridge.c',
   'checkpoint.c',

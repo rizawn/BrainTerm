@@ -198,6 +198,14 @@ t_createnote = executable(
 )
 test('createnote', t_createnote, suite: 'unit')
 
+t_chooser = executable(
+  'test_chooser',
+  'unit/test_chooser.c',
+  include_directories: test_inc,
+  dependencies: [bt_core_dep, cmocka_dep, glib_dep],
+)
+test('chooser', t_chooser, suite: 'unit')
+
 bench_createnote = executable(
   'bench_createnote',
   'bench/bench_createnote.c',
