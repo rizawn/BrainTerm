@@ -1516,21 +1516,8 @@ BtNavHistory *bt_app_nav_history(const BtApp *app)
   return app ? app->nav : NULL;
 }
 
-static guint stub_writer_call_count = 0;
-
-guint bt_app_stub_writer_calls_for_test(void)
-{
-  return stub_writer_call_count;
-}
-
-void bt_app_reset_stub_writer_calls_for_test(void)
-{
-  stub_writer_call_count = 0;
-}
-
 gboolean bt_app_open_or_create_wikilink(BtApp *app, const gchar *target, GError **error)
 {
-  stub_writer_call_count++;
   g_return_val_if_fail(app != NULL && target != NULL, FALSE);
   if (app->vault == NULL)
     return FALSE;

@@ -50,6 +50,7 @@ app_sources = files(
   'ui/filetree.c',
   'ui/editorpane.c',
   'ui/createpopover.c',
+  'ui/chooserpopover.c',
   'ui/quickopen.c',
   'ui/termtabs.c',
   'ui/sessionspanel.c',
