@@ -15,6 +15,7 @@
 #include "graph.h"
 #include "graph_palette.h"
 #include "graph_state.h"
+#include "graph_timeline.h"
 
 static BtGraph *make_sample_graph(guint n_nodes)
 {
@@ -489,6 +490,48 @@ static void test_galaxy_layout_determinism_and_z_bulge(void **state)
   free_sample_graph(g);
 }
 
+static void test_timeline_date_parse_and_lane_packing(void **state)
+{
+  (void)state;
+  gint64 t1 = bt_timeline_parse_date("2024-06-15");
+  gint64 t2 = bt_timeline_parse_date("2025-01-10T08:30:00Z");
+  assert_true(t1 > 0);
+  assert_true(t2 > t1);
+  assert_int_equal(bt_timeline_parse_date("not-a-date"), 0);
+
+  /* Build 24 notes with identical timestamps in the same folder to stress packing! */
+  BtGraph *g = make_sample_graph(24);
+  for (guint i = 0; i < 24u; i++) {
+    BtGraphNode *nd = g_ptr_array_index(g->nodes, i);
+    nd->created = t1 + (gint64)(i % 3u) * 86400;
+    nd->top_folder = g_strdup((i < 12u) ? "Alpha" : "Beta");
+  }
+
+  BtTimelineLayout *tl = bt_timeline_build(g, BT_TL_LANE_FOLDER, 60.0f, 860.0f, 80.0f, 440.0f, 0, 0);
+  assert_non_null(tl);
+  assert_int_equal(tl->lane_count, 2u);
+  assert_true(tl->event_count >= 1u);
+
+  /* Verify Kept grid has ZERO overlapping dots. */
+  for (guint i = 0; i < tl->dot_count; i++) {
+    if (!tl->dots[i].valid) continue;
+    for (guint j = i + 1; j < tl->dot_count; j++) {
+      if (!tl->dots[j].valid) continue;
+      float dx = tl->dots[i].kept_x - tl->dots[j].kept_x;
+      float dy = tl->dots[i].kept_y - tl->dots[j].kept_y;
+      float d = hypotf(dx, dy);
+      assert_true(d >= tl->dots[i].radius + tl->dots[j].radius);
+    }
+  }
+
+  bt_timeline_free(tl);
+  for (guint i = 0; i < g->nodes->len; i++) {
+    BtGraphNode *nd = g_ptr_array_index(g->nodes, i);
+    g_free(nd->top_folder);
+  }
+  free_sample_graph(g);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -502,6 +545,7 @@ int main(void)
     cmocka_unit_test(test_spatial_pick_stack_and_spread),
     cmocka_unit_test(test_galaxy_palette_assignment_and_persistence),
     cmocka_unit_test(test_galaxy_layout_determinism_and_z_bulge),
+    cmocka_unit_test(test_timeline_date_parse_and_lane_packing),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

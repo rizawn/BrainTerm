@@ -272,6 +272,28 @@ static gboolean load_saved_graph_bool(const gchar *key, gboolean def_val)
   return val;
 }
 
+static BtGraphMode load_saved_graph_mode(void)
+{
+  gchar *path = bt_app_state_file_path();
+  GKeyFile *kf = g_key_file_new();
+  BtGraphMode mode = BT_GRAPH_MODE_2D;
+  if (g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL)) {
+    gchar *v = g_key_file_get_string(kf, "graph", "mode", NULL);
+    if (v != NULL) {
+      if (g_ascii_strcasecmp(v, "3d") == 0)
+        mode = BT_GRAPH_MODE_3D;
+      else if (g_ascii_strcasecmp(v, "galaxy") == 0)
+        mode = BT_GRAPH_MODE_GALAXY;
+      else if (g_ascii_strcasecmp(v, "timeline") == 0)
+        mode = BT_GRAPH_MODE_TIMELINE;
+      g_free(v);
+    }
+  }
+  g_key_file_unref(kf);
+  g_free(path);
+  return mode;
+}
+
 static void on_graph_prefs_changed(gboolean show_tags, gboolean show_ghosts, gpointer ud)
 {
   BtApp *app = ud;
@@ -279,6 +301,14 @@ static void on_graph_prefs_changed(gboolean show_tags, gboolean show_ghosts, gpo
     return;
   save_state_str("graph", "show_tags", show_tags ? "1" : "0", NULL);
   save_state_str("graph", "show_ghosts", show_ghosts ? "1" : "0", NULL);
+  if (app->graphview != NULL) {
+    BtGraphMode m = bt_graphview_get_mode(app->graphview);
+    const gchar *ms = (m == BT_GRAPH_MODE_3D)       ? "3d"
+                      : (m == BT_GRAPH_MODE_GALAXY)   ? "galaxy"
+                      : (m == BT_GRAPH_MODE_TIMELINE) ? "timeline"
+                                                      : "2d";
+    save_state_str("graph", "mode", ms, NULL);
+  }
 }
 
 static BtUiScheme load_saved_scheme(void)
@@ -3793,6 +3823,7 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
   if (!app->smoke_test && app->capture_dir == NULL && !app_is_ro_bench(app)) {
     bt_graphview_set_show_tags(app->graphview, load_saved_graph_bool("show_tags", FALSE));
     bt_graphview_set_show_ghosts(app->graphview, load_saved_graph_bool("show_ghosts", FALSE));
+    bt_graphview_set_mode(app->graphview, load_saved_graph_mode());
   }
   bt_graphview_set_prefs_cb(app->graphview, on_graph_prefs_changed, app);
   if (app->graph_debug)

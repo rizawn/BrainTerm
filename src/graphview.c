@@ -11,6 +11,7 @@
 #include "graphview.h"
 #include "graph_palette.h"
 #include "graph_state.h"
+#include "graph_timeline.h"
 #include "theme.h"
 #include "ui/graphgl.h"
 #include "ui/graphview_renderer.h"
@@ -765,6 +766,12 @@ struct BtGraphView {
   GtkWidget *btn_2d;
   GtkWidget *btn_3d;
   GtkWidget *btn_galaxy;
+  GtkWidget *btn_timeline;
+  GtkWidget *tl_controls_box;
+  GtkWidget *btn_tl_organic;
+  GtkWidget *btn_tl_kept;
+  GtkWidget *btn_tl_lane_folder;
+  GtkWidget *btn_tl_lane_type;
   GtkWidget *btn_q_low;
   GtkWidget *btn_q_high;
   GtkWidget *btn_pulse;
@@ -829,6 +836,20 @@ struct BtGraphView {
   guint focus_hops;
   gdouble spread_str;
 
+  /* Timeline view state (Phase 4) */
+  BtTimelineLayout *timeline;
+  BtTimelineLaneBy tl_lane_by;
+  gboolean tl_kept;
+  gdouble tl_kept_t;
+  gint64 tl_view_min;
+  gint64 tl_view_max;
+  gboolean tl_brushing;
+  gdouble tl_brush_x0, tl_brush_x1;
+  gint64 tl_brush_t0, tl_brush_t1;
+  int tl_w, tl_h;
+  gboolean tl_dirty;
+  gint64 tl_pan_start_min, tl_pan_start_max;
+
   /* Exact spatial-hash picking & overlapping stack cycling */
   BtPickCand stack_cands[16];
   guint stack_count;
@@ -886,6 +907,11 @@ static void queue_canvas_draw(BtGraphView *gv)
 {
   if (gv == NULL)
     return;
+  if (gv->mode == BT_GRAPH_MODE_TIMELINE) {
+    if (gv->cairo_area != NULL)
+      gtk_widget_queue_draw(gv->cairo_area);
+    return;
+  }
   if (gv->active_backend == BT_GRAPH_BACKEND_GL && gv->gl != NULL && bt_graph_gl_is_ready(gv->gl))
     bt_graph_gl_queue_render(gv->gl);
   else if (gv->cairo_area != NULL)
@@ -1327,6 +1353,17 @@ static gboolean on_tick(GtkWidget *widget, GdkFrameClock *clock, gpointer ud)
     }
   }
 
+  /* 2d. Smooth Organic <-> Kept timeline animation. */
+  gdouble target_kt = gv->tl_kept ? 1.0 : 0.0;
+  if (gv->reduce_motion) {
+    gv->tl_kept_t = target_kt;
+  } else if (fabs(gv->tl_kept_t - target_kt) > 0.01) {
+    gv->tl_kept_t += (target_kt - gv->tl_kept_t) * 0.20;
+    active = TRUE;
+  } else {
+    gv->tl_kept_t = target_kt;
+  }
+
   /* 3. Smooth 2D camera transition. */
   if (gv->animating_cam) {
     if (gv->reduce_motion) {
@@ -1497,9 +1534,232 @@ static void on_gl_fallback(const gchar *reason, gpointer ud)
   queue_canvas_draw(gv);
 }
 
+static void ensure_timeline_layout(BtGraphView *gv, int w, int h)
+{
+  if (gv == NULL || gv->graph == NULL || w <= 40 || h <= 60)
+    return;
+  if (gv->timeline != NULL && !gv->tl_dirty && gv->tl_w == w && gv->tl_h == h)
+    return;
+  bt_timeline_free(gv->timeline);
+  float x0 = 54.0f, x1 = (float)w - 54.0f;
+  float y0 = 104.0f, y1 = (float)h - 132.0f;
+  gv->timeline = bt_timeline_build(gv->graph, gv->tl_lane_by, x0, x1, y0, y1,
+                                   gv->tl_view_min, gv->tl_view_max);
+  if (gv->tl_view_min <= 0 || gv->tl_view_max <= gv->tl_view_min) {
+    gv->tl_view_min = gv->timeline->min_ts;
+    gv->tl_view_max = gv->timeline->max_ts;
+  }
+  gv->tl_w = w;
+  gv->tl_h = h;
+  gv->tl_dirty = FALSE;
+}
+
+static void draw_timeline_cairo(BtGraphView *gv, cairo_t *cr, int w, int h)
+{
+  /* Mindcorpus-inspired pure black background. */
+  cairo_set_source_rgb(cr, 0.008, 0.010, 0.016);
+  cairo_rectangle(cr, 0, 0, w, h);
+  cairo_fill(cr);
+
+  if (gv->graph == NULL || gv->graph->nodes->len == 0u)
+    return;
+  ensure_timeline_layout(gv, w, h);
+  const BtTimelineLayout *tl = gv->timeline;
+  if (tl == NULL)
+    return;
+
+  float x0 = 54.0f, x1 = (float)w - 54.0f;
+  float y0 = 104.0f, y1 = (float)h - 132.0f;
+  float axis_y = y1 + 18.0f;
+  float ledger_y = (float)h - 62.0f;
+  float kt = (float)CLAMP(gv->tl_kept_t, 0.0, 1.0);
+  gdouble t_span = MAX((gdouble)(gv->tl_view_max - gv->tl_view_min), 60.0);
+
+  PangoLayout *pl = pango_cairo_create_layout(cr);
+  PangoFontDescription *fd = pango_font_description_from_string("Inter, Segoe UI, Sans 9");
+  pango_font_description_set_size(fd, (gint)(9.0 * PANGO_SCALE));
+  pango_layout_set_font_description(pl, fd);
+
+  /* Editorial uppercase header. */
+  cairo_set_source_rgba(cr, 0.62, 0.65, 0.72, 0.78);
+  pango_layout_set_text(pl, "VAULT, KEPT WITH ITS DATES", -1);
+  cairo_move_to(cr, x0, 56.0);
+  pango_cairo_show_layout(cr, pl);
+
+  /* Framed Kept container box (fades in during Organic -> Kept animation). */
+  if (kt > 0.02f) {
+    cairo_set_source_rgba(cr, 0.85, 0.88, 0.96, 0.18 * kt);
+    cairo_set_line_width(cr, 1.0);
+    cairo_rectangle(cr, x0 + 14.0, y0 + 8.0, (x1 - x0) - 28.0, (y1 - y0) - 16.0);
+    cairo_stroke(cr);
+  }
+
+  /* Selected/hovered wikilink neighbor arcs. */
+  gint foc = (gv->selected_idx >= 0) ? gv->selected_idx : gv->hover_idx;
+  if (foc >= 0 && (guint)foc < tl->dot_count && tl->dots[foc].valid && gv->graph->edges != NULL) {
+    float fx = tl->dots[foc].org_x + (tl->dots[foc].kept_x - tl->dots[foc].org_x) * kt;
+    float fy = tl->dots[foc].org_y + (tl->dots[foc].kept_y - tl->dots[foc].org_y) * kt;
+    cairo_set_line_width(cr, 1.0);
+    cairo_set_source_rgba(cr, 0.66, 0.62, 0.98, 0.34);
+    for (guint i = 0; i < gv->graph->edges->len; i++) {
+      const BtGraphEdge *e = &g_array_index(gv->graph->edges, BtGraphEdge, i);
+      if (e->kind == BT_EDGE_CONTAINS) continue;
+      gint other = -1;
+      if ((gint)e->src_idx == foc) other = (gint)e->dst_idx;
+      else if ((gint)e->dst_idx == foc) other = (gint)e->src_idx;
+      if (other < 0 || (guint)other >= tl->dot_count || !tl->dots[other].valid) continue;
+      float ox = tl->dots[other].org_x + (tl->dots[other].kept_x - tl->dots[other].org_x) * kt;
+      float oy = tl->dots[other].org_y + (tl->dots[other].kept_y - tl->dots[other].org_y) * kt;
+      float mx = 0.5f * (fx + ox);
+      float my = MIN(fy, oy) - 26.0f;
+      cairo_move_to(cr, fx, fy);
+      cairo_curve_to(cr, mx, my, mx, my, ox, oy);
+      cairo_stroke(cr);
+    }
+  }
+
+  /* Dots in horizontal wavy lanes / Kept grid. */
+  gboolean has_brush = (gv->tl_brush_t1 > gv->tl_brush_t0);
+  for (guint i = 0; i < tl->dot_count; i++) {
+    const BtTimelineDot *d = &tl->dots[i];
+    if (!d->valid) continue;
+    const BtGraphNode *nd = g_ptr_array_index(gv->graph->nodes, i);
+    float sx = d->org_x + (d->kept_x - d->org_x) * kt;
+    float sy = d->org_y + (d->kept_y - d->org_y) * kt;
+    if (sx < x0 - 12.0f || sx > x1 + 12.0f) continue;
+
+    gdouble alpha = 0.90;
+    if (has_brush && (d->ts < gv->tl_brush_t0 || d->ts > gv->tl_brush_t1))
+      alpha = 0.08;
+    if (foc >= 0 && (gint)i == foc)
+      alpha = 1.0;
+
+    guint32 rgb = node_color(nd);
+    set_tok(cr, rgb, alpha);
+    cairo_arc(cr, sx, sy, d->radius, 0.0, 2.0 * M_PI);
+    cairo_fill(cr);
+
+    if ((gint)i == foc) {
+      cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.95);
+      cairo_set_line_width(cr, 1.4);
+      cairo_arc(cr, sx, sy, d->radius + 3.0, 0.0, 2.0 * M_PI);
+      cairo_stroke(cr);
+
+      /* Bright thin vertical connector up to pinned top label bar. */
+      cairo_set_source_rgba(cr, 0.95, 0.96, 1.0, 0.80);
+      cairo_set_line_width(cr, 1.0);
+      cairo_move_to(cr, sx, sy - d->radius - 3.0);
+      cairo_line_to(cr, sx, 76.0);
+      cairo_stroke(cr);
+
+      GDateTime *dt = g_date_time_new_from_unix_utc(d->ts);
+      g_autofree gchar *dstr = dt ? g_date_time_format(dt, "%Y-%m-%d") : g_strdup("");
+      if (dt) g_date_time_unref(dt);
+      g_autofree gchar *pin = g_strdup_printf("%s  ·  %s%s%s",
+                                              nd->label ? nd->label : "Untitled",
+                                              dstr,
+                                              nd->top_folder ? "  ·  " : "",
+                                              nd->top_folder ? nd->top_folder : "");
+      pango_layout_set_text(pl, pin, -1);
+      int tw = 0, th = 0;
+      pango_layout_get_pixel_size(pl, &tw, &th);
+      gdouble px = CLAMP((gdouble)sx - (gdouble)tw * 0.5, (gdouble)x0, (gdouble)x1 - (gdouble)tw - 10.0);
+      draw_rrect(cr, px - 6.0, 56.0, (gdouble)tw + 12.0, (gdouble)th + 8.0, 4.0);
+      cairo_set_source_rgba(cr, 0.09, 0.10, 0.14, 0.94);
+      cairo_fill_preserve(cr);
+      set_tok(cr, rgb, 0.85);
+      cairo_set_line_width(cr, 1.0);
+      cairo_stroke(cr);
+      cairo_set_source_rgba(cr, 0.96, 0.97, 1.0, 1.0);
+      cairo_move_to(cr, px, 60.0);
+      pango_cairo_show_layout(cr, pl);
+    }
+  }
+
+  /* Thin horizontal X axis + auto-density date ticks (years -> months -> days). */
+  cairo_set_source_rgba(cr, 0.48, 0.52, 0.60, 0.55);
+  cairo_set_line_width(cr, 1.0);
+  cairo_move_to(cr, x0, axis_y);
+  cairo_line_to(cr, x1, axis_y);
+  cairo_stroke(cr);
+
+  /* Brush selection band on X axis. */
+  if (has_brush) {
+    gdouble bx0 = x0 + ((gdouble)(gv->tl_brush_t0 - gv->tl_view_min) / t_span) * (x1 - x0);
+    gdouble bx1 = x0 + ((gdouble)(gv->tl_brush_t1 - gv->tl_view_min) / t_span) * (x1 - x0);
+    bx0 = CLAMP(bx0, x0, x1);
+    bx1 = CLAMP(bx1, x0, x1);
+    cairo_set_source_rgba(cr, 0.55, 0.49, 0.96, 0.22);
+    cairo_rectangle(cr, bx0, y0, MAX(bx1 - bx0, 2.0), axis_y - y0);
+    cairo_fill(cr);
+    cairo_set_source_rgba(cr, 0.66, 0.61, 0.98, 0.90);
+    cairo_set_line_width(cr, 2.0);
+    cairo_move_to(cr, bx0, axis_y);
+    cairo_line_to(cr, bx1, axis_y);
+    cairo_stroke(cr);
+  }
+
+  const gchar *fmt = (t_span > 86400.0 * 400.0) ? "%Y" : ((t_span > 86400.0 * 45.0) ? "%b %Y" : "%b %d");
+  int n_ticks = CLAMP((int)((x1 - x0) / 110.0f), 3, 10);
+  for (int ti = 0; ti <= n_ticks; ti++) {
+    gdouble frac = (gdouble)ti / (gdouble)n_ticks;
+    gdouble tx = x0 + frac * (x1 - x0);
+    gint64 ts = gv->tl_view_min + (gint64)(frac * t_span);
+    cairo_set_source_rgba(cr, 0.48, 0.52, 0.60, 0.65);
+    cairo_move_to(cr, tx, axis_y);
+    cairo_line_to(cr, tx, axis_y + 5.0);
+    cairo_stroke(cr);
+    GDateTime *dt = g_date_time_new_from_unix_utc(ts);
+    g_autofree gchar *lbl = dt ? g_date_time_format(dt, fmt) : g_strdup("");
+    if (dt) g_date_time_unref(dt);
+    pango_layout_set_text(pl, lbl, -1);
+    int tw = 0, th = 0;
+    pango_layout_get_pixel_size(pl, &tw, &th);
+    cairo_set_source_rgba(cr, 0.65, 0.68, 0.75, 0.85);
+    cairo_move_to(cr, tx - (gdouble)tw * 0.5, axis_y + 8.0);
+    pango_cairo_show_layout(cr, pl);
+  }
+
+  /* Bottom LEDGER strip: hairline + colored squares + tiny uppercase event labels. */
+  cairo_set_source_rgba(cr, 0.40, 0.44, 0.52, 0.45);
+  cairo_set_line_width(cr, 1.0);
+  cairo_move_to(cr, x0 + 60.0, ledger_y);
+  cairo_line_to(cr, x1, ledger_y);
+  cairo_stroke(cr);
+  cairo_set_source_rgba(cr, 0.55, 0.58, 0.66, 0.85);
+  pango_layout_set_text(pl, "LEDGER", -1);
+  cairo_move_to(cr, x0, ledger_y - 6.0);
+  pango_cairo_show_layout(cr, pl);
+
+  for (guint ei = 0; ei < tl->event_count; ei++) {
+    const BtLedgerEvent *ev = &tl->events[ei];
+    gdouble frac = ((gdouble)(ev->ts - gv->tl_view_min)) / t_span;
+    if (frac < 0.0 || frac > 1.0) continue;
+    gdouble ex = (x0 + 60.0) + frac * ((x1 - x0) - 60.0);
+    set_tok(cr, ev->color_rgb, 0.95);
+    cairo_rectangle(cr, ex - 3.5, ledger_y - 3.5, 7.0, 7.0);
+    cairo_fill(cr);
+
+    pango_layout_set_text(pl, ev->label, -1);
+    int tw = 0, th = 0;
+    pango_layout_get_pixel_size(pl, &tw, &th);
+    gdouble ly = (ei % 2u == 0u) ? (ledger_y - th - 6.0) : (ledger_y + 7.0);
+    cairo_set_source_rgba(cr, 0.65, 0.68, 0.75, 0.82);
+    cairo_move_to(cr, ex - (gdouble)tw * 0.5, ly);
+    pango_cairo_show_layout(cr, pl);
+  }
+
+  pango_font_description_free(fd);
+  g_object_unref(pl);
+}
+
 static void on_cairo_draw(GtkDrawingArea *area, cairo_t *cr, int w, int h, gpointer ud)
 {
   BtGraphView *gv = ud;
+  if (gv->mode == BT_GRAPH_MODE_TIMELINE) {
+    draw_timeline_cairo(gv, cr, w, h);
+    return;
+  }
   BtGraphRenderState st;
   fill_render_state(gv, w, h, gtk_widget_get_scale_factor(GTK_WIDGET(area)), &st);
   if (gv->cairo_renderer != NULL && gv->cairo_renderer->vt->render_cairo != NULL)
@@ -1520,6 +1780,26 @@ static guint pick_stack_at(BtGraphView *gv, gdouble sx, gdouble sy, BtPickCand *
     g_free(gv->pick_scratch);
     gv->pick_scratch = g_new0(BtScreenNode, n);
     gv->pick_scratch_cap = n;
+  }
+
+  if (gv->mode == BT_GRAPH_MODE_TIMELINE) {
+    ensure_timeline_layout(gv, w, h);
+    if (gv->timeline == NULL)
+      return 0u;
+    float kt = (float)CLAMP(gv->tl_kept_t, 0.0, 1.0);
+    guint cnt = MIN(n, gv->timeline->dot_count);
+    for (guint i = 0; i < cnt; i++) {
+      const BtTimelineDot *d = &gv->timeline->dots[i];
+      BtScreenNode *sn = &gv->pick_scratch[i];
+      sn->node_idx = i;
+      sn->visible = d->valid;
+      sn->sx = d->org_x + (d->kept_x - d->org_x) * kt;
+      sn->sy = d->org_y + (d->kept_y - d->org_y) * kt;
+      sn->radius = d->radius;
+      sn->depth = 0.0f;
+    }
+    return bt_graph_pick_screen(gv->pick_scratch, cnt, (float)w, (float)h,
+                                (float)sx, (float)sy, out, out_cap);
   }
 
   gboolean is3d = (mode_is_3d_orbit(gv->mode) && gv->active_backend == BT_GRAPH_BACKEND_GL &&
@@ -1752,6 +2032,49 @@ static void on_click_pressed(GtkGestureClick *g, gint n_press, gdouble x, gdoubl
   }
   if (n_press != 1)
     return;
+
+  if (gv->mode == BT_GRAPH_MODE_TIMELINE && gv->canvas_stack != NULL) {
+    int w = gtk_widget_get_width(gv->canvas_stack);
+    int h = gtk_widget_get_height(gv->canvas_stack);
+    float x0 = 54.0f, x1 = (float)w - 54.0f;
+    float axis_y = (float)h - 114.0f;
+    float ledger_y = (float)h - 62.0f;
+    gdouble t_span = MAX((gdouble)(gv->tl_view_max - gv->tl_view_min), 60.0);
+
+    /* Click on bottom LEDGER event -> brush-select +/- 5% time window around event. */
+    if (gv->timeline != NULL && fabs(y - ledger_y) <= 18.0) {
+      for (guint ei = 0; ei < gv->timeline->event_count; ei++) {
+        const BtLedgerEvent *ev = &gv->timeline->events[ei];
+        gdouble frac = ((gdouble)(ev->ts - gv->tl_view_min)) / t_span;
+        gdouble ex = (x0 + 60.0) + frac * ((x1 - x0) - 60.0);
+        if (fabs(x - ex) <= 18.0) {
+          gint64 pad = MAX((gint64)(t_span * 0.06), 43200);
+          gv->tl_brush_t0 = ev->ts - pad;
+          gv->tl_brush_t1 = ev->ts + pad;
+          queue_canvas_draw(gv);
+          return;
+        }
+      }
+    }
+
+    /* Drag on X axis -> brush-filter time range. */
+    if (fabs(y - axis_y) <= 22.0 && x >= x0 && x <= x1) {
+      gv->tl_brushing = TRUE;
+      gv->tl_brush_x0 = x;
+      gv->tl_brush_x1 = x;
+      gv->tl_brush_t0 = 0;
+      gv->tl_brush_t1 = 0;
+      queue_canvas_draw(gv);
+      return;
+    }
+
+    /* Clear brush on clean background click; start timeline pan. */
+    gv->tl_brush_t0 = 0;
+    gv->tl_brush_t1 = 0;
+    gv->tl_pan_start_min = gv->tl_view_min;
+    gv->tl_pan_start_max = gv->tl_view_max;
+  }
+
   gv->animating_cam = FALSE;
   gv->animating_3d = FALSE;
   gv->dragging = TRUE;
@@ -1773,6 +2096,7 @@ static void on_click_released(GtkGestureClick *g, gint n_press, gdouble x, gdoub
   gboolean was_clean_bg_click = gv->dragging && !gv->drag_moved;
   gv->dragging = FALSE;
   gv->drag_moved = FALSE;
+  gv->tl_brushing = FALSE;
   if (was_clean_bg_click && gv->selected_idx >= 0)
     clear_selection(gv);
 }
@@ -1795,10 +2119,30 @@ static void on_motion(GtkEventControllerMotion *c, gdouble x, gdouble y, gpointe
   gv->has_mouse = TRUE;
   gv->last_mouse_x = x;
   gv->last_mouse_y = y;
+  if (gv->tl_brushing && gv->mode == BT_GRAPH_MODE_TIMELINE && gv->canvas_stack != NULL) {
+    int w = gtk_widget_get_width(gv->canvas_stack);
+    gdouble x0 = 54.0, x1 = MAX((gdouble)w - 54.0, x0 + 40.0);
+    gv->tl_brush_x1 = CLAMP(x, x0, x1);
+    gdouble a = MIN(gv->tl_brush_x0, gv->tl_brush_x1);
+    gdouble b = MAX(gv->tl_brush_x0, gv->tl_brush_x1);
+    gdouble t_span = MAX((gdouble)(gv->tl_view_max - gv->tl_view_min), 60.0);
+    gv->tl_brush_t0 = gv->tl_view_min + (gint64)(((a - x0) / (x1 - x0)) * t_span);
+    gv->tl_brush_t1 = gv->tl_view_min + (gint64)(((b - x0) / (x1 - x0)) * t_span);
+    queue_canvas_draw(gv);
+    return;
+  }
   if (gv->dragging) {
     if (hypot(x - gv->drag_start_x, y - gv->drag_start_y) > 4.0)
       gv->drag_moved = TRUE;
-    if (mode_is_3d_orbit(gv->mode) && gv->active_backend == BT_GRAPH_BACKEND_GL) {
+    if (gv->mode == BT_GRAPH_MODE_TIMELINE && gv->canvas_stack != NULL) {
+      int w = gtk_widget_get_width(gv->canvas_stack);
+      gdouble span_px = MAX((gdouble)w - 108.0, 40.0);
+      gdouble t_span = MAX((gdouble)(gv->tl_pan_start_max - gv->tl_pan_start_min), 60.0);
+      gint64 dt = (gint64)(-((x - gv->drag_start_x) / span_px) * t_span);
+      gv->tl_view_min = gv->tl_pan_start_min + dt;
+      gv->tl_view_max = gv->tl_pan_start_max + dt;
+      gv->tl_dirty = TRUE;
+    } else if (mode_is_3d_orbit(gv->mode) && gv->active_backend == BT_GRAPH_BACKEND_GL) {
       gv->user_interacted_3d = TRUE;
       gv->yaw = gv->yaw_start - (x - gv->drag_start_x) * 0.0075;
       gv->pitch = CLAMP(gv->pitch_start + (y - gv->drag_start_y) * 0.0075, -1.35, 1.35);
@@ -1853,6 +2197,20 @@ static gboolean on_scroll(GtkEventControllerScroll *c, gdouble dx, gdouble dy, g
   BtGraphView *gv = ud;
   gv->animating_cam = FALSE;
   gv->animating_3d = FALSE;
+  if (gv->mode == BT_GRAPH_MODE_TIMELINE && gv->canvas_stack != NULL) {
+    int w = gtk_widget_get_width(gv->canvas_stack);
+    gdouble x0 = 54.0, x1 = MAX((gdouble)w - 54.0, x0 + 40.0);
+    gdouble frac = CLAMP((gv->last_mouse_x - x0) / (x1 - x0), 0.0, 1.0);
+    gdouble t_span = MAX((gdouble)(gv->tl_view_max - gv->tl_view_min), 3600.0);
+    gint64 anchor = gv->tl_view_min + (gint64)(frac * t_span);
+    gdouble factor = (dy < 0.0) ? 0.84 : 1.19;
+    gdouble new_span = CLAMP(t_span * factor, 3600.0, 86400.0 * 365.0 * 60.0);
+    gv->tl_view_min = anchor - (gint64)(frac * new_span);
+    gv->tl_view_max = gv->tl_view_min + (gint64)new_span;
+    gv->tl_dirty = TRUE;
+    queue_canvas_draw(gv);
+    return TRUE;
+  }
   if (mode_is_3d_orbit(gv->mode) && gv->active_backend == BT_GRAPH_BACKEND_GL) {
     gv->user_interacted_3d = TRUE;
     gv->dist3d = CLAMP(gv->dist3d * (dy < 0 ? 0.90 : 1.11), 1.35, 5.5);
@@ -1872,6 +2230,16 @@ static void on_btn_zoom_in(GtkButton *b, gpointer ud)
 {
   (void)b;
   BtGraphView *gv = ud;
+  if (gv->mode == BT_GRAPH_MODE_TIMELINE) {
+    gdouble t_span = MAX((gdouble)(gv->tl_view_max - gv->tl_view_min), 3600.0);
+    gint64 mid = gv->tl_view_min + (gint64)(t_span * 0.5);
+    gdouble ns = CLAMP(t_span * 0.78, 3600.0, 86400.0 * 365.0 * 60.0);
+    gv->tl_view_min = mid - (gint64)(ns * 0.5);
+    gv->tl_view_max = gv->tl_view_min + (gint64)ns;
+    gv->tl_dirty = TRUE;
+    queue_canvas_draw(gv);
+    return;
+  }
   if (mode_is_3d_orbit(gv->mode) && gv->active_backend == BT_GRAPH_BACKEND_GL) {
     gv->user_interacted_3d = TRUE;
     gv->target_yaw = gv->yaw;
@@ -1891,6 +2259,16 @@ static void on_btn_zoom_out(GtkButton *b, gpointer ud)
 {
   (void)b;
   BtGraphView *gv = ud;
+  if (gv->mode == BT_GRAPH_MODE_TIMELINE) {
+    gdouble t_span = MAX((gdouble)(gv->tl_view_max - gv->tl_view_min), 3600.0);
+    gint64 mid = gv->tl_view_min + (gint64)(t_span * 0.5);
+    gdouble ns = CLAMP(t_span * 1.28, 3600.0, 86400.0 * 365.0 * 60.0);
+    gv->tl_view_min = mid - (gint64)(ns * 0.5);
+    gv->tl_view_max = gv->tl_view_min + (gint64)ns;
+    gv->tl_dirty = TRUE;
+    queue_canvas_draw(gv);
+    return;
+  }
   if (mode_is_3d_orbit(gv->mode) && gv->active_backend == BT_GRAPH_BACKEND_GL) {
     gv->user_interacted_3d = TRUE;
     gv->target_yaw = gv->yaw;
@@ -1912,6 +2290,15 @@ static void on_btn_fit(GtkButton *b, gpointer ud)
   BtGraphView *gv = ud;
   if (gv->canvas_stack == NULL)
     return;
+  if (gv->mode == BT_GRAPH_MODE_TIMELINE) {
+    gv->tl_view_min = 0;
+    gv->tl_view_max = 0;
+    gv->tl_brush_t0 = 0;
+    gv->tl_brush_t1 = 0;
+    gv->tl_dirty = TRUE;
+    queue_canvas_draw(gv);
+    return;
+  }
   if (mode_is_3d_orbit(gv->mode) && gv->active_backend == BT_GRAPH_BACKEND_GL) {
     gv->target_yaw = 0.35;
     gv->target_pitch = (gv->mode == BT_GRAPH_MODE_GALAXY) ? 0.58 : 0.20;
@@ -1931,6 +2318,15 @@ static void on_btn_reset(GtkButton *b, gpointer ud)
 {
   (void)b;
   BtGraphView *gv = ud;
+  if (gv->mode == BT_GRAPH_MODE_TIMELINE) {
+    gv->tl_view_min = 0;
+    gv->tl_view_max = 0;
+    gv->tl_brush_t0 = 0;
+    gv->tl_brush_t1 = 0;
+    gv->tl_dirty = TRUE;
+    queue_canvas_draw(gv);
+    return;
+  }
   if (mode_is_3d_orbit(gv->mode) && gv->active_backend == BT_GRAPH_BACKEND_GL) {
     gv->target_yaw = 0.35;
     gv->target_pitch = (gv->mode == BT_GRAPH_MODE_GALAXY) ? 0.58 : 0.20;
@@ -1951,8 +2347,9 @@ static void sync_toolbar_buttons(BtGraphView *gv)
   gboolean gl_ok = (gv->active_backend == BT_GRAPH_BACKEND_GL);
   gboolean is3d = gl_ok && (gv->mode == BT_GRAPH_MODE_3D);
   gboolean is_gal = gl_ok && (gv->mode == BT_GRAPH_MODE_GALAXY);
+  gboolean is_tl = (gv->mode == BT_GRAPH_MODE_TIMELINE);
   if (gv->btn_2d != NULL) {
-    if (!is3d && !is_gal)
+    if (!is3d && !is_gal && !is_tl)
       gtk_widget_add_css_class(gv->btn_2d, "bt-pill-active");
     else
       gtk_widget_remove_css_class(gv->btn_2d, "bt-pill-active");
@@ -1976,6 +2373,34 @@ static void sync_toolbar_buttons(BtGraphView *gv)
       gtk_widget_add_css_class(gv->btn_galaxy, "bt-pill-active");
     else
       gtk_widget_remove_css_class(gv->btn_galaxy, "bt-pill-active");
+  }
+  if (gv->btn_timeline != NULL) {
+    if (is_tl)
+      gtk_widget_add_css_class(gv->btn_timeline, "bt-pill-active");
+    else
+      gtk_widget_remove_css_class(gv->btn_timeline, "bt-pill-active");
+  }
+  if (gv->tl_controls_box != NULL)
+    gtk_widget_set_visible(gv->tl_controls_box, is_tl);
+  if (gv->btn_tl_organic != NULL) {
+    if (!gv->tl_kept) gtk_widget_add_css_class(gv->btn_tl_organic, "bt-pill-active");
+    else gtk_widget_remove_css_class(gv->btn_tl_organic, "bt-pill-active");
+  }
+  if (gv->btn_tl_kept != NULL) {
+    if (gv->tl_kept) gtk_widget_add_css_class(gv->btn_tl_kept, "bt-pill-active");
+    else gtk_widget_remove_css_class(gv->btn_tl_kept, "bt-pill-active");
+  }
+  if (gv->btn_tl_lane_folder != NULL) {
+    if (gv->tl_lane_by == BT_TL_LANE_FOLDER)
+      gtk_widget_add_css_class(gv->btn_tl_lane_folder, "bt-pill-active");
+    else
+      gtk_widget_remove_css_class(gv->btn_tl_lane_folder, "bt-pill-active");
+  }
+  if (gv->btn_tl_lane_type != NULL) {
+    if (gv->tl_lane_by == BT_TL_LANE_TYPE)
+      gtk_widget_add_css_class(gv->btn_tl_lane_type, "bt-pill-active");
+    else
+      gtk_widget_remove_css_class(gv->btn_tl_lane_type, "bt-pill-active");
   }
   gboolean hi = (gv->quality == BT_GRAPH_QUALITY_HIGH);
   if (gv->btn_q_low != NULL) {
@@ -2226,22 +2651,86 @@ static void apply_kind_visibility(BtGraphView *gv, gboolean upload_gl)
   update_legend(gv);
 }
 
+static void notify_prefs_changed(BtGraphView *gv)
+{
+  if (gv != NULL && gv->on_prefs != NULL)
+    gv->on_prefs(gv->show_tags, gv->show_ghosts, gv->prefs_ud);
+}
+
 static void on_btn_2d_clicked(GtkButton *b, gpointer ud)
 {
   (void)b;
   bt_graphview_set_mode(ud, BT_GRAPH_MODE_2D);
+  notify_prefs_changed(ud);
 }
 
 static void on_btn_3d_clicked(GtkButton *b, gpointer ud)
 {
   (void)b;
   bt_graphview_set_mode(ud, BT_GRAPH_MODE_3D);
+  notify_prefs_changed(ud);
 }
 
 static void on_btn_galaxy_clicked(GtkButton *b, gpointer ud)
 {
   (void)b;
   bt_graphview_set_mode(ud, BT_GRAPH_MODE_GALAXY);
+  notify_prefs_changed(ud);
+}
+
+static void on_btn_timeline_clicked(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  bt_graphview_set_mode(ud, BT_GRAPH_MODE_TIMELINE);
+  notify_prefs_changed(ud);
+}
+
+static void on_btn_tl_organic_clicked(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  BtGraphView *gv = ud;
+  gv->tl_kept = FALSE;
+  sync_toolbar_buttons(gv);
+  if (gv->reduce_motion) {
+    gv->tl_kept_t = 0.0;
+    queue_canvas_draw(gv);
+  } else {
+    ensure_tick(gv);
+  }
+}
+
+static void on_btn_tl_kept_clicked(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  BtGraphView *gv = ud;
+  gv->tl_kept = TRUE;
+  sync_toolbar_buttons(gv);
+  if (gv->reduce_motion) {
+    gv->tl_kept_t = 1.0;
+    queue_canvas_draw(gv);
+  } else {
+    ensure_tick(gv);
+  }
+}
+
+static void on_btn_tl_lane_folder_clicked(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  BtGraphView *gv = ud;
+  gv->tl_lane_by = BT_TL_LANE_FOLDER;
+  gv->tl_dirty = TRUE;
+  sync_toolbar_buttons(gv);
+  queue_canvas_draw(gv);
+}
+
+static void on_btn_tl_lane_type_clicked(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  BtGraphView *gv = ud;
+  gv->tl_lane_by = BT_TL_LANE_TYPE;
+  gv->tl_dirty = TRUE;
+  sync_toolbar_buttons(gv);
+  queue_canvas_draw(gv);
 }
 
 static void on_btn_q_low_clicked(GtkButton *b, gpointer ud)
@@ -2836,6 +3325,12 @@ static void on_canvas_destroy(GtkWidget *area, gpointer ud)
   gv->btn_2d = NULL;
   gv->btn_3d = NULL;
   gv->btn_galaxy = NULL;
+  gv->btn_timeline = NULL;
+  gv->tl_controls_box = NULL;
+  gv->btn_tl_organic = NULL;
+  gv->btn_tl_kept = NULL;
+  gv->btn_tl_lane_folder = NULL;
+  gv->btn_tl_lane_type = NULL;
   gv->btn_q_low = NULL;
   gv->btn_q_high = NULL;
   gv->btn_pulse = NULL;
@@ -2984,6 +3479,37 @@ BtGraphView *bt_graphview_new(BtGraphOpenNoteFn on_open, BtGraphOpenTermFn on_op
   gtk_widget_add_css_class(gv->btn_galaxy, "bt-graph-pill");
   g_signal_connect(gv->btn_galaxy, "clicked", G_CALLBACK(on_btn_galaxy_clicked), gv);
 
+  gv->btn_timeline = gtk_button_new_with_label("Timeline");
+  gtk_widget_add_css_class(gv->btn_timeline, "bt-graph-pill");
+  gtk_widget_set_tooltip_text(gv->btn_timeline,
+                              "Chronological Timeline view (wavy lanes, Organic/Kept, brush, ledger)");
+  g_signal_connect(gv->btn_timeline, "clicked", G_CALLBACK(on_btn_timeline_clicked), gv);
+
+  /* Timeline-specific sub-controls (visible only in Timeline mode). */
+  gv->tl_controls_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
+  GtkWidget *tl_sep = gtk_separator_new(GTK_ORIENTATION_VERTICAL);
+  gtk_widget_add_css_class(tl_sep, "bt-graph-toolbar-sep");
+  gv->btn_tl_organic = gtk_button_new_with_label("Organic");
+  gtk_widget_add_css_class(gv->btn_tl_organic, "bt-graph-pill");
+  g_signal_connect(gv->btn_tl_organic, "clicked", G_CALLBACK(on_btn_tl_organic_clicked), gv);
+  gv->btn_tl_kept = gtk_button_new_with_label("Kept");
+  gtk_widget_add_css_class(gv->btn_tl_kept, "bt-graph-pill");
+  g_signal_connect(gv->btn_tl_kept, "clicked", G_CALLBACK(on_btn_tl_kept_clicked), gv);
+  GtkWidget *lbl_lane = gtk_label_new("Lane:");
+  gtk_widget_add_css_class(lbl_lane, "bt-graph-toolbar-lbl");
+  gv->btn_tl_lane_folder = gtk_button_new_with_label("Folder");
+  gtk_widget_add_css_class(gv->btn_tl_lane_folder, "bt-graph-pill");
+  g_signal_connect(gv->btn_tl_lane_folder, "clicked", G_CALLBACK(on_btn_tl_lane_folder_clicked), gv);
+  gv->btn_tl_lane_type = gtk_button_new_with_label("Type");
+  gtk_widget_add_css_class(gv->btn_tl_lane_type, "bt-graph-pill");
+  g_signal_connect(gv->btn_tl_lane_type, "clicked", G_CALLBACK(on_btn_tl_lane_type_clicked), gv);
+  gtk_box_append(GTK_BOX(gv->tl_controls_box), tl_sep);
+  gtk_box_append(GTK_BOX(gv->tl_controls_box), gv->btn_tl_organic);
+  gtk_box_append(GTK_BOX(gv->tl_controls_box), gv->btn_tl_kept);
+  gtk_box_append(GTK_BOX(gv->tl_controls_box), lbl_lane);
+  gtk_box_append(GTK_BOX(gv->tl_controls_box), gv->btn_tl_lane_folder);
+  gtk_box_append(GTK_BOX(gv->tl_controls_box), gv->btn_tl_lane_type);
+
   GtkWidget *sep1 = gtk_separator_new(GTK_ORIENTATION_VERTICAL);
   gtk_widget_add_css_class(sep1, "bt-graph-toolbar-sep");
 
@@ -3052,6 +3578,8 @@ BtGraphView *bt_graphview_new(BtGraphOpenNoteFn on_open, BtGraphOpenTermFn on_op
   gtk_box_append(GTK_BOX(mode_bar), gv->btn_2d);
   gtk_box_append(GTK_BOX(mode_bar), gv->btn_3d);
   gtk_box_append(GTK_BOX(mode_bar), gv->btn_galaxy);
+  gtk_box_append(GTK_BOX(mode_bar), gv->btn_timeline);
+  gtk_box_append(GTK_BOX(mode_bar), gv->tl_controls_box);
   gtk_box_append(GTK_BOX(mode_bar), sep1);
   gtk_box_append(GTK_BOX(mode_bar), lbl_qual);
   gtk_box_append(GTK_BOX(mode_bar), gv->btn_q_low);
@@ -3186,6 +3714,7 @@ void bt_graphview_free(BtGraphView *gv)
   g_free(gv->nbr_mask);
   g_free(gv->pick_scratch);
   bt_folder_colors_free(gv->folder_colors);
+  bt_timeline_free(gv->timeline);
   g_free(gv->vault_root_path);
   g_free(gv->isolated_folder);
   g_free(gv->color_target_folder);
@@ -3226,6 +3755,11 @@ void bt_graphview_set_graph(BtGraphView *gv, BtGraph *graph, gboolean animate_gr
   gv->stack_total = 0u;
   gv->hover_fade = 0.0;
   gv->needs_fit = TRUE;
+  gv->tl_dirty = TRUE;
+  gv->tl_view_min = 0;
+  gv->tl_view_max = 0;
+  gv->tl_brush_t0 = 0;
+  gv->tl_brush_t1 = 0;
   /* Hide wikilink clutter by default in dense views (>80 nodes); user can toggle "Links". */
   gv->show_links = (graph == NULL || graph->nodes->len <= 80u);
   apply_folder_colors_and_refresh(gv, FALSE);
@@ -3290,6 +3824,17 @@ void bt_graphview_set_mode(BtGraphView *gv, BtGraphMode mode)
     mode = BT_GRAPH_MODE_2D;
   BtGraphMode prev = gv->mode;
   gv->mode = mode;
+
+  /* Switch canvas stack: Timeline renders crisp editorial 2D on Cairo; others use GL when ready. */
+  if (gv->canvas_stack != NULL) {
+    if (mode == BT_GRAPH_MODE_TIMELINE) {
+      gv->tl_dirty = TRUE;
+      gtk_stack_set_visible_child_name(GTK_STACK(gv->canvas_stack), "cairo");
+    } else if (gv->active_backend == BT_GRAPH_BACKEND_GL && gv->gl != NULL) {
+      gtk_stack_set_visible_child_name(GTK_STACK(gv->canvas_stack), "gl");
+    }
+  }
+
   if (mode_is_3d_orbit(mode)) {
     gv->user_interacted_3d = FALSE;
     if (mode == BT_GRAPH_MODE_GALAXY && prev != BT_GRAPH_MODE_GALAXY) {
