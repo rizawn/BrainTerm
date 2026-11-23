@@ -24,7 +24,9 @@ typedef enum {
 
 typedef enum {
   BT_GRAPH_MODE_2D = 0,
-  BT_GRAPH_MODE_3D = 1
+  BT_GRAPH_MODE_3D = 1,
+  BT_GRAPH_MODE_GALAXY = 2,
+  BT_GRAPH_MODE_TIMELINE = 3
 } BtGraphMode;
 
 /* Neighbor mask values written by bt_graph_compute_neighbors(). */
@@ -141,6 +143,12 @@ guint bt_graph_place_labels(BtGraphLabelCand *cands, guint cand_count,
 /* Deterministic 3D cortex/spine/brainstem projection derived from BtGraph.
  * Writes MIN(g->nodes->len, max_pts) normalized points into out_pts. */
 void bt_graph_compute_3d_layout(const BtGraph *g, BtGraphVec3 *out_pts, guint max_pts);
+
+/* Deterministic 3D Andromeda spiral-disk Galaxy layout (pure C, GTK-free).
+ * arms: 3..5 logarithmic spiral arms (0 -> default 4).
+ * Vertical height (y) has puffy core bulge, thin disk, 3% halo, and subtle rim warp. */
+void bt_graph_compute_galaxy_layout(const BtGraph *g, guint arms, BtGraphVec3 *out_pts,
+                                    guint max_pts);
 
 /* Builds column-major 4x4 perspective orbit MVP matrix for 3D graph mode. */
 void bt_graph_build_orbit_mvp(gdouble yaw, gdouble pitch, gdouble dist, gdouble aspect,

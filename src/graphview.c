@@ -764,6 +764,7 @@ struct BtGraphView {
   BtGraphGL *gl;           /* GtkGLArea backend */
   GtkWidget *btn_2d;
   GtkWidget *btn_3d;
+  GtkWidget *btn_galaxy;
   GtkWidget *btn_q_low;
   GtkWidget *btn_q_high;
   GtkWidget *btn_pulse;
@@ -784,6 +785,10 @@ struct BtGraphView {
   BtGraphAlive *alive;
   BtGraph *graph;
   BtGraphVec3 *pts3d;
+  BtGraphVec3 *pts3d_from;
+  BtGraphVec3 *pts3d_target;
+  gdouble morph_t;
+  gboolean morphing_3d;
   guint pts3d_count;
   guint layout3d_gen;
 
@@ -922,28 +927,59 @@ static void refresh_neighbor_mask(BtGraphView *gv)
 
 /* --------------------- worker-thread 3D layout calculation -- */
 
+static inline gboolean mode_is_3d_orbit(BtGraphMode m)
+{
+  return m == BT_GRAPH_MODE_3D || m == BT_GRAPH_MODE_GALAXY;
+}
+
 typedef struct {
   BtGraphAlive *alive;
   guint gen;
+  BtGraphMode mode;
   BtGraph *snapshot; /* lightweight node-only clone for worker thread */
   BtGraphVec3 *pts;
   guint count;
 } BtLayout3DJob;
+
+static void ensure_tick(BtGraphView *gv);
 
 static gboolean on_layout3d_done(gpointer ud)
 {
   BtLayout3DJob *job = ud;
   if (job->alive->alive && job->alive->gv != NULL && job->alive->gv->layout3d_gen == job->gen) {
     BtGraphView *gv = job->alive->gv;
-    g_free(gv->pts3d);
-    gv->pts3d = job->pts;
-    gv->pts3d_count = job->count;
-    job->pts = NULL;
-    bt_graph_gl_set_layout3d(gv->gl, gv->pts3d, gv->pts3d_count);
+    if (gv->pts3d != NULL && gv->pts3d_count == job->count && !gv->reduce_motion &&
+        mode_is_3d_orbit(gv->mode)) {
+      /* Animate smoothly (~700ms) from previous 3D positions to new layout! */
+      g_free(gv->pts3d_from);
+      g_free(gv->pts3d_target);
+      gv->pts3d_from = g_memdup2(gv->pts3d, job->count * sizeof(BtGraphVec3));
+      gv->pts3d_target = job->pts;
+      job->pts = NULL;
+      gv->morph_t = 0.0;
+      gv->morphing_3d = TRUE;
+      ensure_tick(gv);
+    } else {
+      g_free(gv->pts3d);
+      g_clear_pointer(&gv->pts3d_from, g_free);
+      g_clear_pointer(&gv->pts3d_target, g_free);
+      gv->pts3d = job->pts;
+      gv->pts3d_count = job->count;
+      gv->morphing_3d = FALSE;
+      gv->morph_t = 1.0;
+      job->pts = NULL;
+      bt_graph_gl_set_layout3d(gv->gl, gv->pts3d, gv->pts3d_count);
+    }
     queue_canvas_draw(gv);
   }
   g_free(job->pts);
   if (job->snapshot != NULL) {
+    for (guint i = 0; i < job->snapshot->nodes->len; i++) {
+      BtGraphNode *nd = g_ptr_array_index(job->snapshot->nodes, i);
+      g_free(nd->id);
+      g_free(nd->relpath);
+      g_free(nd->top_folder);
+    }
     g_ptr_array_unref(job->snapshot->nodes);
     g_free(job->snapshot);
   }
@@ -957,7 +993,10 @@ static gpointer layout3d_worker(gpointer ud)
   BtLayout3DJob *job = ud;
   if (job->count > 0 && job->snapshot != NULL) {
     job->pts = g_new0(BtGraphVec3, job->count);
-    bt_graph_compute_3d_layout(job->snapshot, job->pts, job->count);
+    if (job->mode == BT_GRAPH_MODE_GALAXY)
+      bt_graph_compute_galaxy_layout(job->snapshot, 4u, job->pts, job->count);
+    else
+      bt_graph_compute_3d_layout(job->snapshot, job->pts, job->count);
   }
   g_idle_add(on_layout3d_done, job);
   return NULL;
@@ -968,7 +1007,10 @@ static void schedule_layout3d_worker(BtGraphView *gv)
   gv->layout3d_gen++;
   if (gv->graph == NULL || gv->graph->nodes == NULL || gv->graph->nodes->len == 0) {
     g_clear_pointer(&gv->pts3d, g_free);
+    g_clear_pointer(&gv->pts3d_from, g_free);
+    g_clear_pointer(&gv->pts3d_target, g_free);
     gv->pts3d_count = 0;
+    gv->morphing_3d = FALSE;
     bt_graph_gl_set_layout3d(gv->gl, NULL, 0);
     return;
   }
@@ -979,11 +1021,16 @@ static void schedule_layout3d_worker(BtGraphView *gv)
   for (guint i = 0; i < n; i++) {
     const BtGraphNode *src = g_ptr_array_index(gv->graph->nodes, i);
     BtGraphNode *dst = g_new0(BtGraphNode, 1);
+    dst->id = g_strdup(src->id);
+    dst->relpath = g_strdup(src->relpath);
+    dst->top_folder = g_strdup(src->top_folder);
     dst->x = src->x;
     dst->y = src->y;
     dst->hue = src->hue;
     dst->kind = src->kind;
     dst->degree = src->degree;
+    dst->parent_idx = src->parent_idx;
+    dst->child_count = src->child_count;
     dst->visible = src->visible;
     g_ptr_array_add(snap->nodes, dst);
   }
@@ -991,6 +1038,7 @@ static void schedule_layout3d_worker(BtGraphView *gv)
   BtLayout3DJob *job = g_new0(BtLayout3DJob, 1);
   job->alive = alive_ref(gv->alive);
   job->gen = gv->layout3d_gen;
+  job->mode = gv->mode;
   job->snapshot = snap;
   job->count = n;
   GThread *th = g_thread_new("bt-graph-3d", layout3d_worker, job);
@@ -1046,7 +1094,7 @@ static gboolean graph_has_pending_birth(const BtGraph *g)
 
 static gboolean needs_idle_orbit(const BtGraphView *gv)
 {
-  return gv->mode == BT_GRAPH_MODE_3D && gv->active_backend == BT_GRAPH_BACKEND_GL &&
+  return mode_is_3d_orbit(gv->mode) && gv->active_backend == BT_GRAPH_BACKEND_GL &&
          !gv->user_interacted_3d && !gv->reduce_motion && gv->window_active &&
          gv->graph != NULL && gv->graph->nodes->len > 0;
 }
@@ -1184,7 +1232,9 @@ static void update_debug_overlay(BtGraphView *gv, gint64 now_fc_us)
   const gchar *gl_ver = is_gl ? bt_graph_gl_version(gv->gl) : "N/A";
   const gchar *gpu = is_gl ? bt_graph_gl_renderer(gv->gl) : "CPU (Cairo fallback)";
   const gchar *qual = (gv->quality == BT_GRAPH_QUALITY_HIGH) ? "High" : "Low";
-  const gchar *mode = (is_gl && gv->mode == BT_GRAPH_MODE_3D) ? "3D" : "2D";
+  const gchar *mode = (is_gl && gv->mode == BT_GRAPH_MODE_GALAXY)
+                          ? "Galaxy"
+                          : ((is_gl && gv->mode == BT_GRAPH_MODE_3D) ? "3D" : "2D");
   const gchar *tick_st = (gv->tick_id != 0) ? "running" : "idle";
 
   char buf[512];
@@ -1243,9 +1293,9 @@ static gboolean on_tick(GtkWidget *widget, GdkFrameClock *clock, gpointer ud)
     gv->hover_fade = target_hf;
   }
 
-  /* 2b. Smooth hover fisheye spread in 3D when hovering (disabled by Reduce motion). */
+  /* 2b. Smooth hover fisheye spread in 3D/Galaxy when hovering (disabled by Reduce motion). */
   gdouble target_spread = (gv->has_mouse && !gv->dragging && !gv->reduce_motion &&
-                           gv->mode == BT_GRAPH_MODE_3D && gv->active_backend == BT_GRAPH_BACKEND_GL)
+                           mode_is_3d_orbit(gv->mode) && gv->active_backend == BT_GRAPH_BACKEND_GL)
                               ? 1.0
                               : 0.0;
   if (gv->reduce_motion) {
@@ -1255,6 +1305,26 @@ static gboolean on_tick(GtkWidget *widget, GdkFrameClock *clock, gpointer ud)
     active = TRUE;
   } else {
     gv->spread_str = target_spread;
+  }
+
+  /* 2c. Smooth 700ms 3D <-> Galaxy layout transition. */
+  if (gv->morphing_3d && gv->pts3d != NULL && gv->pts3d_from != NULL && gv->pts3d_target != NULL) {
+    gv->morph_t = gv->reduce_motion ? 1.0 : MIN(gv->morph_t + dt / 0.70, 1.0);
+    gdouble e = 1.0 - pow(1.0 - gv->morph_t, 3.0); /* ease-out cubic */
+    float fe = (float)e;
+    for (guint i = 0; i < gv->pts3d_count; i++) {
+      gv->pts3d[i].x = gv->pts3d_from[i].x + (gv->pts3d_target[i].x - gv->pts3d_from[i].x) * fe;
+      gv->pts3d[i].y = gv->pts3d_from[i].y + (gv->pts3d_target[i].y - gv->pts3d_from[i].y) * fe;
+      gv->pts3d[i].z = gv->pts3d_from[i].z + (gv->pts3d_target[i].z - gv->pts3d_from[i].z) * fe;
+    }
+    bt_graph_gl_set_layout3d(gv->gl, gv->pts3d, gv->pts3d_count);
+    if (gv->morph_t >= 1.0) {
+      gv->morphing_3d = FALSE;
+      g_clear_pointer(&gv->pts3d_from, g_free);
+      g_clear_pointer(&gv->pts3d_target, g_free);
+    } else {
+      active = TRUE;
+    }
   }
 
   /* 3. Smooth 2D camera transition. */
@@ -1452,7 +1522,7 @@ static guint pick_stack_at(BtGraphView *gv, gdouble sx, gdouble sy, BtPickCand *
     gv->pick_scratch_cap = n;
   }
 
-  gboolean is3d = (gv->mode == BT_GRAPH_MODE_3D && gv->active_backend == BT_GRAPH_BACKEND_GL &&
+  gboolean is3d = (mode_is_3d_orbit(gv->mode) && gv->active_backend == BT_GRAPH_BACKEND_GL &&
                    gv->pts3d != NULL && gv->pts3d_count > 0);
   float mvp[16];
   if (is3d) {
@@ -1529,7 +1599,7 @@ static void center_on_node(BtGraphView *gv, gint hit)
   if (gv == NULL || gv->graph == NULL || hit < 0 || (guint)hit >= gv->graph->nodes->len)
     return;
   const BtGraphNode *nd = g_ptr_array_index(gv->graph->nodes, (guint)hit);
-  if (gv->mode == BT_GRAPH_MODE_3D && gv->pts3d != NULL && (guint)hit < gv->pts3d_count) {
+  if (mode_is_3d_orbit(gv->mode) && gv->pts3d != NULL && (guint)hit < gv->pts3d_count) {
     gv->user_interacted_3d = TRUE;
     const BtGraphVec3 *p = &gv->pts3d[hit];
     gv->target_yaw = atan2((gdouble)p->x, (gdouble)p->z);
@@ -1692,7 +1762,7 @@ static void on_click_pressed(GtkGestureClick *g, gint n_press, gdouble x, gdoubl
   gv->pan_start_y = gv->pan_y;
   gv->yaw_start = gv->yaw;
   gv->pitch_start = gv->pitch;
-  if (gv->mode == BT_GRAPH_MODE_3D)
+  if (mode_is_3d_orbit(gv->mode))
     gv->user_interacted_3d = TRUE;
 }
 
@@ -1728,7 +1798,7 @@ static void on_motion(GtkEventControllerMotion *c, gdouble x, gdouble y, gpointe
   if (gv->dragging) {
     if (hypot(x - gv->drag_start_x, y - gv->drag_start_y) > 4.0)
       gv->drag_moved = TRUE;
-    if (gv->mode == BT_GRAPH_MODE_3D && gv->active_backend == BT_GRAPH_BACKEND_GL) {
+    if (mode_is_3d_orbit(gv->mode) && gv->active_backend == BT_GRAPH_BACKEND_GL) {
       gv->user_interacted_3d = TRUE;
       gv->yaw = gv->yaw_start - (x - gv->drag_start_x) * 0.0075;
       gv->pitch = CLAMP(gv->pitch_start + (y - gv->drag_start_y) * 0.0075, -1.35, 1.35);
@@ -1751,7 +1821,7 @@ static void on_motion(GtkEventControllerMotion *c, gdouble x, gdouble y, gpointe
       } else {
         ensure_tick(gv);
       }
-    } else if (gv->mode == BT_GRAPH_MODE_3D && gv->active_backend == BT_GRAPH_BACKEND_GL &&
+    } else if (mode_is_3d_orbit(gv->mode) && gv->active_backend == BT_GRAPH_BACKEND_GL &&
                !gv->reduce_motion) {
       ensure_tick(gv);
       queue_canvas_draw(gv);
@@ -1783,7 +1853,7 @@ static gboolean on_scroll(GtkEventControllerScroll *c, gdouble dx, gdouble dy, g
   BtGraphView *gv = ud;
   gv->animating_cam = FALSE;
   gv->animating_3d = FALSE;
-  if (gv->mode == BT_GRAPH_MODE_3D && gv->active_backend == BT_GRAPH_BACKEND_GL) {
+  if (mode_is_3d_orbit(gv->mode) && gv->active_backend == BT_GRAPH_BACKEND_GL) {
     gv->user_interacted_3d = TRUE;
     gv->dist3d = CLAMP(gv->dist3d * (dy < 0 ? 0.90 : 1.11), 1.35, 5.5);
   } else {
@@ -1802,7 +1872,7 @@ static void on_btn_zoom_in(GtkButton *b, gpointer ud)
 {
   (void)b;
   BtGraphView *gv = ud;
-  if (gv->mode == BT_GRAPH_MODE_3D && gv->active_backend == BT_GRAPH_BACKEND_GL) {
+  if (mode_is_3d_orbit(gv->mode) && gv->active_backend == BT_GRAPH_BACKEND_GL) {
     gv->user_interacted_3d = TRUE;
     gv->target_yaw = gv->yaw;
     gv->target_pitch = gv->pitch;
@@ -1821,7 +1891,7 @@ static void on_btn_zoom_out(GtkButton *b, gpointer ud)
 {
   (void)b;
   BtGraphView *gv = ud;
-  if (gv->mode == BT_GRAPH_MODE_3D && gv->active_backend == BT_GRAPH_BACKEND_GL) {
+  if (mode_is_3d_orbit(gv->mode) && gv->active_backend == BT_GRAPH_BACKEND_GL) {
     gv->user_interacted_3d = TRUE;
     gv->target_yaw = gv->yaw;
     gv->target_pitch = gv->pitch;
@@ -1842,10 +1912,10 @@ static void on_btn_fit(GtkButton *b, gpointer ud)
   BtGraphView *gv = ud;
   if (gv->canvas_stack == NULL)
     return;
-  if (gv->mode == BT_GRAPH_MODE_3D && gv->active_backend == BT_GRAPH_BACKEND_GL) {
+  if (mode_is_3d_orbit(gv->mode) && gv->active_backend == BT_GRAPH_BACKEND_GL) {
     gv->target_yaw = 0.35;
-    gv->target_pitch = 0.20;
-    gv->target_dist3d = 2.8;
+    gv->target_pitch = (gv->mode == BT_GRAPH_MODE_GALAXY) ? 0.58 : 0.20;
+    gv->target_dist3d = (gv->mode == BT_GRAPH_MODE_GALAXY) ? 2.65 : 2.8;
     gv->animating_3d = TRUE;
     gv->user_interacted_3d = FALSE;
   } else {
@@ -1861,10 +1931,10 @@ static void on_btn_reset(GtkButton *b, gpointer ud)
 {
   (void)b;
   BtGraphView *gv = ud;
-  if (gv->mode == BT_GRAPH_MODE_3D && gv->active_backend == BT_GRAPH_BACKEND_GL) {
+  if (mode_is_3d_orbit(gv->mode) && gv->active_backend == BT_GRAPH_BACKEND_GL) {
     gv->target_yaw = 0.35;
-    gv->target_pitch = 0.20;
-    gv->target_dist3d = 2.8;
+    gv->target_pitch = (gv->mode == BT_GRAPH_MODE_GALAXY) ? 0.58 : 0.20;
+    gv->target_dist3d = (gv->mode == BT_GRAPH_MODE_GALAXY) ? 2.65 : 2.8;
     gv->animating_3d = TRUE;
     gv->user_interacted_3d = FALSE;
   } else {
@@ -1880,8 +1950,9 @@ static void sync_toolbar_buttons(BtGraphView *gv)
 {
   gboolean gl_ok = (gv->active_backend == BT_GRAPH_BACKEND_GL);
   gboolean is3d = gl_ok && (gv->mode == BT_GRAPH_MODE_3D);
+  gboolean is_gal = gl_ok && (gv->mode == BT_GRAPH_MODE_GALAXY);
   if (gv->btn_2d != NULL) {
-    if (!is3d)
+    if (!is3d && !is_gal)
       gtk_widget_add_css_class(gv->btn_2d, "bt-pill-active");
     else
       gtk_widget_remove_css_class(gv->btn_2d, "bt-pill-active");
@@ -1895,6 +1966,16 @@ static void sync_toolbar_buttons(BtGraphView *gv)
       gtk_widget_add_css_class(gv->btn_3d, "bt-pill-active");
     else
       gtk_widget_remove_css_class(gv->btn_3d, "bt-pill-active");
+  }
+  if (gv->btn_galaxy != NULL) {
+    gtk_widget_set_sensitive(gv->btn_galaxy, gl_ok);
+    gtk_widget_set_tooltip_text(
+        gv->btn_galaxy, gl_ok ? "Galaxy spiral disk view (folder star clusters, orbitable 3D)"
+                              : "Galaxy view requires OpenGL (running Cairo fallback)");
+    if (is_gal)
+      gtk_widget_add_css_class(gv->btn_galaxy, "bt-pill-active");
+    else
+      gtk_widget_remove_css_class(gv->btn_galaxy, "bt-pill-active");
   }
   gboolean hi = (gv->quality == BT_GRAPH_QUALITY_HIGH);
   if (gv->btn_q_low != NULL) {
@@ -2155,6 +2236,12 @@ static void on_btn_3d_clicked(GtkButton *b, gpointer ud)
 {
   (void)b;
   bt_graphview_set_mode(ud, BT_GRAPH_MODE_3D);
+}
+
+static void on_btn_galaxy_clicked(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  bt_graphview_set_mode(ud, BT_GRAPH_MODE_GALAXY);
 }
 
 static void on_btn_q_low_clicked(GtkButton *b, gpointer ud)
@@ -2748,6 +2835,7 @@ static void on_canvas_destroy(GtkWidget *area, gpointer ud)
   gv->root = NULL;
   gv->btn_2d = NULL;
   gv->btn_3d = NULL;
+  gv->btn_galaxy = NULL;
   gv->btn_q_low = NULL;
   gv->btn_q_high = NULL;
   gv->btn_pulse = NULL;
@@ -2892,6 +2980,10 @@ BtGraphView *bt_graphview_new(BtGraphOpenNoteFn on_open, BtGraphOpenTermFn on_op
   gtk_widget_add_css_class(gv->btn_3d, "bt-graph-pill");
   g_signal_connect(gv->btn_3d, "clicked", G_CALLBACK(on_btn_3d_clicked), gv);
 
+  gv->btn_galaxy = gtk_button_new_with_label("Galaxy");
+  gtk_widget_add_css_class(gv->btn_galaxy, "bt-graph-pill");
+  g_signal_connect(gv->btn_galaxy, "clicked", G_CALLBACK(on_btn_galaxy_clicked), gv);
+
   GtkWidget *sep1 = gtk_separator_new(GTK_ORIENTATION_VERTICAL);
   gtk_widget_add_css_class(sep1, "bt-graph-toolbar-sep");
 
@@ -2959,6 +3051,7 @@ BtGraphView *bt_graphview_new(BtGraphOpenNoteFn on_open, BtGraphOpenTermFn on_op
   gtk_box_append(GTK_BOX(mode_bar), lbl_view);
   gtk_box_append(GTK_BOX(mode_bar), gv->btn_2d);
   gtk_box_append(GTK_BOX(mode_bar), gv->btn_3d);
+  gtk_box_append(GTK_BOX(mode_bar), gv->btn_galaxy);
   gtk_box_append(GTK_BOX(mode_bar), sep1);
   gtk_box_append(GTK_BOX(mode_bar), lbl_qual);
   gtk_box_append(GTK_BOX(mode_bar), gv->btn_q_low);
@@ -3087,6 +3180,8 @@ void bt_graphview_free(BtGraphView *gv)
     gv->cairo_renderer->vt->destroy(gv->cairo_renderer);
   bt_graph_gl_free(gv->gl);
   g_free(gv->pts3d);
+  g_free(gv->pts3d_from);
+  g_free(gv->pts3d_target);
   g_free(gv->pending_notice);
   g_free(gv->nbr_mask);
   g_free(gv->pick_scratch);
@@ -3191,13 +3286,30 @@ void bt_graphview_set_mode(BtGraphView *gv, BtGraphMode mode)
 {
   if (gv == NULL)
     return;
-  if (mode == BT_GRAPH_MODE_3D && gv->active_backend != BT_GRAPH_BACKEND_GL)
+  if (mode_is_3d_orbit(mode) && gv->active_backend != BT_GRAPH_BACKEND_GL)
     mode = BT_GRAPH_MODE_2D;
+  BtGraphMode prev = gv->mode;
   gv->mode = mode;
-  if (mode == BT_GRAPH_MODE_3D)
+  if (mode_is_3d_orbit(mode)) {
     gv->user_interacted_3d = FALSE;
+    if (mode == BT_GRAPH_MODE_GALAXY && prev != BT_GRAPH_MODE_GALAXY) {
+      gv->target_yaw = 0.35;
+      gv->target_pitch = 0.58; /* angled down onto Andromeda spiral disk */
+      gv->target_dist3d = 2.65;
+      if (gv->reduce_motion) {
+        gv->yaw = gv->target_yaw;
+        gv->pitch = gv->target_pitch;
+        gv->dist3d = gv->target_dist3d;
+        gv->animating_3d = FALSE;
+      } else {
+        gv->animating_3d = TRUE;
+      }
+    }
+    if (prev != mode)
+      schedule_layout3d_worker(gv);
+  }
   sync_toolbar_buttons(gv);
-  if (needs_ambient_tick(gv))
+  if (needs_ambient_tick(gv) || gv->animating_3d || gv->morphing_3d)
     ensure_tick(gv);
   else
     stop_tick_if_idle(gv);

@@ -92,7 +92,7 @@ struct BtGraphGL {
   GLuint prog_composite;
 
   /* Cached uniform locations */
-  GLint u_bg_col, u_bg_vig;
+  GLint u_bg_col, u_bg_vig, u_bg_bulge_uv, u_bg_bulge_str;
   GLint u_dust_vp, u_dust_time, u_dust_scale, u_dust_col, u_dust_int;
   GLint u_edge_vp, u_edge_pan, u_edge_zoom, u_edge_scale, u_edge_bt;
   GLint u_edge_foc, u_edge_sel, u_edge_hf, u_edge_segs, u_edge_curved;
@@ -723,7 +723,9 @@ void bt_graph_gl_render_state(BtGraphGL *gl, const BtGraphRenderState *st)
   int fb_w = st->width * scale;
   int fb_h = st->height * scale;
   gboolean high = (st->quality == BT_GRAPH_QUALITY_HIGH);
-  gboolean mode_3d = (st->mode == BT_GRAPH_MODE_3D && gl->pts3d != NULL && gl->pts3d_count > 0);
+  gboolean is_galaxy = (st->mode == BT_GRAPH_MODE_GALAXY);
+  gboolean mode_3d = ((st->mode == BT_GRAPH_MODE_3D || is_galaxy) &&
+                      gl->pts3d != NULL && gl->pts3d_count > 0);
 
   GLint target_fbo = 0;
   glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &target_fbo);
@@ -736,33 +738,8 @@ void bt_graph_gl_render_state(BtGraphGL *gl, const BtGraphRenderState *st)
   glDisable(GL_DEPTH_TEST);
   glDisable(GL_CULL_FACE);
 
-  float r, g, b;
-
-  /* Pass 1: deep navy space canvas gradient (#05070D -> #02030A) */
-  glDisable(GL_BLEND);
-  glUseProgram(gl->prog_bg);
-  bt_theme_unpack_f(BT_GALAXY_BG_TOP, &r, &g, &b);
-  glUniform3f(gl->u_bg_col, r, g, b);
-  bt_theme_unpack_f(BT_GALAXY_BG_BOTTOM, &r, &g, &b);
-  glUniform3f(gl->u_bg_vig, r, g, b);
-  glBindVertexArray(gl->vao_bg);
-  glDrawArrays(GL_TRIANGLES, 0, 3);
-
   float vp_w = (float)st->width;
   float vp_h = (float)st->height;
-
-  /* Pass 2: GPU drifting dust sprites (additive) */
-  glEnable(GL_BLEND);
-  glBlendFunc(GL_SRC_ALPHA, GL_ONE);
-  glUseProgram(gl->prog_dust);
-  glUniform2f(gl->u_dust_vp, vp_w, vp_h);
-  glUniform1f(gl->u_dust_time, st->reduce_motion ? 0.0f : (float)st->time_sec);
-  glUniform1f(gl->u_dust_scale, 1.0f);
-  bt_theme_unpack_f(BT_COL_GRAPH_DUST, &r, &g, &b);
-  glUniform3f(gl->u_dust_col, r, g, b);
-  glUniform1f(gl->u_dust_int, high ? 0.95f : 0.45f);
-  glBindVertexArray(gl->vao_dust);
-  glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, high ? (GLsizei)BT_GL_DUST_MAX : 32);
 
   float mvp[16];
   if (mode_3d) {
@@ -771,6 +748,49 @@ void bt_graph_gl_render_state(BtGraphGL *gl, const BtGraphRenderState *st)
   } else {
     memset(mvp, 0, sizeof(mvp));
     mvp[0] = mvp[5] = mvp[10] = mvp[15] = 1.0f;
+  }
+
+  float r, g, b;
+
+  /* Pass 1: deep navy space canvas gradient (#05070D -> #02030A) + Galaxy core bulge */
+  glDisable(GL_BLEND);
+  glUseProgram(gl->prog_bg);
+  bt_theme_unpack_f(BT_GALAXY_BG_TOP, &r, &g, &b);
+  glUniform3f(gl->u_bg_col, r, g, b);
+  bt_theme_unpack_f(BT_GALAXY_BG_BOTTOM, &r, &g, &b);
+  glUniform3f(gl->u_bg_vig, r, g, b);
+  if (is_galaxy && mode_3d) {
+    BtGraphVec3 origin = {0.0f, 0.0f, 0.0f};
+    gdouble osx = 0.0, osy = 0.0, ow = 1.0;
+    if (bt_graph_project_3d(mvp, &origin, 1.0, 1.0, &osx, &osy, &ow)) {
+      glUniform2f(gl->u_bg_bulge_uv, (float)osx, (float)(1.0 - osy));
+      glUniform1f(gl->u_bg_bulge_str, high ? 1.0f : 0.65f);
+    } else {
+      glUniform2f(gl->u_bg_bulge_uv, 0.5f, 0.5f);
+      glUniform1f(gl->u_bg_bulge_str, 0.0f);
+    }
+  } else {
+    glUniform2f(gl->u_bg_bulge_uv, 0.5f, 0.5f);
+    glUniform1f(gl->u_bg_bulge_str, 0.0f);
+  }
+  glBindVertexArray(gl->vao_bg);
+  glDrawArrays(GL_TRIANGLES, 0, 3);
+
+  /* Pass 2: GPU drifting dust / background starfield sprites (additive, off in Low Galaxy) */
+  if (high || !is_galaxy) {
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+    glUseProgram(gl->prog_dust);
+    glUniform2f(gl->u_dust_vp, vp_w, vp_h);
+    glUniform1f(gl->u_dust_time, st->reduce_motion ? 0.0f : (float)st->time_sec);
+    glUniform1f(gl->u_dust_scale, 1.0f);
+    bt_theme_unpack_f(BT_COL_GRAPH_DUST, &r, &g, &b);
+    glUniform3f(gl->u_dust_col, r, g, b);
+    glUniform1f(gl->u_dust_int, high ? (is_galaxy ? 1.15f : 0.95f) : 0.45f);
+    glBindVertexArray(gl->vao_dust);
+    glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, high ? (GLsizei)BT_GL_DUST_MAX : 32);
+  } else {
+    glEnable(GL_BLEND);
   }
 
   float bt = 1.0f;
@@ -1124,6 +1144,8 @@ static void on_realize(GtkWidget *widget, gpointer ud)
   /* Cache uniform locations once. */
   gl->u_bg_col = glGetUniformLocation(gl->prog_bg, "u_bg_col");
   gl->u_bg_vig = glGetUniformLocation(gl->prog_bg, "u_vig_col");
+  gl->u_bg_bulge_uv = glGetUniformLocation(gl->prog_bg, "u_bulge_uv");
+  gl->u_bg_bulge_str = glGetUniformLocation(gl->prog_bg, "u_bulge_str");
 
   gl->u_dust_vp = glGetUniformLocation(gl->prog_dust, "u_viewport");
   gl->u_dust_time = glGetUniformLocation(gl->prog_dust, "u_time");

@@ -440,6 +440,55 @@ static void test_galaxy_palette_assignment_and_persistence(void **state)
   g_free(tmp);
 }
 
+static void test_galaxy_layout_determinism_and_z_bulge(void **state)
+{
+  (void)state;
+  BtGraph *g = make_sample_graph(120);
+  /* Assign 6 top-level folders, make first 10 high-degree hubs, last 10 ghosts. */
+  for (guint i = 0; i < 120u; i++) {
+    BtGraphNode *nd = g_ptr_array_index(g->nodes, i);
+    if (i < 10u) {
+      nd->degree = 25u;
+      nd->top_folder = NULL; /* bulge hub */
+    } else if (i >= 110u) {
+      nd->kind = BT_NODE_GHOST;
+      nd->top_folder = NULL;
+    } else {
+      nd->top_folder = g_strdup_printf("Folder%u", i % 6u);
+      nd->relpath = g_strdup_printf("Folder%u/note%u.md", i % 6u, i);
+    }
+  }
+
+  BtGraphVec3 a[120], b[120];
+  bt_graph_compute_galaxy_layout(g, 4u, a, 120u);
+  bt_graph_compute_galaxy_layout(g, 4u, b, 120u);
+
+  /* Strict determinism: same input -> identical output. */
+  for (guint i = 0; i < 120u; i++) {
+    assert_true(fabsf(a[i].x - b[i].x) < 1e-6f);
+    assert_true(fabsf(a[i].y - b[i].y) < 1e-6f);
+    assert_true(fabsf(a[i].z - b[i].z) < 1e-6f);
+  }
+
+  /* Vertical z-distribution: core bulge (r < 0.25) thicker on average than outer disk (r > 0.50). */
+  gdouble bulge_z = 0.0, disk_z = 0.0;
+  guint bulge_n = 0u, disk_n = 0u;
+  for (guint i = 0; i < 120u; i++) {
+    gdouble r = hypot((gdouble)a[i].x, (gdouble)a[i].z);
+    if (r < 0.28) { bulge_z += fabs((gdouble)a[i].y); bulge_n++; }
+    else if (r > 0.45) { disk_z += fabs((gdouble)a[i].y); disk_n++; }
+  }
+  assert_true(bulge_n > 0u && disk_n > 0u);
+  assert_true((bulge_z / (gdouble)bulge_n) > (disk_z / (gdouble)disk_n));
+
+  for (guint i = 0; i < g->nodes->len; i++) {
+    BtGraphNode *nd = g_ptr_array_index(g->nodes, i);
+    g_free(nd->top_folder);
+    g_free(nd->relpath);
+  }
+  free_sample_graph(g);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -452,6 +501,7 @@ int main(void)
     cmocka_unit_test(test_cursor_anchored_zoom),
     cmocka_unit_test(test_spatial_pick_stack_and_spread),
     cmocka_unit_test(test_galaxy_palette_assignment_and_persistence),
+    cmocka_unit_test(test_galaxy_layout_determinism_and_z_bulge),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

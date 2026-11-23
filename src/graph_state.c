@@ -362,6 +362,207 @@ static guint32 hash_u32(guint32 x)
   return x;
 }
 
+static guint64 fnv1a64(const gchar *s)
+{
+  guint64 h = 14695981039346656037ULL;
+  if (s == NULL)
+    return h;
+  for (const guchar *p = (const guchar *)s; *p != '\0'; p++) {
+    h ^= (guint64)*p;
+    h *= 1099511628211ULL;
+  }
+  return h;
+}
+
+static guint64 galaxy_splitmix64(guint64 *s)
+{
+  guint64 z = (*s += 0x9E3779B97F4A7C15ULL);
+  z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+  z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+  return z ^ (z >> 31);
+}
+
+static gdouble galaxy_rand01(guint64 *s)
+{
+  return (gdouble)(galaxy_splitmix64(s) >> 11) * (1.0 / 9007199254740992.0);
+}
+
+static gdouble galaxy_gauss(guint64 *s)
+{
+  gdouble u1 = MAX(galaxy_rand01(s), 1e-12);
+  gdouble u2 = galaxy_rand01(s);
+  return sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
+}
+
+typedef struct {
+  const gchar *name;
+  guint count;
+  gdouble anchor_r;
+  gdouble anchor_phi;
+  guint arm_idx;
+} GalaxyFolderSlot;
+
+static gint cmp_folder_slot_desc(const void *a, const void *b)
+{
+  const GalaxyFolderSlot *fa = a;
+  const GalaxyFolderSlot *fb = b;
+  if (fa->count != fb->count)
+    return (fa->count > fb->count) ? -1 : 1;
+  return g_ascii_strcasecmp(fa->name, fb->name);
+}
+
+void bt_graph_compute_galaxy_layout(const BtGraph *g, guint arms, BtGraphVec3 *out_pts,
+                                    guint max_pts)
+{
+  if (g == NULL || g->nodes == NULL || out_pts == NULL || max_pts == 0u)
+    return;
+  guint n = MIN(g->nodes->len, max_pts);
+  guint n_arms = (arms >= 3u && arms <= 5u) ? arms : 4u;
+  const gdouble k_twist = 2.65;
+  const gdouble r0_twist = 0.14;
+  const gdouble h_disk = 0.032;
+  const gdouble h_bulge = 0.24;
+  const gdouble r_bulge = 0.22;
+  const gdouble warp_amp = 0.075;
+
+  /* 1. Collect top-level folders & sort by descendant count desc (largest sit mid-radius). */
+  GHashTable *f_counts = g_hash_table_new(g_str_hash, g_str_equal);
+  for (guint i = 0; i < n; i++) {
+    const BtGraphNode *nd = g_ptr_array_index(g->nodes, i);
+    if (nd->top_folder != NULL && nd->top_folder[0] != '\0') {
+      guint cur = GPOINTER_TO_UINT(g_hash_table_lookup(f_counts, nd->top_folder));
+      g_hash_table_insert(f_counts, nd->top_folder, GUINT_TO_POINTER(cur + 1u));
+    }
+  }
+  guint nf = g_hash_table_size(f_counts);
+  g_autofree GalaxyFolderSlot *slots = nf > 0u ? g_new0(GalaxyFolderSlot, nf) : NULL;
+  GHashTable *slot_map = g_hash_table_new(g_str_hash, g_str_equal);
+  if (nf > 0u) {
+    GHashTableIter it;
+    gpointer k = NULL, v = NULL;
+    guint si = 0u;
+    g_hash_table_iter_init(&it, f_counts);
+    while (g_hash_table_iter_next(&it, &k, &v) && si < nf) {
+      slots[si].name = (const gchar *)k;
+      slots[si].count = GPOINTER_TO_UINT(v);
+      si++;
+    }
+    qsort(slots, nf, sizeof(GalaxyFolderSlot), cmp_folder_slot_desc);
+    for (guint i = 0; i < nf; i++) {
+      slots[i].arm_idx = i % n_arms;
+      guint rank_in_arm = i / n_arms;
+      guint per_arm = MAX((nf + n_arms - 1u) / n_arms, 1u);
+      /* Largest folders sit mid-radius (~0.42..0.68), smaller fill inner/outer slots. */
+      gdouble frac = (per_arm > 1u) ? ((gdouble)rank_in_arm / (gdouble)(per_arm - 1u)) : 0.45;
+      gdouble r_slot = 0.34 + 0.54 * frac;
+      if (i < n_arms)
+        r_slot = 0.44 + 0.05 * (gdouble)(i % 2u);
+      gdouble arm_base = ((gdouble)slots[i].arm_idx / (gdouble)n_arms) * 2.0 * M_PI;
+      gdouble phi = arm_base + k_twist * log(1.0 + r_slot / r0_twist);
+      slots[i].anchor_r = r_slot;
+      slots[i].anchor_phi = phi;
+      g_hash_table_insert(slot_map, (gpointer)slots[i].name, &slots[i]);
+    }
+  }
+
+  /* 2. Place each node deterministically using splitmix64(fnv1a64(path/id)). */
+  for (guint i = 0; i < n; i++) {
+    const BtGraphNode *nd = g_ptr_array_index(g->nodes, i);
+    const gchar *key = (nd->relpath && nd->relpath[0]) ? nd->relpath : (nd->id ? nd->id : "");
+    guint64 rng = fnv1a64(key);
+    gdouble r = 0.25;
+    gdouble phi = galaxy_rand01(&rng) * 2.0 * M_PI;
+
+    const GalaxyFolderSlot *sl =
+        (nd->top_folder != NULL) ? g_hash_table_lookup(slot_map, nd->top_folder) : NULL;
+
+    if (nd->kind == BT_NODE_FOLDER && nd->parent_idx < 0 && sl != NULL) {
+      /* Top-level folder = bright cluster star anchored on its spiral arm. */
+      r = sl->anchor_r;
+      phi = sl->anchor_phi;
+    } else if (sl != NULL) {
+      /* Scatter child around folder anchor with Gaussian sigma ~ sqrt(count), pulled to arm. */
+      gdouble sigma = CLAMP(0.045 + 0.011 * sqrt((gdouble)sl->count), 0.05, 0.16);
+      gdouble ax = sl->anchor_r * cos(sl->anchor_phi);
+      gdouble az = sl->anchor_r * sin(sl->anchor_phi);
+      gdouble gx = ax + galaxy_gauss(&rng) * sigma;
+      gdouble gz = az + galaxy_gauss(&rng) * sigma;
+      r = CLAMP(hypot(gx, gz), 0.06, 1.02);
+      phi = atan2(gz, gx);
+
+      /* Pull gently toward spiral arm centerline so arms remain legible. */
+      gdouble arm_base = ((gdouble)sl->arm_idx / (gdouble)n_arms) * 2.0 * M_PI;
+      gdouble target_phi = arm_base + k_twist * log(1.0 + r / r0_twist);
+      gdouble dphi = fmod(target_phi - phi + 3.0 * M_PI, 2.0 * M_PI) - M_PI;
+      phi += dphi * 0.36;
+    } else if (nd->kind == BT_NODE_GHOST) {
+      /* Ghosts drift to the outer galactic rim. */
+      guint arm = (guint)(galaxy_splitmix64(&rng) % n_arms);
+      r = 0.80 + galaxy_rand01(&rng) * 0.20;
+      gdouble arm_base = ((gdouble)arm / (gdouble)n_arms) * 2.0 * M_PI;
+      phi = arm_base + k_twist * log(1.0 + r / r0_twist) + galaxy_gauss(&rng) * 0.24;
+    } else {
+      /* Vault-root notes & sessions/tags settle into the warm inner bulge + inner arms. */
+      guint arm = (guint)(galaxy_splitmix64(&rng) % n_arms);
+      r = 0.08 + fabs(galaxy_gauss(&rng)) * 0.18;
+      r = CLAMP(r, 0.04, 0.45);
+      gdouble arm_base = ((gdouble)arm / (gdouble)n_arms) * 2.0 * M_PI;
+      phi = arm_base + k_twist * log(1.0 + r / r0_twist) + galaxy_gauss(&rng) * 0.35;
+    }
+
+    /* High-degree hubs drift inward toward the warm central bulge. */
+    if ((nd->kind == BT_NODE_HUMAN_NOTE || nd->kind == BT_NODE_AI_NOTE) && nd->degree >= 3u) {
+      gdouble pull = 1.0 / (1.0 + 0.16 * sqrt((gdouble)nd->degree));
+      r = MAX(r * pull, 0.05);
+    }
+
+    /* Vertical axis (Y in Y-up camera): puffy bulge in center, thin disk outward,
+     * ~3% halo outliers, plus subtle rim warp. */
+    gdouble z_sig = h_disk + h_bulge * exp(-r / r_bulge);
+    gboolean is_halo = (galaxy_rand01(&rng) < 0.03);
+    if (is_halo)
+      z_sig = 0.28;
+    gdouble zy = galaxy_gauss(&rng) * z_sig;
+    if (nd->kind == BT_NODE_FOLDER && nd->parent_idx < 0)
+      zy *= 0.35; /* keep parent folder stars close to the galactic plane */
+    zy += warp_amp * (r * r) * sin(phi);
+    zy = CLAMP(zy, -0.55, 0.55);
+
+    out_pts[i].x = (float)CLAMP(r * cos(phi), -1.08, 1.08);
+    out_pts[i].y = (float)zy;
+    out_pts[i].z = (float)CLAMP(r * sin(phi), -1.08, 1.08);
+  }
+
+  /* 3. Light collision relax pass (3 bounded iterations) so cluster notes never stack identically. */
+  const float min_sep = 0.028f;
+  const float min_sep2 = min_sep * min_sep;
+  guint window = MIN(n, 24u);
+  for (int it = 0; it < 3; it++) {
+    for (guint i = 0; i < n; i++) {
+      for (guint k = 1; k < window && i + k < n; k++) {
+        guint j = i + k;
+        float dx = out_pts[j].x - out_pts[i].x;
+        float dy = out_pts[j].y - out_pts[i].y;
+        float dz = out_pts[j].z - out_pts[i].z;
+        float d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 < min_sep2 && d2 > 1e-8f) {
+          float d = sqrtf(d2);
+          float push = 0.35f * (min_sep - d) / d;
+          out_pts[i].x -= dx * push;
+          out_pts[i].y -= dy * push * 0.5f;
+          out_pts[i].z -= dz * push;
+          out_pts[j].x += dx * push;
+          out_pts[j].y += dy * push * 0.5f;
+          out_pts[j].z += dz * push;
+        }
+      }
+    }
+  }
+
+  g_hash_table_destroy(slot_map);
+  g_hash_table_destroy(f_counts);
+}
+
 void bt_graph_compute_3d_layout(const BtGraph *g, BtGraphVec3 *out_pts, guint max_pts)
 {
   if (g == NULL || g->nodes == NULL || out_pts == NULL || max_pts == 0)
