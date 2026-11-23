@@ -1536,6 +1536,15 @@ static gboolean on_editor_key_event(GtkEventControllerKey *ctrl, guint keyval, g
     gboolean want_pointer = pane->links_open_on_click || pane->ctrl_held;
     gtk_widget_set_cursor_from_name(GTK_WIDGET(pane->view), want_pointer ? "pointer" : "text");
   }
+  if (bt_editorpane_handle_key_event(pane, keyval, state))
+    return TRUE;
+  if ((state & (GDK_CONTROL_MASK | GDK_ALT_MASK)) ==
+      (GDK_CONTROL_MASK | GDK_ALT_MASK)) {
+    if (keyval == GDK_KEY_Right)
+      return bt_editorpane_jump_link(pane, +1);
+    if (keyval == GDK_KEY_Left)
+      return bt_editorpane_jump_link(pane, -1);
+  }
   return FALSE;
 }
 
@@ -1874,6 +1883,12 @@ BtEditorPane *bt_editorpane_new(BtEditorSaveFn on_save, BtEditorLinkFn on_link,
   GtkEventController *keyc = gtk_event_controller_key_new();
   g_signal_connect(keyc, "key-pressed", G_CALLBACK(on_editor_key_event), pane);
   g_signal_connect(keyc, "key-released", G_CALLBACK(on_editor_key_released), pane);
+  /* CAPTURE so Ctrl+Enter is consumed (no newline) only when a link is at the
+   * caret; otherwise GtkSourceView keeps its default Enter behavior (CK02).
+   * The controller is scoped to pane->view, so it never fires while the
+   * terminal holds focus (CK10). */
+  gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(keyc),
+                                             GTK_PHASE_CAPTURE);
   gtk_widget_add_controller(GTK_WIDGET(pane->view), keyc);
 
   gtk_widget_set_has_tooltip(GTK_WIDGET(pane->view), TRUE);
@@ -2510,6 +2525,74 @@ gdouble bt_editorpane_viewport_height(const BtEditorPane *pane)
       return (gdouble)vis.height;
   }
   return 600.0;
+}
+
+gboolean bt_editorpane_handle_key_event(BtEditorPane *pane, guint keyval,
+                                        GdkModifierType state)
+{
+  if (pane == NULL || pane->relpath == NULL || pane->buffer == NULL)
+    return FALSE;
+  if ((state & GDK_CONTROL_MASK) == 0)
+    return FALSE;
+  if (keyval != GDK_KEY_Return && keyval != GDK_KEY_KP_Enter)
+    return FALSE;
+
+  gsize caret = caret_byte_in_buffer(pane);
+  BtLinkSpan sp;
+  if (!bt_editorpane_link_at_offset(pane, caret, &sp))
+    return FALSE; /* CK02: no link at caret → default Enter (newline) */
+  if (raw_target_is_placeholder(sp.raw_target))
+    return TRUE;  /* CK04: placeholder → consumed, no action, no message */
+  if (pane->on_link != NULL && sp.raw_target != NULL) {
+    pane->on_link(sp.raw_target, pane->user_data);
+    return TRUE;
+  }
+  return TRUE;
+}
+
+gboolean bt_editorpane_jump_link(BtEditorPane *pane, gint direction)
+{
+  if (pane == NULL || pane->relpath == NULL || pane->buffer == NULL ||
+      pane->link_spans == NULL || pane->link_spans->len == 0 || direction == 0)
+    return FALSE;
+
+  gsize caret = caret_byte_in_buffer(pane);
+  guint target = G_MAXUINT;
+  if (direction > 0) {
+    /* Next link: first span strictly after the caret; wrap to the first. */
+    for (guint i = 0; i < pane->link_spans->len; i++) {
+      const BtLinkSpan *sp = &g_array_index(pane->link_spans, BtLinkSpan, i);
+      if (sp->start > caret) {
+        target = i;
+        break;
+      }
+    }
+    if (target == G_MAXUINT)
+      target = 0;
+  } else {
+    /* Previous link: last span strictly before the caret; wrap to the last. */
+    gint found = -1;
+    for (gint i = (gint)pane->link_spans->len - 1; i >= 0; i--) {
+      const BtLinkSpan *sp = &g_array_index(pane->link_spans, BtLinkSpan, i);
+      if (sp->end < caret) {
+        found = i;
+        break;
+      }
+    }
+    target = (found < 0) ? (pane->link_spans->len - 1) : (guint)found;
+  }
+
+  const BtLinkSpan *sp = &g_array_index(pane->link_spans, BtLinkSpan, target);
+  place_caret_byte_in_buffer(pane, sp->start);
+
+  if (pane->view != NULL) {
+    GtkTextBuffer *buf = GTK_TEXT_BUFFER(pane->buffer);
+    GtkTextIter it;
+    gtk_text_buffer_get_iter_at_mark(buf, &it, gtk_text_buffer_get_insert(buf));
+    gtk_text_view_scroll_to_iter(GTK_TEXT_VIEW(pane->view), &it, 0.0, TRUE, 0.0, 0.5);
+  }
+  /* Moves the caret only; never opens the link and never pushes history (CK09). */
+  return TRUE;
 }
 
 gboolean bt_editorpane_simulate_click(BtEditorPane *pane, gsize target_byte_offset, guint button,

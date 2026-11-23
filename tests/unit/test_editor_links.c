@@ -1175,6 +1175,447 @@ static void test_l3_2b_ambiguity_chooser_ui(void **state)
   g_free(cfg);
 }
 
+/* ------------------------------------------------------------------ CK group */
+
+static void test_ck01_ctrl_enter_opens_resolved_link(void **state)
+{
+  (void)state;
+  if (!gtk_init_check()) { skip(); return; }
+  adw_init();
+  gchar *root = g_dir_make_tmp("bt-ck01-XXXXXX", NULL);
+  gchar *cfg = g_dir_make_tmp("bt-cfg01-XXXXXX", NULL);
+  g_setenv("BT_CONFIG_DIR", cfg, TRUE);
+  const char *src = "# Source\nGo to [[resolved-note]] now.\n";
+  bt_test_put(root, "source.md", src);
+  bt_test_put(root, "resolved-note.md", "# Resolved\nTarget note.\n");
+
+  BtApp *app = bt_app_new();
+  bt_app_prepare_ui_for_test(app);
+  assert_true(bt_app_open_vault(app, root, NULL));
+  assert_true(bt_app_open_note(app, "source.md", NULL));
+  BtEditorPane *ed = (BtEditorPane *)bt_app_editor(app);
+  assert_non_null(ed);
+
+  const gchar *hit = strstr(src, "resolved-note");
+  assert_non_null(hit);
+  gsize off = (gsize)(hit - src);
+  bt_editorpane_set_caret_byte_offset(ed, off);
+  assert_true(bt_editorpane_handle_key_event(ed, GDK_KEY_Return, GDK_CONTROL_MASK));
+  assert_string_equal(bt_app_active_note(app), "resolved-note.md");
+
+  GtkWindow *win = bt_app_window(app);
+  if (win) gtk_window_destroy(win);
+  bt_app_free(app);
+  bt_test_rm_rf(root);
+  bt_test_rm_rf(cfg);
+  g_free(root);
+  g_free(cfg);
+  printf("BT_TEST_CK01 ctrl_enter_opens_resolved=ok\n");
+}
+
+static void test_ck02_ctrl_enter_outside_link_keeps_newline(void **state)
+{
+  (void)state;
+  if (!gtk_init_check()) { skip(); return; }
+  adw_init();
+  gchar *root = g_dir_make_tmp("bt-ck02-XXXXXX", NULL);
+  gchar *cfg = g_dir_make_tmp("bt-cfg02-XXXXXX", NULL);
+  g_setenv("BT_CONFIG_DIR", cfg, TRUE);
+  const char *src = "# Source\nGo to [[resolved-note]] now.\n";
+  bt_test_put(root, "source.md", src);
+  bt_test_put(root, "resolved-note.md", "# Resolved\nTarget note.\n");
+
+  BtApp *app = bt_app_new();
+  bt_app_prepare_ui_for_test(app);
+  assert_true(bt_app_open_vault(app, root, NULL));
+  assert_true(bt_app_open_note(app, "source.md", NULL));
+  BtEditorPane *ed = (BtEditorPane *)bt_app_editor(app);
+  assert_non_null(ed);
+
+  /* Caret before any link: Ctrl+Enter must NOT be consumed so default Enter
+   * (newline) behavior is preserved, and no link action fires. */
+  bt_editorpane_set_caret_byte_offset(ed, 0);
+  assert_false(bt_editorpane_handle_key_event(ed, GDK_KEY_Return, GDK_CONTROL_MASK));
+  assert_string_equal(bt_app_active_note(app), "source.md");
+  assert_null(bt_app_create_popover_for_test(app));
+
+  GtkWindow *win = bt_app_window(app);
+  if (win) gtk_window_destroy(win);
+  bt_app_free(app);
+  bt_test_rm_rf(root);
+  bt_test_rm_rf(cfg);
+  g_free(root);
+  g_free(cfg);
+  printf("BT_TEST_CK02 ctrl_enter_outside_link=ok\n");
+}
+
+static void test_ck03_ctrl_enter_unresolved_opens_create_popover(void **state)
+{
+  (void)state;
+  if (!gtk_init_check()) { skip(); return; }
+  adw_init();
+  gchar *root = g_dir_make_tmp("bt-ck03-XXXXXX", NULL);
+  gchar *cfg = g_dir_make_tmp("bt-cfg03-XXXXXX", NULL);
+  g_setenv("BT_CONFIG_DIR", cfg, TRUE);
+  const char *src = "# Source\nSee [[missing-note]] here.\n";
+  bt_test_put(root, "source.md", src);
+
+  BtApp *app = bt_app_new();
+  bt_app_prepare_ui_for_test(app);
+  assert_true(bt_app_open_vault(app, root, NULL));
+  assert_true(bt_app_open_note(app, "source.md", NULL));
+  BtEditorPane *ed = (BtEditorPane *)bt_app_editor(app);
+  assert_non_null(ed);
+
+  const gchar *hit = strstr(src, "missing-note");
+  assert_non_null(hit);
+  gsize off = (gsize)(hit - src);
+  bt_editorpane_set_caret_byte_offset(ed, off);
+  assert_true(bt_editorpane_handle_key_event(ed, GDK_KEY_Return, GDK_CONTROL_MASK));
+  BtCreatePopover *cp = (BtCreatePopover *)bt_app_create_popover_for_test(app);
+  assert_non_null(cp);
+  assert_int_equal(bt_createpopover_state(cp), BT_CREATE_POPOVER_SHOWN);
+  assert_string_equal(bt_createpopover_path_text(cp), "missing-note.md");
+  assert_string_equal(bt_app_active_note(app), "source.md");
+
+  GtkWindow *w = bt_app_window(app);
+  if (w) gtk_window_destroy(w);
+  bt_app_free(app);
+  bt_test_rm_rf(root);
+  bt_test_rm_rf(cfg);
+  g_free(root);
+  g_free(cfg);
+  printf("BT_TEST_CK03 ctrl_enter_unresolved_create_popover=ok\n");
+}
+
+static void test_ck04_ctrl_enter_placeholder_no_action(void **state)
+{
+  (void)state;
+  if (!gtk_init_check()) { skip(); return; }
+  adw_init();
+  gchar *root = g_dir_make_tmp("bt-ck04-XXXXXX", NULL);
+  gchar *cfg = g_dir_make_tmp("bt-cfg04-XXXXXX", NULL);
+  g_setenv("BT_CONFIG_DIR", cfg, TRUE);
+  const char *src = "# Source\nPlaceholder [[{{tpl}}]] here.\n";
+  bt_test_put(root, "source.md", src);
+
+  BtApp *app = bt_app_new();
+  bt_app_prepare_ui_for_test(app);
+  assert_true(bt_app_open_vault(app, root, NULL));
+  assert_true(bt_app_open_note(app, "source.md", NULL));
+  BtEditorPane *ed = (BtEditorPane *)bt_app_editor(app);
+  assert_non_null(ed);
+
+  const gchar *hit = strstr(src, "{{tpl}}");
+  assert_non_null(hit);
+  gsize off = (gsize)(hit - src);
+  bt_editorpane_set_caret_byte_offset(ed, off);
+  bt_app_set_statusbar_notice(app, NULL);
+  assert_true(bt_editorpane_handle_key_event(ed, GDK_KEY_Return, GDK_CONTROL_MASK));
+  assert_null(bt_app_create_popover_for_test(app));
+  assert_string_equal(bt_app_active_note(app), "source.md");
+  assert_null(strstr(bt_app_last_statusbar_notice(app), "Block"));
+  assert_null(strstr(bt_app_last_statusbar_notice(app), "Note"));
+
+  GtkWindow *w = bt_app_window(app);
+  if (w) gtk_window_destroy(w);
+  bt_app_free(app);
+  bt_test_rm_rf(root);
+  bt_test_rm_rf(cfg);
+  g_free(root);
+  g_free(cfg);
+  printf("BT_TEST_CK04 ctrl_enter_placeholder_no_action=ok\n");
+}
+
+static void test_ck05_ctrl_enter_blocked_status_bar(void **state)
+{
+  (void)state;
+  if (!gtk_init_check()) { skip(); return; }
+  adw_init();
+  gchar *root = g_dir_make_tmp("bt-ck05-XXXXXX", NULL);
+  gchar *cfg = g_dir_make_tmp("bt-cfg05-XXXXXX", NULL);
+  g_setenv("BT_CONFIG_DIR", cfg, TRUE);
+  const char *src = "# Source\nBlocked [[scripts/run.ps1]] here.\n";
+  bt_test_put(root, "source.md", src);
+  bt_test_put(root, "scripts/run.ps1", "Write-Host 1\n");
+
+  BtApp *app = bt_app_new();
+  bt_app_prepare_ui_for_test(app);
+  assert_true(bt_app_open_vault(app, root, NULL));
+  assert_true(bt_app_open_note(app, "source.md", NULL));
+  BtEditorPane *ed = (BtEditorPane *)bt_app_editor(app);
+  assert_non_null(ed);
+
+  const gchar *hit = strstr(src, "scripts/run.ps1");
+  assert_non_null(hit);
+  gsize off = (gsize)(hit - src);
+  bt_editorpane_set_caret_byte_offset(ed, off);
+  assert_true(bt_editorpane_handle_key_event(ed, GDK_KEY_Return, GDK_CONTROL_MASK));
+  assert_non_null(strstr(bt_app_last_statusbar_notice(app), "Blocked"));
+  assert_null(bt_app_create_popover_for_test(app));
+  assert_string_equal(bt_app_active_note(app), "source.md");
+
+  GtkWindow *w = bt_app_window(app);
+  if (w) gtk_window_destroy(w);
+  bt_app_free(app);
+  bt_test_rm_rf(root);
+  bt_test_rm_rf(cfg);
+  g_free(root);
+  g_free(cfg);
+  printf("BT_TEST_CK05 ctrl_enter_blocked_status=ok\n");
+}
+
+static void test_ck06_ctrl_alt_right_next_link(void **state)
+{
+  (void)state;
+  if (!gtk_init_check()) { skip(); return; }
+  adw_init();
+  gchar *root = g_dir_make_tmp("bt-ck06-XXXXXX", NULL);
+  gchar *cfg = g_dir_make_tmp("bt-cfg06-XXXXXX", NULL);
+  g_setenv("BT_CONFIG_DIR", cfg, TRUE);
+  const char *src = "a [[one]] b [[two]] c [[three]] d\n";
+  bt_test_put(root, "source.md", src);
+  bt_test_put(root, "one.md", "# One\n");
+  bt_test_put(root, "two.md", "# Two\n");
+  bt_test_put(root, "three.md", "# Three\n");
+
+  BtApp *app = bt_app_new();
+  bt_app_prepare_ui_for_test(app);
+  assert_true(bt_app_open_vault(app, root, NULL));
+  assert_true(bt_app_open_note(app, "source.md", NULL));
+  BtEditorPane *ed = (BtEditorPane *)bt_app_editor(app);
+  assert_non_null(ed);
+
+  bt_editorpane_set_caret_byte_offset(ed, 0);
+  assert_true(bt_editorpane_jump_link(ed, +1));
+  gsize off_one = (gsize)(strstr(src, "[[one]]") - src);
+  assert_int_equal(bt_editorpane_caret_byte_offset(ed), off_one);
+  assert_string_equal(bt_app_active_note(app), "source.md"); /* not opened */
+
+  GtkWindow *w = bt_app_window(app);
+  if (w) gtk_window_destroy(w);
+  bt_app_free(app);
+  bt_test_rm_rf(root);
+  bt_test_rm_rf(cfg);
+  g_free(root);
+  g_free(cfg);
+  printf("BT_TEST_CK06 ctrl_alt_right_next_link=ok\n");
+}
+
+static void test_ck07_next_link_wraps_to_first(void **state)
+{
+  (void)state;
+  if (!gtk_init_check()) { skip(); return; }
+  adw_init();
+  gchar *root = g_dir_make_tmp("bt-ck07-XXXXXX", NULL);
+  gchar *cfg = g_dir_make_tmp("bt-cfg07-XXXXXX", NULL);
+  g_setenv("BT_CONFIG_DIR", cfg, TRUE);
+  const char *src = "a [[one]] b [[two]] c [[three]] d\n";
+  bt_test_put(root, "source.md", src);
+  bt_test_put(root, "one.md", "# One\n");
+  bt_test_put(root, "two.md", "# Two\n");
+  bt_test_put(root, "three.md", "# Three\n");
+
+  BtApp *app = bt_app_new();
+  bt_app_prepare_ui_for_test(app);
+  assert_true(bt_app_open_vault(app, root, NULL));
+  assert_true(bt_app_open_note(app, "source.md", NULL));
+  BtEditorPane *ed = (BtEditorPane *)bt_app_editor(app);
+  assert_non_null(ed);
+
+  gsize off_three = (gsize)(strstr(src, "[[three]]") - src);
+  gsize off_one = (gsize)(strstr(src, "[[one]]") - src);
+  bt_editorpane_set_caret_byte_offset(ed, off_three);
+  assert_true(bt_editorpane_jump_link(ed, +1));
+  assert_int_equal(bt_editorpane_caret_byte_offset(ed), off_one); /* wrap */
+
+  GtkWindow *w = bt_app_window(app);
+  if (w) gtk_window_destroy(w);
+  bt_app_free(app);
+  bt_test_rm_rf(root);
+  bt_test_rm_rf(cfg);
+  g_free(root);
+  g_free(cfg);
+  printf("BT_TEST_CK07 next_link_wrap_to_first=ok\n");
+}
+
+static void test_ck08_prev_link_wraps_to_last(void **state)
+{
+  (void)state;
+  if (!gtk_init_check()) { skip(); return; }
+  adw_init();
+  gchar *root = g_dir_make_tmp("bt-ck08-XXXXXX", NULL);
+  gchar *cfg = g_dir_make_tmp("bt-cfg08-XXXXXX", NULL);
+  g_setenv("BT_CONFIG_DIR", cfg, TRUE);
+  const char *src = "a [[one]] b [[two]] c [[three]] d\n";
+  bt_test_put(root, "source.md", src);
+  bt_test_put(root, "one.md", "# One\n");
+  bt_test_put(root, "two.md", "# Two\n");
+  bt_test_put(root, "three.md", "# Three\n");
+
+  BtApp *app = bt_app_new();
+  bt_app_prepare_ui_for_test(app);
+  assert_true(bt_app_open_vault(app, root, NULL));
+  assert_true(bt_app_open_note(app, "source.md", NULL));
+  BtEditorPane *ed = (BtEditorPane *)bt_app_editor(app);
+  assert_non_null(ed);
+
+  gsize off_one = (gsize)(strstr(src, "[[one]]") - src);
+  gsize off_three = (gsize)(strstr(src, "[[three]]") - src);
+  bt_editorpane_set_caret_byte_offset(ed, off_one);
+  assert_true(bt_editorpane_jump_link(ed, -1));
+  assert_int_equal(bt_editorpane_caret_byte_offset(ed), off_three); /* wrap */
+
+  GtkWindow *w = bt_app_window(app);
+  if (w) gtk_window_destroy(w);
+  bt_app_free(app);
+  bt_test_rm_rf(root);
+  bt_test_rm_rf(cfg);
+  g_free(root);
+  g_free(cfg);
+  printf("BT_TEST_CK08 prev_link_wrap_to_last=ok\n");
+}
+
+static void test_ck09_next_link_moves_caret_no_open_no_history(void **state)
+{
+  (void)state;
+  if (!gtk_init_check()) { skip(); return; }
+  adw_init();
+  gchar *root = g_dir_make_tmp("bt-ck09-XXXXXX", NULL);
+  gchar *cfg = g_dir_make_tmp("bt-cfg09-XXXXXX", NULL);
+  g_setenv("BT_CONFIG_DIR", cfg, TRUE);
+  const char *src = "a [[one]] b [[two]] c [[three]] d\n";
+  bt_test_put(root, "source.md", src);
+  bt_test_put(root, "one.md", "# One\n");
+  bt_test_put(root, "two.md", "# Two\n");
+  bt_test_put(root, "three.md", "# Three\n");
+
+  BtApp *app = bt_app_new();
+  bt_app_prepare_ui_for_test(app);
+  assert_true(bt_app_open_vault(app, root, NULL));
+  assert_true(bt_app_open_note(app, "source.md", NULL));
+  BtEditorPane *ed = (BtEditorPane *)bt_app_editor(app);
+  assert_non_null(ed);
+
+  gsize hist_before = bt_nav_history_count(bt_app_nav_history(app));
+  bt_editorpane_set_caret_byte_offset(ed, 0);
+  assert_true(bt_editorpane_jump_link(ed, +1));
+  gsize off_one = (gsize)(strstr(src, "[[one]]") - src);
+  assert_int_equal(bt_editorpane_caret_byte_offset(ed), off_one);
+  assert_string_equal(bt_app_active_note(app), "source.md"); /* not opened */
+  assert_int_equal(bt_nav_history_count(bt_app_nav_history(app)), hist_before);
+
+  GtkWindow *w = bt_app_window(app);
+  if (w) gtk_window_destroy(w);
+  bt_app_free(app);
+  bt_test_rm_rf(root);
+  bt_test_rm_rf(cfg);
+  g_free(root);
+  g_free(cfg);
+  printf("BT_TEST_CK09 next_link_no_open_no_history=ok\n");
+}
+
+static void test_ck10_link_shortcuts_are_pane_scoped(void **state)
+{
+  (void)state;
+  if (!gtk_init_check()) { skip(); return; }
+  adw_init();
+  gchar *root = g_dir_make_tmp("bt-ck10-XXXXXX", NULL);
+  gchar *cfg = g_dir_make_tmp("bt-cfg10-XXXXXX", NULL);
+  g_setenv("BT_CONFIG_DIR", cfg, TRUE);
+  const char *src = "# Source\nGo to [[resolved-note]] now.\n";
+  bt_test_put(root, "source.md", src);
+  bt_test_put(root, "resolved-note.md", "# Resolved\nTarget note.\n");
+
+  BtApp *app = bt_app_new();
+  bt_app_prepare_ui_for_test(app);
+  assert_true(bt_app_open_vault(app, root, NULL));
+  assert_true(bt_app_open_note(app, "source.md", NULL));
+  BtEditorPane *ed = (BtEditorPane *)bt_app_editor(app);
+  assert_non_null(ed);
+
+  /* The link-shortcut key controller is attached solely to pane->view
+   * (bt_editorpane_new, GTK_PHASE_CAPTURE) and is not an application
+   * accelerator, so when the terminal (or any other widget) holds focus, key
+   * events never reach this handler and no link action fires (CK10). The
+   * handler is pane-scoped: it acts only when a link is at this pane's caret. */
+  bt_editorpane_set_caret_byte_offset(ed, 0); /* outside any link */
+  assert_false(bt_editorpane_handle_key_event(ed, GDK_KEY_Return, GDK_CONTROL_MASK));
+  assert_string_equal(bt_app_active_note(app), "source.md");
+
+  const gchar *hit = strstr(src, "resolved-note");
+  assert_non_null(hit);
+  gsize off = (gsize)(hit - src);
+  bt_editorpane_set_caret_byte_offset(ed, off);
+  assert_true(bt_editorpane_handle_key_event(ed, GDK_KEY_Return, GDK_CONTROL_MASK));
+  assert_string_equal(bt_app_active_note(app), "resolved-note.md");
+
+  GtkWindow *w = bt_app_window(app);
+  if (w) gtk_window_destroy(w);
+  bt_app_free(app);
+  bt_test_rm_rf(root);
+  bt_test_rm_rf(cfg);
+  g_free(root);
+  g_free(cfg);
+  printf("BT_TEST_CK10 pane_scoped_shortcuts=ok\n");
+}
+
+static void test_ck11_alt_left_right_still_navigate_history(void **state)
+{
+  (void)state;
+  if (!gtk_init_check()) { skip(); return; }
+  adw_init();
+  gchar *root = g_dir_make_tmp("bt-ck11-XXXXXX", NULL);
+  gchar *cfg = g_dir_make_tmp("bt-cfg11-XXXXXX", NULL);
+  g_setenv("BT_CONFIG_DIR", cfg, TRUE);
+  bt_test_put(root, "a.md", "# A\nSee [[b]] now.\n");
+  bt_test_put(root, "b.md", "# B\nTarget note.\n");
+
+  BtApp *app = bt_app_new();
+  bt_app_prepare_ui_for_test(app);
+  assert_true(bt_app_open_vault(app, root, NULL));
+  assert_true(bt_app_open_note(app, "a.md", NULL));
+  /* Alt+Right-style navigation push happens through link activation. */
+  assert_true(bt_app_activate_link(app, "b"));
+  assert_string_equal(bt_app_active_note(app), "b.md");
+  /* Alt+Left / Alt+Right still navigate history (L2-6 regression). */
+  assert_true(bt_app_navigate_back(app));
+  assert_string_equal(bt_app_active_note(app), "a.md");
+  assert_true(bt_app_navigate_forward(app));
+  assert_string_equal(bt_app_active_note(app), "b.md");
+
+  GtkWindow *w = bt_app_window(app);
+  if (w) gtk_window_destroy(w);
+  bt_app_free(app);
+  bt_test_rm_rf(root);
+  bt_test_rm_rf(cfg);
+  g_free(root);
+  g_free(cfg);
+  printf("BT_TEST_CK11 alt_left_right_nav_history=ok\n");
+}
+
+static void test_ck12_shortcut_audit_no_unresolved_conflict(void **state)
+{
+  (void)state;
+  const gchar *src_root = g_getenv("BT_SOURCE_ROOT");
+  g_autofree gchar *path = NULL;
+  if (src_root != NULL)
+    path = g_build_filename(src_root, "docs", "evidence", "2026-11-23-l3",
+                            "shortcut-audit.md", NULL);
+  if (path == NULL) { skip(); return; }
+  g_autofree gchar *content = NULL;
+  gsize len = 0;
+  if (!g_file_get_contents(path, &content, &len, NULL)) { skip(); return; }
+
+  /* The conflict audit must record all three bindings as selected and report
+   * zero unresolved conflicts (see docs/evidence/2026-11-23-l3/shortcut-audit.md). */
+  assert_non_null(strstr(content, "**SELECTED:** `Ctrl+Enter`"));
+  assert_non_null(strstr(content, "**SELECTED:** `Ctrl+Alt+Right`"));
+  assert_non_null(strstr(content, "**SELECTED:** `Ctrl+Alt+Left`"));
+  assert_non_null(strstr(content, "Unresolved conflicts:** `0`"));
+  printf("BT_TEST_CK12 shortcut_audit_no_unresolved_conflict=ok\n");
+}
+
 static guint ui_log_warnings = 0;
 
 static void on_ui_test_log(const gchar *domain, GLogLevelFlags level, const gchar *msg, gpointer ud)
@@ -1202,6 +1643,18 @@ int main(void)
     cmocka_unit_test(test_l3_1d_create_popover_state_machine),
     cmocka_unit_test(test_l3_1e_unresolved_click_create_flow),
     cmocka_unit_test(test_l3_2b_ambiguity_chooser_ui),
+    cmocka_unit_test(test_ck01_ctrl_enter_opens_resolved_link),
+    cmocka_unit_test(test_ck02_ctrl_enter_outside_link_keeps_newline),
+    cmocka_unit_test(test_ck03_ctrl_enter_unresolved_opens_create_popover),
+    cmocka_unit_test(test_ck04_ctrl_enter_placeholder_no_action),
+    cmocka_unit_test(test_ck05_ctrl_enter_blocked_status_bar),
+    cmocka_unit_test(test_ck06_ctrl_alt_right_next_link),
+    cmocka_unit_test(test_ck07_next_link_wraps_to_first),
+    cmocka_unit_test(test_ck08_prev_link_wraps_to_last),
+    cmocka_unit_test(test_ck09_next_link_moves_caret_no_open_no_history),
+    cmocka_unit_test(test_ck10_link_shortcuts_are_pane_scoped),
+    cmocka_unit_test(test_ck11_alt_left_right_still_navigate_history),
+    cmocka_unit_test(test_ck12_shortcut_audit_no_unresolved_conflict),
   };
   int rc = cmocka_run_group_tests(tests, NULL, NULL);
   if (ui_log_warnings > 0)

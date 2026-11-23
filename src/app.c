@@ -1109,6 +1109,16 @@ gboolean bt_app_activate_link(BtApp *app, const gchar *raw_target)
   if (app->link_snap == NULL)
     return FALSE;
 
+  /* L3-3: close any open link create/chooser/confirm popover before activating
+   * a new link, so at most one link popover is active at a time. An in-progress
+   * async create (BUSY) is not interrupted. */
+  if (app->create_popover != NULL &&
+      bt_createpopover_state(app->create_popover) != BT_CREATE_POPOVER_BUSY)
+    bt_createpopover_close(app->create_popover);
+  if (app->chooser_popover != NULL && bt_chooserpopover_is_open(app->chooser_popover))
+    bt_chooserpopover_close(app->chooser_popover);
+  clear_active_confirm(app);
+
   const gchar *src = app->editor ? bt_editorpane_relpath(app->editor) : NULL;
   BtLinkResolution *res = bt_link_resolve(app->link_snap, src, raw_target);
   if (res == NULL)

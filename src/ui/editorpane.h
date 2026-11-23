@@ -35,6 +35,15 @@ void bt_editorpane_link_popover_rect(const BtEditorPane *pane, GdkRectangle *out
 gchar *bt_editorpane_buffer_hash(const BtEditorPane *pane);
 void bt_editorpane_free(BtEditorPane *pane);
 
+/* Keyboard shortcuts (L3-3). Returns TRUE if the key was consumed.
+ * bt_editorpane_handle_key_event() handles Ctrl+Enter / Ctrl+KP_Enter to open
+ * the link at the caret. bt_editorpane_jump_link() moves the caret to the next
+ * (direction > 0) or previous (direction < 0) link, wrapping at the bounds;
+ * it never opens the link and never pushes navigation history. */
+gboolean bt_editorpane_handle_key_event(BtEditorPane *pane, guint keyval,
+                                        GdkModifierType state);
+gboolean bt_editorpane_jump_link(BtEditorPane *pane, gint direction);
+
 GtkWidget *bt_editorpane_widget(BtEditorPane *pane);
 GtkWidget *bt_editorpane_view_widget(BtEditorPane *pane);
 
