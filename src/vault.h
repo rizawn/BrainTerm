@@ -78,6 +78,10 @@ gboolean vault_rename_note(const BtVault *vault, const gchar *old_relpath,
 /* Path-guarded deletion of a single file inside the vault (refuses directories). */
 gboolean vault_delete_note(const BtVault *vault, const gchar *relpath, GError **error);
 
+/* Single-line UTC timestamped log entry appended to <vault>/.bt/vault.log when writable.
+ * Also emits via GLib logging for warnings/errors. Never writes when vault is read-only. */
+void bt_vault_log(const BtVault *vault, const gchar *level, const gchar *fmt, ...) G_GNUC_PRINTF(3, 4);
+
 G_END_DECLS
 
 #endif

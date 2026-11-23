@@ -61,6 +61,27 @@ gchar *bt_createnote_plan_status_message(const BtCreatePlan *plan);
 const char *bt_createnote_plan_result_name(BtCreatePlanResult result);
 const char *bt_createnote_commit_result_name(BtCreateCommitResult result);
 
+/* Generates a unique local-date + monotonic sequence note ID: bt-YYYYMMDD-NNNNNN. */
+gchar *bt_createnote_generate_id(void);
+
+/* Renders the §6.1.5 new-note template (9 ordered frontmatter keys, LF line endings, no BOM).
+ * Truncates frontmatter title safely at 200 UTF-8 bytes if display_name exceeds 200 bytes. */
+gchar *bt_createnote_render_template(const char *note_id, const char *display_name,
+                                     const char *timestamp_iso, GError **error);
+
+/* Commits a PLAN_OK plan with create-only semantics under the vault write lock.
+ * Never overwrites existing notes; creates missing folders segment-by-segment through
+ * vault_resolve(). Writes status text (Appendix A) into out_message when non-NULL. */
+BtCreateCommitResult bt_createnote_commit(const BtVault *vault, const BtCreatePlan *plan,
+                                          gchar **out_relpath, gchar **out_note_id,
+                                          gchar **out_message, GError **error);
+
+BtCreateCommitResult bt_createnote_commit_with_hooks(const BtVault *vault,
+                                                     const BtCreatePlan *plan,
+                                                     const BtWriteHooks *hooks,
+                                                     gchar **out_relpath, gchar **out_note_id,
+                                                     gchar **out_message, GError **error);
+
 G_END_DECLS
 
 #endif

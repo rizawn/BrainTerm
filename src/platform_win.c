@@ -163,6 +163,35 @@ gboolean bt_platform_replace_file(const gchar *src, const gchar *dst, GError **e
   return TRUE;
 }
 
+gboolean bt_platform_create_file_only(const gchar *src, const gchar *dst,
+                                      gboolean *out_already_exists, GError **error)
+{
+  if (out_already_exists)
+    *out_already_exists = FALSE;
+  wchar_t *wsrc = to_wide(src, error);
+  if (wsrc == NULL)
+    return FALSE;
+  wchar_t *wdst = to_wide(dst, error);
+  if (wdst == NULL) {
+    g_free(wsrc);
+    return FALSE;
+  }
+  /* Omitting the replace flag guarantees NT refuses overwriting an existing dst. */
+  BOOL ok = MoveFileExW(wsrc, wdst, MOVEFILE_WRITE_THROUGH);
+  DWORD code = ok ? 0 : GetLastError();
+  g_free(wsrc);
+  g_free(wdst);
+  if (!ok) {
+    if (out_already_exists &&
+        (code == ERROR_ALREADY_EXISTS || code == ERROR_FILE_EXISTS)) {
+      *out_already_exists = TRUE;
+    }
+    set_win32_error(error, "Cannot publish new file", dst, code);
+    return FALSE;
+  }
+  return TRUE;
+}
+
 gboolean bt_platform_fsync_dir(const gchar *dir, GError **error)
 {
   (void)dir;

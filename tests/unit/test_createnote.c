@@ -17,9 +17,12 @@
 #include <glib/gstdio.h>
 
 #include "createnote.h"
+#include "frontmatter.h"
 #include "linkresolve.h"
 #include "testutil.h"
 #include "vault.h"
+
+static const char *g_self_exe = NULL;
 
 static gboolean create_outside_link(const char *link_path, const char *target_dir)
 {
@@ -459,12 +462,340 @@ static void test_cn_name_validation_helpers(void **state)
   printf("BT_TEST_CN validation helpers passed\n");
 }
 
-int main(void)
+static void test_ct_template_rendering(void **state)
+{
+  (void)state;
+  GError *err = NULL;
+
+  /* Sample display name matches exact §6.1.5 key order and LF endings without BOM. */
+  g_autofree gchar *doc = bt_createnote_render_template("bt-20261123-000042", "Empirical Bayes",
+                                                        "2026-11-23T08:30:00+07:00", &err);
+  assert_non_null(doc);
+  assert_null(err);
+  assert_null(strstr(doc, "\r\n"));
+  assert_false((guchar)doc[0] == 0xEFu && (guchar)doc[1] == 0xBBu && (guchar)doc[2] == 0xBFu);
+  const char *exp =
+      "---\n"
+      "id: bt-20261123-000042\n"
+      "title: \"Empirical Bayes\"\n"
+      "created: 2026-11-23T08:30:00+07:00\n"
+      "updated: 2026-11-23T08:30:00+07:00\n"
+      "source: human\n"
+      "agent: null\n"
+      "tags: []\n"
+      "tags_ai: []\n"
+      "links: []\n"
+      "---\n\n"
+      "# Empirical Bayes\n\n";
+  assert_string_equal(doc, exp);
+
+  /* Quote escaping for " and \ round-trips identically through libyaml parser. */
+  g_autofree gchar *tricky = g_strdup("Quote \"test\" and \\ slash");
+  g_autofree gchar *doc_esc = bt_createnote_render_template("bt-20261123-000043", tricky,
+                                                            "2026-11-23T08:30:00+07:00", &err);
+  assert_non_null(doc_esc);
+  BtFrontmatter *fm = bt_frontmatter_parse(doc_esc, strlen(doc_esc));
+  assert_true(fm->has_frontmatter);
+  assert_false(fm->parse_error);
+  assert_string_equal(fm->title, tricky);
+  bt_frontmatter_free(fm);
+
+  /* Empty / whitespace display names rejected. */
+  assert_null(bt_createnote_render_template("bt-20261123-000044", "", NULL, &err));
+  assert_non_null(err);
+  g_clear_error(&err);
+  assert_null(bt_createnote_render_template("bt-20261123-000044", "   ", NULL, &err));
+  assert_non_null(err);
+  g_clear_error(&err);
+
+  /* 255-char display name truncated in frontmatter title field only (<=200 UTF-8 bytes). */
+  gchar long255[256];
+  memset(long255, 'Z', 255);
+  long255[255] = '\0';
+  g_autofree gchar *doc_long = bt_createnote_render_template("bt-20261123-000045", long255,
+                                                             "2026-11-23T08:30:00+07:00", &err);
+  assert_non_null(doc_long);
+  BtFrontmatter *fm_long = bt_frontmatter_parse(doc_long, strlen(doc_long));
+  assert_true(fm_long->has_frontmatter);
+  assert_non_null(fm_long->title);
+  assert_true(strlen(fm_long->title) <= 200u);
+  bt_frontmatter_free(fm_long);
+
+  printf("BT_TEST_CT template rendering passed\n");
+}
+
+typedef struct {
+  const BtVault *vault;
+  const gchar *rel;
+  const gchar *payload;
+} Cw06HookCtx;
+
+static void cw06_inject_before_rename(BtWriteStage stage, void *ud)
+{
+  if (stage != BT_WRITE_STAGE_BEFORE_RENAME)
+    return;
+  Cw06HookCtx *ctx = ud;
+  g_autofree gchar *abs = vault_resolve(ctx->vault, ctx->rel, NULL);
+  if (abs != NULL)
+    g_file_set_contents(abs, ctx->payload, -1, NULL);
+}
+
+static void crash_at_stage_cb(BtWriteStage stage, void *ud)
+{
+  BtWriteStage target = (BtWriteStage)GPOINTER_TO_INT(ud);
+  if (stage == target) {
+    fflush(NULL);
+    _exit(99);
+  }
+}
+
+static gboolean set_dir_readonly(const char *dir, gboolean ro)
+{
+#ifdef G_OS_WIN32
+  gchar *argv_deny[] = {"icacls", (gchar *)dir, "/deny", "*S-1-1-0:(W)", "/Q", NULL};
+  gchar *argv_reset[] = {"icacls", (gchar *)dir, "/reset", "/Q", NULL};
+  gint ws = 0;
+  if (!g_spawn_sync(NULL, ro ? argv_deny : argv_reset, NULL,
+                    G_SPAWN_SEARCH_PATH | G_SPAWN_STDOUT_TO_DEV_NULL | G_SPAWN_STDERR_TO_DEV_NULL,
+                    NULL, NULL, NULL, NULL, &ws, NULL))
+    return FALSE;
+  return g_spawn_check_wait_status(ws, NULL);
+#else
+  return chmod(dir, ro ? 0555 : 0755) == 0;
+#endif
+}
+
+static void test_cw01_to_cw14_commit(void **state)
+{
+  (void)state;
+  g_autofree gchar *root = g_dir_make_tmp("bt-l3-cw-XXXXXX", NULL);
+  assert_non_null(root);
+  bt_test_put(root, "welcome.md", "# Welcome\nSee [[new-idea]]\n");
+  BtVault *v = vault_open(root, NULL, NULL);
+  assert_non_null(v);
+  BtIndexSnapshot *snap = bt_index_snapshot_from_vault(v);
+
+  g_autofree gchar *src_raw = NULL;
+  gsize src_len = 0;
+  assert_true(vault_read(v, "welcome.md", &src_raw, &src_len, NULL));
+  g_autofree gchar *src_sha_before = g_compute_checksum_for_string(G_CHECKSUM_SHA256, src_raw, (gssize)src_len);
+
+  /* CW01 + CW14 timing: Commit CR01 plan */
+  BtCreatePlan *p01 = bt_createnote_plan(v, snap, "welcome.md", "new-idea");
+  assert_int_equal(p01->result, BT_CREATE_PLAN_OK);
+  g_autofree gchar *c_rel = NULL;
+  g_autofree gchar *c_id = NULL;
+  g_autofree gchar *c_msg = NULL;
+  GError *cerr = NULL;
+  gint64 t0 = g_get_monotonic_time();
+  BtCreateCommitResult cr = bt_createnote_commit(v, p01, &c_rel, &c_id, &c_msg, &cerr);
+  double commit_ms = (double)(g_get_monotonic_time() - t0) / 1000.0;
+  printf("BT_TEST_CW14 commit_ms=%.3f id=%s\n", commit_ms, c_id ? c_id : "(null)");
+  assert_int_equal(cr, BT_CREATE_COMMIT_OK);
+  assert_null(cerr);
+  assert_string_equal(c_rel, "new-idea.md");
+  assert_string_equal(c_msg, "Created new-idea.md");
+  assert_true(commit_ms < 500.0);
+
+  /* CW08: LF only, no BOM; CW10: id regex; CW11: key order */
+  g_autofree gchar *new_body = NULL;
+  gsize new_len = 0;
+  assert_true(vault_read(v, "new-idea.md", &new_body, &new_len, NULL));
+  assert_null(strstr(new_body, "\r\n"));
+  assert_false(new_len >= 3 && (guchar)new_body[0] == 0xEFu && (guchar)new_body[1] == 0xBBu);
+  assert_true(g_regex_match_simple("^bt-[0-9]{8}-[0-9]{6}$", c_id, 0, 0));
+
+  BtFrontmatter *fm = bt_frontmatter_parse(new_body, new_len);
+  assert_true(fm->has_frontmatter);
+  assert_false(fm->parse_error);
+  assert_string_equal(fm->id, c_id);
+  assert_string_equal(fm->title, "new-idea");
+  assert_string_equal(fm->source, "human");
+  assert_null(fm->agent);
+  g_autofree gchar *exp_same = bt_createnote_render_template(fm->id, "new-idea", fm->created_str, NULL);
+  assert_string_equal(new_body, exp_same);
+  const char *ordered_keys[] = {"id:", "title:", "created:", "updated:", "source:", "agent:", "tags:", "tags_ai:", "links:"};
+  const char *cursor = new_body;
+  for (gsize ki = 0; ki < G_N_ELEMENTS(ordered_keys); ki++) {
+    const char *hit = strstr(cursor, ordered_keys[ki]);
+    assert_non_null(hit);
+    cursor = hit + strlen(ordered_keys[ki]);
+  }
+  bt_frontmatter_free(fm);
+  bt_createnote_plan_free(p01);
+
+  /* CW07: Source note untouched */
+  g_autofree gchar *src_raw2 = NULL;
+  gsize src_len2 = 0;
+  assert_true(vault_read(v, "welcome.md", &src_raw2, &src_len2, NULL));
+  g_autofree gchar *src_sha_after = g_compute_checksum_for_string(G_CHECKSUM_SHA256, src_raw2, (gssize)src_len2);
+  assert_string_equal(src_sha_before, src_sha_after);
+
+  /* CW02: Nested deep folders created atomically */
+  BtCreatePlan *p02 = bt_createnote_plan(v, snap, "welcome.md", "brand/new/deep");
+  assert_int_equal(p02->result, BT_CREATE_PLAN_OK);
+  assert_int_equal(bt_createnote_commit(v, p02, NULL, NULL, NULL, &cerr), BT_CREATE_COMMIT_OK);
+  assert_null(cerr);
+  g_autofree gchar *deep_abs = vault_resolve(v, "brand/new/deep.md", NULL);
+  assert_true(g_file_test(deep_abs, G_FILE_TEST_IS_REGULAR));
+  bt_createnote_plan_free(p02);
+
+  /* CW03: Target created on disk after plan -> COMMIT_EXISTS, pre-existing bytes preserved */
+  BtCreatePlan *p03 = bt_createnote_plan(v, snap, "welcome.md", "race-target");
+  assert_int_equal(p03->result, BT_CREATE_PLAN_OK);
+  const char *orig_race = "# Existing untouched\n";
+  bt_test_put(root, "race-target.md", orig_race);
+  g_autofree gchar *race_msg = NULL;
+  assert_int_equal(bt_createnote_commit(v, p03, NULL, NULL, &race_msg, NULL), BT_CREATE_COMMIT_EXISTS);
+  assert_string_equal(race_msg, "Note already existed, opened it");
+  g_autofree gchar *race_read = NULL;
+  gsize race_rlen = 0;
+  assert_true(vault_read(v, "race-target.md", &race_read, &race_rlen, NULL));
+  assert_string_equal(race_read, orig_race);
+  bt_createnote_plan_free(p03);
+
+  /* CW04: Folder segment is an existing file -> COMMIT_BLOCKED */
+  bt_test_put(root, "blocking_seg", "not a folder");
+  BtCreatePlan *p04 = bt_createnote_plan(v, snap, "welcome.md", "blocking_seg/child");
+  assert_int_equal(p04->result, BT_CREATE_PLAN_OK);
+  g_autofree gchar *blk_msg = NULL;
+  assert_int_equal(bt_createnote_commit(v, p04, NULL, NULL, &blk_msg, &cerr), BT_CREATE_COMMIT_BLOCKED);
+  assert_non_null(blk_msg);
+  assert_non_null(strstr(blk_msg, "A file named blocking_seg is in the way"));
+  g_clear_error(&cerr);
+  bt_createnote_plan_free(p04);
+
+  /* CW05: Read-only parent directory */
+  {
+    g_autofree gchar *ro_dir = g_build_filename(root, "ro_folder", NULL);
+    g_mkdir_with_parents(ro_dir, 0755);
+    BtCreatePlan *p05 = bt_createnote_plan(v, snap, "welcome.md", "ro_folder/blocked");
+    assert_int_equal(p05->result, BT_CREATE_PLAN_OK);
+    if (set_dir_readonly(ro_dir, TRUE)) {
+      g_autofree gchar *ro_msg = NULL;
+      BtCreateCommitResult r05 = bt_createnote_commit(v, p05, NULL, NULL, &ro_msg, &cerr);
+      assert_int_equal(r05, BT_CREATE_COMMIT_IO_ERROR);
+      assert_non_null(ro_msg);
+      assert_true(g_str_has_prefix(ro_msg, "Create failed: "));
+      printf("BT_TEST_CW05 ro_msg='%s'\n", ro_msg);
+      g_clear_error(&cerr);
+      g_autofree gchar *ro_target_abs = g_build_filename(ro_dir, "blocked.md", NULL);
+      assert_false(g_file_test(ro_target_abs, G_FILE_TEST_EXISTS));
+      set_dir_readonly(ro_dir, FALSE);
+    } else {
+      printf("BT_TEST_CW05 skipped: OS denied setting read-only dir ACL\n");
+    }
+    bt_createnote_plan_free(p05);
+  }
+
+  /* CW06: Race hook injects destination file between temp sync and create-only publish */
+  {
+    BtCreatePlan *p06 = bt_createnote_plan(v, snap, "welcome.md", "hook-race");
+    assert_int_equal(p06->result, BT_CREATE_PLAN_OK);
+    const char *inj = "# Injected during race\n";
+    Cw06HookCtx ctx = {v, "hook-race.md", inj};
+    BtWriteHooks hooks = {cw06_inject_before_rename, &ctx};
+    g_autofree gchar *h_msg = NULL;
+    assert_int_equal(bt_createnote_commit_with_hooks(v, p06, &hooks, NULL, NULL, &h_msg, NULL),
+                     BT_CREATE_COMMIT_EXISTS);
+    assert_string_equal(h_msg, "Note already existed, opened it");
+    g_autofree gchar *h_read = NULL;
+    gsize h_len = 0;
+    assert_true(vault_read(v, "hook-race.md", &h_read, &h_len, NULL));
+    assert_string_equal(h_read, inj);
+    /* Verify temp file cleaned up. */
+    g_autoptr(GDir) gd = g_dir_open(root, 0, NULL);
+    const gchar *nm;
+    while ((nm = g_dir_read_name(gd)) != NULL)
+      assert_false(g_str_has_prefix(nm, ".bt-create-"));
+    bt_createnote_plan_free(p06);
+  }
+
+  /* CW09: 1,000 consecutive commits produce 1,000 unique note IDs */
+  {
+    g_autoptr(GHashTable) seen_ids = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    for (guint i = 0; i < 1000u; i++) {
+      g_autofree gchar *nm = g_strdup_printf("bulk/note_%04u", i);
+      BtCreatePlan *pb = bt_createnote_plan(v, snap, "welcome.md", nm);
+      assert_int_equal(pb->result, BT_CREATE_PLAN_OK);
+      g_autofree gchar *bid = NULL;
+      assert_int_equal(bt_createnote_commit(v, pb, NULL, &bid, NULL, &cerr), BT_CREATE_COMMIT_OK);
+      assert_null(cerr);
+      assert_non_null(bid);
+      assert_false(g_hash_table_contains(seen_ids, bid));
+      g_hash_table_add(seen_ids, g_steal_pointer(&bid));
+      bt_createnote_plan_free(pb);
+    }
+    assert_int_equal(g_hash_table_size(seen_ids), 1000u);
+  }
+
+  /* CW12: Title quote/backslash escaping checked via template + frontmatter round-trip + valid file commit */
+  {
+    BtCreatePlan *p12 = bt_createnote_plan(v, snap, "welcome.md", "Title 'quoted'");
+    assert_int_equal(p12->result, BT_CREATE_PLAN_OK);
+    assert_int_equal(bt_createnote_commit(v, p12, NULL, NULL, NULL, &cerr), BT_CREATE_COMMIT_OK);
+    bt_createnote_plan_free(p12);
+    g_autofree gchar *t12 = bt_createnote_render_template("bt-20261123-000999", "A \"B\" \\ C", NULL, NULL);
+    BtFrontmatter *fm12 = bt_frontmatter_parse(t12, strlen(t12));
+    assert_string_equal(fm12->title, "A \"B\" \\ C");
+    bt_frontmatter_free(fm12);
+  }
+
+  /* CW13: Power-loss simulation at every temp write stage via child process */
+  if (g_self_exe != NULL) {
+    BtWriteStage stages[] = {
+      BT_WRITE_STAGE_TMP_OPENED,
+      BT_WRITE_STAGE_TMP_PARTIAL,
+      BT_WRITE_STAGE_TMP_SYNCED,
+      BT_WRITE_STAGE_BEFORE_RENAME,
+    };
+    for (gsize si = 0; si < G_N_ELEMENTS(stages); si++) {
+      g_autofree gchar *cdir = g_dir_make_tmp("bt-cw13-XXXXXX", NULL);
+      g_autofree gchar *stage_s = g_strdup_printf("%d", (int)stages[si]);
+      gchar *argv[] = {(gchar *)g_self_exe, "--crash-child", cdir, "crash-note", stage_s, NULL};
+      gint ws = 0;
+      assert_true(g_spawn_sync(NULL, argv, NULL, G_SPAWN_DEFAULT, NULL, NULL, NULL, NULL, &ws, NULL));
+      assert_false(g_spawn_check_wait_status(ws, NULL)); /* child aborted as intended */
+
+      g_autofree gchar *dst_check = g_build_filename(cdir, "crash-note.md", NULL);
+      assert_false(g_file_test(dst_check, G_FILE_TEST_EXISTS)); /* never partial final file */
+
+      BtScanStats st = {0};
+      BtVault *rv = vault_open(cdir, &st, NULL);
+      assert_non_null(rv);
+      assert_int_equal(st.tmp_removed, 1); /* residue cleaned by vault_open */
+      assert_int_equal(vault_notes(rv)->len, 0);
+      vault_free(rv);
+      if (g_getenv("BT_KEEP_TEST_VAULTS") == NULL)
+        bt_test_rm_rf(cdir);
+    }
+  }
+
+  bt_index_snapshot_free(snap);
+  vault_free(v);
+  if (g_getenv("BT_KEEP_TEST_VAULTS") == NULL)
+    bt_test_rm_rf(root);
+  printf("BT_TEST_CW CW01..CW14 passed\n");
+}
+
+int main(int argc, char **argv)
 {
   setlocale(LC_NUMERIC, "C");
+  g_self_exe = (argc > 0) ? argv[0] : NULL;
+  if (argc == 5 && strcmp(argv[1], "--crash-child") == 0) {
+    BtVault *v = vault_open(argv[2], NULL, NULL);
+    if (!v) return 2;
+    BtCreatePlan *p = bt_createnote_plan(v, NULL, "welcome.md", argv[3]);
+    if (!p || p->result != BT_CREATE_PLAN_OK) return 3;
+    BtWriteHooks hooks = {crash_at_stage_cb, GINT_TO_POINTER(atoi(argv[4]))};
+    bt_createnote_commit_with_hooks(v, p, &hooks, NULL, NULL, NULL, NULL);
+    return 0;
+  }
   const struct CMUnitTest tests[] = {
     cmocka_unit_test(test_cr01_to_cr37_planner),
     cmocka_unit_test(test_cn_name_validation_helpers),
+    cmocka_unit_test(test_ct_template_rendering),
+    cmocka_unit_test(test_cw01_to_cw14_commit),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

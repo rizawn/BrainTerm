@@ -93,6 +93,25 @@ gboolean bt_platform_replace_file(const gchar *src, const gchar *dst, GError **e
   return TRUE;
 }
 
+gboolean bt_platform_create_file_only(const gchar *src, const gchar *dst,
+                                      gboolean *out_already_exists, GError **error)
+{
+  if (out_already_exists)
+    *out_already_exists = FALSE;
+  if (link(src, dst) != 0) {
+    int err = errno;
+    if (out_already_exists && err == EEXIST)
+      *out_already_exists = TRUE;
+    set_errno_error(error, "Cannot publish new file", dst, err);
+    return FALSE;
+  }
+  if (unlink(src) != 0 && errno != ENOENT) {
+    set_errno_error(error, "Cannot unlink temp file", src, errno);
+    return FALSE;
+  }
+  return TRUE;
+}
+
 gboolean bt_platform_fsync_dir(const gchar *dir, GError **error)
 {
   int fd = open(dir, O_RDONLY);

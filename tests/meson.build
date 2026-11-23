@@ -198,6 +198,14 @@ t_createnote = executable(
 )
 test('createnote', t_createnote, suite: 'unit')
 
+bench_createnote = executable(
+  'bench_createnote',
+  'bench/bench_createnote.c',
+  include_directories: test_inc,
+  dependencies: [bt_core_dep],
+)
+test('bench_createnote', bench_createnote, suite: 'bench', timeout: 30)
+
 t_math_tok = executable(
   'test_math_tok',
   'unit/test_math_tok.c',

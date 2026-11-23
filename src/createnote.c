@@ -1,9 +1,31 @@
 /* createnote.c — Headless core note creation planner and name validator (Phase L3). */
+#ifndef G_OS_WIN32
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "createnote.h"
 #include "platform.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <glib/gstdio.h>
 #include <string.h>
+
+#ifdef G_OS_WIN32
+#include <io.h>
+#define bt_cn_write(fd, buf, n) _write((fd), (buf), (unsigned int)(n))
+#define bt_cn_fsync(fd) _commit(fd)
+#define bt_cn_close(fd) _close(fd)
+#else
+#include <unistd.h>
+#define bt_cn_write(fd, buf, n) write((fd), (buf), (n))
+#define bt_cn_fsync(fd) fsync(fd)
+#define bt_cn_close(fd) close(fd)
+#endif
+
+#ifndef O_BINARY
+#define O_BINARY 0
+#endif
 
 static gboolean is_ascii_hspace(char c)
 {
@@ -496,4 +518,370 @@ const char *bt_createnote_commit_result_name(BtCreateCommitResult result)
   case BT_CREATE_COMMIT_IO_ERROR: return "COMMIT_IO_ERROR";
   }
   return "UNKNOWN";
+}
+
+gchar *bt_createnote_generate_id(void)
+{
+  static gsize init_once = 0;
+  static gint seq = 0;
+  g_autoptr(GDateTime) now = g_date_time_new_now_local();
+  if (g_once_init_enter(&init_once)) {
+    gint seed = now ? ((g_date_time_get_hour(now) * 3600 +
+                        g_date_time_get_minute(now) * 60 +
+                        g_date_time_get_second(now)) % 900000)
+                    : 1;
+    g_atomic_int_set(&seq, seed);
+    g_once_init_leave(&init_once, 1);
+  }
+  gint val = g_atomic_int_add(&seq, 1) % 1000000;
+  if (val < 0)
+    val = -val;
+  g_autofree gchar *day = now ? g_date_time_format(now, "%Y%m%d") : g_strdup("19700101");
+  return g_strdup_printf("bt-%s-%06d", day, val);
+}
+
+static gchar *truncate_utf8_bytes(const char *s, gsize max_bytes)
+{
+  if (s == NULL)
+    return g_strdup("");
+  gsize len = strlen(s);
+  if (len <= max_bytes)
+    return g_strdup(s);
+  gsize target = (max_bytes > 3u) ? (max_bytes - 3u) : max_bytes;
+  const char *p = s;
+  const char *prev = s;
+  while (*p != '\0' && (gsize)(p - s) <= target) {
+    prev = p;
+    p = g_utf8_next_char(p);
+    if ((gsize)(p - s) > target)
+      break;
+    prev = p;
+  }
+  GString *out = g_string_new_len(s, (gssize)(prev - s));
+  if (max_bytes > 3u)
+    g_string_append(out, "...");
+  return g_string_free(out, FALSE);
+}
+
+static gchar *yaml_quote_escaped(const char *s)
+{
+  GString *out = g_string_new("\"");
+  for (const char *p = s ? s : ""; *p != '\0'; p++) {
+    if (*p == '\\' || *p == '"')
+      g_string_append_c(out, '\\');
+    g_string_append_c(out, *p);
+  }
+  g_string_append_c(out, '"');
+  return g_string_free(out, FALSE);
+}
+
+gchar *bt_createnote_render_template(const char *note_id, const char *display_name,
+                                     const char *timestamp_iso, GError **error)
+{
+  if (display_name == NULL || is_all_ws(display_name)) {
+    g_set_error(error, BT_ERROR, BT_ERROR_INVALID, "Display name cannot be empty");
+    return NULL;
+  }
+  if (!g_utf8_validate(display_name, -1, NULL)) {
+    g_set_error(error, BT_ERROR, BT_ERROR_INVALID, "Display name is not valid UTF-8");
+    return NULL;
+  }
+  for (const char *p = display_name; *p != '\0'; p++) {
+    if ((guchar)*p < 0x20u || (guchar)*p == 0x7Fu) {
+      g_set_error(error, BT_ERROR, BT_ERROR_INVALID, "Display name contains control characters");
+      return NULL;
+    }
+  }
+
+  g_autofree gchar *gen_id = NULL;
+  const char *use_id = note_id;
+  if (use_id == NULL || use_id[0] == '\0') {
+    gen_id = bt_createnote_generate_id();
+    use_id = gen_id;
+  }
+
+  g_autofree gchar *gen_ts = NULL;
+  const char *use_ts = timestamp_iso;
+  if (use_ts == NULL || use_ts[0] == '\0') {
+    g_autoptr(GDateTime) now = g_date_time_new_now_local();
+    gen_ts = now ? g_date_time_format(now, "%Y-%m-%dT%H:%M:%S%:z")
+                 : g_strdup("1970-01-01T00:00:00Z");
+    use_ts = gen_ts;
+  }
+
+  /* Cap frontmatter title at 200 UTF-8 bytes; filename segment checks run first in planner. */
+  g_autofree gchar *fm_title_raw = truncate_utf8_bytes(display_name, 200u);
+  g_autofree gchar *fm_title_q = yaml_quote_escaped(fm_title_raw);
+
+  return g_strdup_printf("---\n"
+                         "id: %s\n"
+                         "title: %s\n"
+                         "created: %s\n"
+                         "updated: %s\n"
+                         "source: human\n"
+                         "agent: null\n"
+                         "tags: []\n"
+                         "tags_ai: []\n"
+                         "links: []\n"
+                         "---\n\n"
+                         "# %s\n\n",
+                         use_id, fm_title_q, use_ts, use_ts, display_name);
+}
+
+static gboolean write_all_bytes(int fd, const gchar *buf, gsize n, GError **error)
+{
+  gsize off = 0;
+  while (off < n) {
+    gssize w = bt_cn_write(fd, buf + off, n - off);
+    if (w < 0) {
+      if (errno == EINTR)
+        continue;
+      g_set_error(error, BT_ERROR, BT_ERROR_IO, "%s", g_strerror(errno));
+      return FALSE;
+    }
+    off += (gsize)w;
+  }
+  return TRUE;
+}
+
+static void cleanup_empty_created_dirs(GPtrArray *created_dirs)
+{
+  if (created_dirs == NULL)
+    return;
+  for (gint i = (gint)created_dirs->len - 1; i >= 0; i--) {
+    const gchar *d = g_ptr_array_index(created_dirs, (guint)i);
+    if (d != NULL)
+      (void)g_rmdir(d); /* Removes only if empty */
+  }
+}
+
+static void invoke_create_hook(const BtWriteHooks *hooks, BtWriteStage stage)
+{
+  if (hooks != NULL && hooks->at_stage != NULL)
+    hooks->at_stage(stage, hooks->user_data);
+}
+
+BtCreateCommitResult bt_createnote_commit_with_hooks(const BtVault *vault,
+                                                     const BtCreatePlan *plan,
+                                                     const BtWriteHooks *hooks,
+                                                     gchar **out_relpath, gchar **out_note_id,
+                                                     gchar **out_message, GError **error)
+{
+  static GMutex commit_mutex;
+  static guint tmp_seq = 0;
+  if (out_relpath) *out_relpath = NULL;
+  if (out_note_id) *out_note_id = NULL;
+  if (out_message) *out_message = NULL;
+
+  if (vault == NULL || plan == NULL || plan->result != BT_CREATE_PLAN_OK ||
+      plan->target_relpath == NULL || plan->note_name == NULL) {
+    const char *rname = plan ? bt_createnote_plan_result_name(plan->result) : "NULL_PLAN";
+    if (vault != NULL)
+      bt_vault_log(vault, "WARNING", "create refused result=%s", rname);
+    if (out_message)
+      *out_message = plan ? bt_createnote_plan_status_message(plan)
+                          : g_strdup("Can't create: Invalid plan");
+    g_set_error(error, BT_ERROR, BT_ERROR_INVALID, "Invalid create plan (%s)", rname);
+    return BT_CREATE_COMMIT_BLOCKED;
+  }
+
+  g_mutex_lock(&commit_mutex);
+  g_autoptr(GPtrArray) created_dirs = g_ptr_array_new_with_free_func(g_free);
+
+  g_autofree gchar *dst_abs = vault_resolve(vault, plan->target_relpath, error);
+  if (dst_abs == NULL) {
+    bt_vault_log(vault, "WARNING", "create refused result=OUTSIDE_VAULT");
+    if (out_message)
+      *out_message = g_strdup("Can't create: outside the vault");
+    g_mutex_unlock(&commit_mutex);
+    return BT_CREATE_COMMIT_BLOCKED;
+  }
+
+  if (g_file_test(dst_abs, G_FILE_TEST_EXISTS)) {
+    if (g_file_test(dst_abs, G_FILE_TEST_IS_DIR)) {
+      bt_vault_log(vault, "WARNING", "create refused result=TARGET_IS_DIR");
+      if (out_message)
+        *out_message = g_strdup("Not a note: Folder");
+      g_set_error(error, BT_ERROR, BT_ERROR_INVALID, "Destination is a directory");
+      g_mutex_unlock(&commit_mutex);
+      return BT_CREATE_COMMIT_BLOCKED;
+    }
+    if (out_relpath) *out_relpath = g_strdup(plan->target_relpath);
+    if (out_message) *out_message = g_strdup("Note already existed, opened it");
+    g_mutex_unlock(&commit_mutex);
+    return BT_CREATE_COMMIT_EXISTS;
+  }
+
+  /* Create missing parent folders segment-by-segment via vault_resolve() guard. */
+  g_autofree gchar *parent_rel = path_dirname_rel(plan->target_relpath);
+  if (parent_rel[0] != '\0') {
+    gchar **segs = g_strsplit(parent_rel, "/", -1);
+    GString *acc = g_string_new(NULL);
+    for (guint i = 0; segs[i] != NULL; i++) {
+      if (segs[i][0] == '\0')
+        continue;
+      if (acc->len > 0)
+        g_string_append_c(acc, '/');
+      g_string_append(acc, segs[i]);
+
+      g_autofree gchar *seg_abs = vault_resolve(vault, acc->str, error);
+      if (seg_abs == NULL) {
+        cleanup_empty_created_dirs(created_dirs);
+        g_string_free(acc, TRUE);
+        g_strfreev(segs);
+        bt_vault_log(vault, "WARNING", "create refused result=OUTSIDE_VAULT");
+        if (out_message)
+          *out_message = g_strdup("Can't create: outside the vault");
+        g_mutex_unlock(&commit_mutex);
+        return BT_CREATE_COMMIT_BLOCKED;
+      }
+      if (g_file_test(seg_abs, G_FILE_TEST_IS_DIR))
+        continue;
+      if (g_file_test(seg_abs, G_FILE_TEST_EXISTS)) {
+        g_autofree gchar *why = g_strdup_printf("A file named %s is in the way", segs[i]);
+        cleanup_empty_created_dirs(created_dirs);
+        g_string_free(acc, TRUE);
+        g_strfreev(segs);
+        bt_vault_log(vault, "WARNING", "create refused result=COMMIT_BLOCKED");
+        if (out_message)
+          *out_message = g_strdup_printf("Can't create: %s", why);
+        g_set_error(error, BT_ERROR, BT_ERROR_INVALID, "%s", why);
+        g_mutex_unlock(&commit_mutex);
+        return BT_CREATE_COMMIT_BLOCKED;
+      }
+      if (g_mkdir(seg_abs, 0755) != 0) {
+        int me = errno;
+        const char *os_txt = g_strerror(me);
+        cleanup_empty_created_dirs(created_dirs);
+        g_string_free(acc, TRUE);
+        g_strfreev(segs);
+        if (out_message)
+          *out_message = g_strdup_printf("Create failed: %s", os_txt);
+        g_set_error(error, BT_ERROR, BT_ERROR_IO, "Create folder failed: %s", os_txt);
+        g_mutex_unlock(&commit_mutex);
+        return BT_CREATE_COMMIT_IO_ERROR;
+      }
+      g_ptr_array_add(created_dirs, g_strdup(seg_abs));
+    }
+    g_string_free(acc, TRUE);
+    g_strfreev(segs);
+  }
+
+  g_autofree gchar *note_id = bt_createnote_generate_id();
+  g_autofree gchar *body = bt_createnote_render_template(note_id, plan->note_name, NULL, error);
+  if (body == NULL) {
+    cleanup_empty_created_dirs(created_dirs);
+    if (out_message)
+      *out_message = g_strdup("Can't create: Invalid template content");
+    g_mutex_unlock(&commit_mutex);
+    return BT_CREATE_COMMIT_BLOCKED;
+  }
+
+  g_autofree gchar *parent_abs = g_path_get_dirname(dst_abs);
+  guint seq_n = ++tmp_seq;
+  g_autofree gchar *tmp_name = g_strdup_printf(".bt-create-%08x-%u.tmp",
+                                               (guint)g_random_int(), seq_n);
+  g_autofree gchar *tmp_abs = g_build_filename(parent_abs, tmp_name, NULL);
+
+  int fd = g_open(tmp_abs, O_WRONLY | O_CREAT | O_EXCL | O_BINARY, 0644);
+  if (fd < 0) {
+    int oe = errno;
+    const char *os_txt = g_strerror(oe);
+    cleanup_empty_created_dirs(created_dirs);
+    if (out_message)
+      *out_message = g_strdup_printf("Create failed: %s", os_txt);
+    g_set_error(error, BT_ERROR, BT_ERROR_IO, "Create failed: %s", os_txt);
+    g_mutex_unlock(&commit_mutex);
+    return BT_CREATE_COMMIT_IO_ERROR;
+  }
+
+  invoke_create_hook(hooks, BT_WRITE_STAGE_TMP_OPENED);
+
+  gsize total_len = strlen(body);
+  gsize half = total_len / 2u;
+  g_autoptr(GError) io_err = NULL;
+  if (!write_all_bytes(fd, body, half, &io_err)) {
+    bt_cn_close(fd);
+    (void)g_remove(tmp_abs);
+    cleanup_empty_created_dirs(created_dirs);
+    if (out_message)
+      *out_message = g_strdup_printf("Create failed: %s", io_err ? io_err->message : "write error");
+    if (error && io_err)
+      *error = g_error_copy(io_err);
+    g_mutex_unlock(&commit_mutex);
+    return BT_CREATE_COMMIT_IO_ERROR;
+  }
+  invoke_create_hook(hooks, BT_WRITE_STAGE_TMP_PARTIAL);
+
+  if (!write_all_bytes(fd, body + half, total_len - half, &io_err)) {
+    bt_cn_close(fd);
+    (void)g_remove(tmp_abs);
+    cleanup_empty_created_dirs(created_dirs);
+    if (out_message)
+      *out_message = g_strdup_printf("Create failed: %s", io_err ? io_err->message : "write error");
+    if (error && io_err)
+      *error = g_error_copy(io_err);
+    g_mutex_unlock(&commit_mutex);
+    return BT_CREATE_COMMIT_IO_ERROR;
+  }
+
+  if (bt_cn_fsync(fd) != 0) {
+    int se = errno;
+    const char *os_txt = g_strerror(se);
+    bt_cn_close(fd);
+    (void)g_remove(tmp_abs);
+    cleanup_empty_created_dirs(created_dirs);
+    if (out_message)
+      *out_message = g_strdup_printf("Create failed: %s", os_txt);
+    g_set_error(error, BT_ERROR, BT_ERROR_IO, "Sync failed: %s", os_txt);
+    g_mutex_unlock(&commit_mutex);
+    return BT_CREATE_COMMIT_IO_ERROR;
+  }
+  bt_cn_close(fd);
+  invoke_create_hook(hooks, BT_WRITE_STAGE_TMP_SYNCED);
+  invoke_create_hook(hooks, BT_WRITE_STAGE_BEFORE_RENAME);
+
+  gboolean already_exists = FALSE;
+  g_autoptr(GError) pub_err = NULL;
+  if (!bt_platform_create_file_only(tmp_abs, dst_abs, &already_exists, &pub_err)) {
+    if (already_exists) {
+      (void)g_remove(tmp_abs);
+      cleanup_empty_created_dirs(created_dirs);
+      if (out_relpath) *out_relpath = g_strdup(plan->target_relpath);
+      if (out_message) *out_message = g_strdup("Note already existed, opened it");
+      g_mutex_unlock(&commit_mutex);
+      return BT_CREATE_COMMIT_EXISTS;
+    }
+    (void)g_remove(tmp_abs);
+    cleanup_empty_created_dirs(created_dirs);
+    if (g_file_test(tmp_abs, G_FILE_TEST_EXISTS)) {
+      if (out_message)
+        *out_message = g_strdup_printf("Create failed: temp file left at %s", tmp_name);
+    } else if (out_message) {
+      *out_message = g_strdup_printf("Create failed: %s",
+                                     pub_err ? pub_err->message : "publish error");
+    }
+    if (error && pub_err)
+      *error = g_error_copy(pub_err);
+    g_mutex_unlock(&commit_mutex);
+    return BT_CREATE_COMMIT_IO_ERROR;
+  }
+
+  invoke_create_hook(hooks, BT_WRITE_STAGE_AFTER_RENAME);
+  bt_platform_fsync_dir(parent_abs, NULL);
+  bt_vault_log(vault, "INFO", "create committed path=%s id=%s", plan->target_relpath, note_id);
+
+  if (out_relpath) *out_relpath = g_strdup(plan->target_relpath);
+  if (out_note_id) *out_note_id = g_steal_pointer(&note_id);
+  if (out_message) *out_message = g_strdup_printf("Created %s", plan->target_relpath);
+  g_mutex_unlock(&commit_mutex);
+  return BT_CREATE_COMMIT_OK;
+}
+
+BtCreateCommitResult bt_createnote_commit(const BtVault *vault, const BtCreatePlan *plan,
+                                          gchar **out_relpath, gchar **out_note_id,
+                                          gchar **out_message, GError **error)
+{
+  return bt_createnote_commit_with_hooks(vault, plan, NULL, out_relpath, out_note_id,
+                                         out_message, error);
 }

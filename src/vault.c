@@ -8,6 +8,8 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
 
 #include <glib/gstdio.h>
@@ -53,12 +55,18 @@ static gboolean has_suffix_ci(const gchar *s, const gchar *suffix)
   return sl > xl && g_ascii_strcasecmp(s + sl - xl, suffix) == 0;
 }
 
+static gboolean is_tmp_residue_name(const gchar *name)
+{
+  return has_suffix_ci(name, ".md.tmp") ||
+         (g_str_has_prefix(name, ".bt-create-") && has_suffix_ci(name, ".tmp"));
+}
+
 static gboolean is_ignored_name(const BtVault *v, const gchar *name, const gchar *relpath)
 {
   for (guint i = 0; default_ignored_names[i] != NULL; i++)
     if (name_equal(name, default_ignored_names[i]))
       return TRUE;
-  if (has_suffix_ci(name, ".md.tmp"))
+  if (is_tmp_residue_name(name))
     return TRUE;
   for (guint i = 0; i < v->patterns->len; i++) {
     GPatternSpec *p = g_ptr_array_index(v->patterns, i);
@@ -230,7 +238,7 @@ static void scan_dir(BtVault *v, const gchar *abs, const gchar *rel, guint depth
     const BtDirent *d = g_ptr_array_index(entries, i);
     gchar *child_rel = rel[0] != '\0' ? g_strconcat(rel, "/", d->name, NULL) : g_strdup(d->name);
 
-    if (has_suffix_ci(d->name, ".md.tmp") && d->kind != BT_DIRENT_DIR) {
+    if (is_tmp_residue_name(d->name) && d->kind != BT_DIRENT_DIR) {
       /* R1: residue of a crashed atomic write. The target is intact. */
       if (!v->readonly) {
         gchar *full = g_build_filename(abs, d->name, NULL);
@@ -573,4 +581,41 @@ gboolean vault_delete_note(const BtVault *vault, const gchar *relpath, GError **
   g_free(abs);
   ok = TRUE;
   return ok;
+}
+
+void bt_vault_log(const BtVault *vault, const gchar *level, const gchar *fmt, ...)
+{
+  if (level == NULL || fmt == NULL)
+    return;
+  va_list ap;
+  va_start(ap, fmt);
+  g_autofree gchar *raw_msg = g_strdup_vprintf(fmt, ap);
+  va_end(ap);
+
+  /* Enforce single-line rule (§16): replace embedded CR/LF with spaces. */
+  for (gchar *p = raw_msg; *p != '\0'; p++) {
+    if (*p == '\r' || *p == '\n')
+      *p = ' ';
+  }
+
+  g_autoptr(GDateTime) now = g_date_time_new_now_utc();
+  g_autofree gchar *ts = g_date_time_format(now, "%Y-%m-%dT%H:%M:%SZ");
+  g_autofree gchar *line = g_strdup_printf("[%s] %s: %s", ts ? ts : "unknown", level, raw_msg);
+
+  if (g_ascii_strcasecmp(level, "WARNING") == 0 || g_ascii_strcasecmp(level, "ERROR") == 0)
+    g_warning("%s", line);
+
+  if (vault != NULL && !vault->readonly && vault->root != NULL) {
+    static GMutex log_mu;
+    g_mutex_lock(&log_mu);
+    g_autofree gchar *bt_dir = g_build_filename(vault->root, ".bt", NULL);
+    g_mkdir_with_parents(bt_dir, 0755);
+    g_autofree gchar *log_path = g_build_filename(bt_dir, "vault.log", NULL);
+    FILE *fp = g_fopen(log_path, "ab");
+    if (fp != NULL) {
+      fprintf(fp, "%s\n", line);
+      fclose(fp);
+    }
+    g_mutex_unlock(&log_mu);
+  }
 }

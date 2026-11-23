@@ -32,6 +32,10 @@ gchar *bt_platform_realpath(const gchar *path, GError **error);
 /* Atomically replaces dst with src (same directory). */
 gboolean bt_platform_replace_file(const gchar *src, const gchar *dst, GError **error);
 
+/* Atomically creates dst from src (same directory) failing without overwrite if dst exists. */
+gboolean bt_platform_create_file_only(const gchar *src, const gchar *dst,
+                                      gboolean *out_already_exists, GError **error);
+
 /* Flushes directory metadata (POSIX); no-op on Windows where the rename is
  * issued with MOVEFILE_WRITE_THROUGH. */
 gboolean bt_platform_fsync_dir(const gchar *dir, GError **error);
