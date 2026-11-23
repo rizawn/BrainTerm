@@ -1,0 +1,53 @@
+# L3 Recon (`docs/evidence/2026-11-23-l3/recon.md`)
+
+## 1. Pre-Flight Verification Summary (PF-1 to PF-8)
+Per `docs/briefs/go-2026-11-23.md` Section 0.1 & 0.5, all 8 pre-flight items were verified and committed before Step 1:
+- **PF-1 (`1a35855`):** Cleaned working tree, moved untracked `skill/` out of repo, appended `ADR-015`..`ADR-022` verbatim to `docs/DECISIONS.md`, committed prior evidence (`docs/evidence/2026-11-23-pf/pf1-git-status.txt`).
+- **PF-2 (`26d4e52`):** Reconciled `TEMPLATE_PLACEHOLDER=16` (P-2) vs `PLACEHOLDER=12` (P-3): `12` `{{...}}` targets match `BT_LINK_PLACEHOLDER` and `4` bare tokens in `moc-template.md` (`note-1`, `note-2`, `note-3`, `adjacent-moc-1`) stay `UNRESOLVED` (`83 - 12 = 71`) (`docs/evidence/2026-11-23-pf/placeholder-reconcile.md`).
+- **PF-3 (`6028fb3`):** Added read-only `--bench-first-open` / `--bench-note`; measured 5 cold/warm runs each on `life2`:
+  - `statistical-statistics-notes/MathStats.md`: cold first-frame wall median `48.78 ms` (max `74.12 ms`), warm `14.17 ms`
+  - `statistical-statistics-notes/chapter-13-empirical/02-bootstrap.md`: cold `27.55 ms`, warm `9.96 ms`
+  - `Welcome.md`: cold `14.64 ms`, warm `7.64 ms`
+  All medians are below the 100 ms risk-register threshold (`docs/evidence/2026-11-23-pf/first-open-timing.json`).
+- **PF-4 (`6e72582`):** Audited `test_linkresolve` 3,000-note snapshot benchmark 20x solo (`min 7.320`, `median 7.841`, `max 8.813`, `>20ms = 0`) and 20x `meson test -j 4` (`min 7.170`, `median 7.809`, `max 10.372`, `>20ms = 0`); set contention-safe CI guard `< 60.0 ms` while retaining `20 ms` target for ADR-023 (`docs/evidence/2026-11-23-pf/snapshot-3k-stability.txt`).
+- **PF-5 (`aa0f24f`):** Added `bt_index_snapshot_set_fast_tag_mode()` so bulk editor styling caches containment checks only inside `apply_link_tags_range`, while click/open resolution and `bt_link_check_open_policy()` always run uncached live `vault_resolve()`. Added `LC01`–`LC04` directory-junction/symlink containment tests (`4/4` passed, `32/32` OK; `docs/evidence/2026-11-23-pf/containment-tests.txt`).
+- **PF-6 (`ed8b004`):** Created `docs/evidence/2026-11-23-l2/manual-checklist.md` for Riza (`manual-checklist-results.md` pending Riza's interactive run).
+- **PF-7 (`d4c4cb9`):** Copied verbatim specs into `docs/briefs/links-and-math.md`, `docs/briefs/go-2026-11-23.md`, and `docs/briefs/README.md`.
+- **PF-8 (`ac544c2`):** Rebuilt & packaged with clean tree: `build\src\bt.exe` and `dist\brainterm\bt.exe` share SHA-256 `BFCDB5E71B006114F6E93BD56B5C8457FB030FC4D275A4D0B6D71AB8E8E95C14` and clean build stamp `BrainTerm 0.1.0 (build d4c4cb9 · 2026-11-23 08:08)` (`docs/evidence/2026-11-23-pf/version-after-pf1.txt`).
+
+## 2. Prerequisite Verification (PR-1 to PR-6)
+- **PR-1:** Authorized via Riza's GO brief (`docs/briefs/go-2026-11-23.md`).
+- **PR-2:** `meson test -C build -j 1` passes `32/32 OK` with `-Dwerror=true`.
+- **PR-3:** Resolved in L2 close-out & PF baseline (`test_l2_6` runs cleanly under `32/32` with zero crashes).
+- **PR-4:** `docs/evidence/2026-11-23-l2/life2-diff.txt` is `0` bytes (empty); L3 baseline `docs/evidence/2026-11-23-l3/life2-before.txt` recorded (`350` files).
+- **PR-5:** `docs/evidence/2026-11-23-l2/{skip-audit.txt,unresolved-categories.txt,ambiguity-ranking.txt,selftest-timings.txt}` + `docs/evidence/2026-11-23-pf/first-open-timing.json` recorded.
+- **PR-6:** Packaged `dist\brainterm\bt.exe --version` verified clean in `PF-8`.
+
+## 3. Ground Truth Answers (G-1 to G-15)
+| # | Question | Verified Answer (File & Line) |
+|---|---|---|
+| G-1 | Where is `bt_app_open_or_create_wikilink()` defined and called? | Declared in `src/app.h:42`, defined in `src/app.c:1243–1271`. Only caller in the entire repo: `on_graph_open_note()` (`src/app.c:1612–1624`, call on line `1616` when `is_ghost == TRUE`). Zero callers on editor link click paths. |
+| G-2 | Exact body of stub writer | `src/app.c:1243–1271`: calls `bt_wikilink_find_note()`, opens if found, otherwise calls `bt_wikilink_new_note_path()`, formats `# %s\n\n` (no YAML frontmatter), writes via `vault_atomic_write()` (which overwrites via `MOVEFILE_REPLACE_EXISTING`), upserts into index, and opens. |
+| G-3 | New-note template & frontmatter key order | `create_named_note_in_app()` (`src/app.c:1750–1819`) quotes title with `yaml_quote_title()` (`src/app.c:1675`) and writes `id`, `title`, `created`, `updated`, `source: human`, `tags: []` — omitting `agent`, `tags_ai`, and `links`. `bt_frontmatter_serialize()` (`src/frontmatter.c`) orders keys `id`, `title`, `created`, `updated`, `source`, `agent`, `tags`, `tags_ai`, `links`, `aliases`, `unknown`. New `bt_createnote_render_template()` will emit all 9 keys from §6.1.5 in canonical order (`agent: null`, `tags: []`, `tags_ai: []`, `links: []`). |
+| G-4 | ID generator format | Existing fixture notes (`tests/fixtures/vault/welcome.md:2`, `projects/conpty.md:2`) use `bt-YYYYMMDD-NNNNNN` (`bt-20261122-000001`, `bt-20261122-000002`), while `create_named_note_in_app()` (`src/app.c:1779`) formats `bt-%Y%m%d-%H%M%S`. No standalone ID helper exists yet; `bt_createnote_generate_id()` will emit `bt-YYYYMMDD-NNNNNN` using an atomic monotonic sequence to prevent collisions across 1,000 rapid commits (`CW09`/`CW10`). |
+| G-5 | Vault path validation & symlink/junction guard | `vault_resolve()` (`src/vault.c:139–213`, declared in `src/vault.h:58`) validates relative paths, blocks drive/rooted/traversal/Windows reserved names (`CON..LPT9`) and `:`, canonicalizes with `g_canonicalize_filename`, and walks ancestors through `bt_platform_realpath()` (`src/platform_win.c` using `GetFinalPathNameByHandleW`) to block symlinks/junctions escaping vault root (`BT_ERROR_PATH_REJECTED`). |
+| G-6 | `vault_atomic_write()` overwrite behavior | `vault_atomic_write()` (`src/vault.c:390–461`) writes to a temp file and calls `bt_platform_replace_file()` (`src/platform_win.c`), which passes `MOVEFILE_REPLACE_EXISTING` to `MoveFileExW`. It always replaces existing targets and does **not** support create-only. `bt_createnote_commit()` will use a dedicated create-only write + rename (`MoveFileExW` without `MOVEFILE_REPLACE_EXISTING` on Windows; `link`+`unlink` on POSIX) under a vault write mutex. |
+| G-7 | How index learns about new files | `bt_index_upsert_note()` (`src/index.c:793–808`) dispatches `job_upsert` to the SQLite writer thread (`run_on_writer`), calls `upsert_in_db()` and `re_resolve_all_in_db(db, c->vault)` (`src/index.c:703`). `rebuild_link_snapshot()` updates `app->link_snap` for the editor and graph. |
+| G-8 | Watcher race with create-note | `src/watcher.c` debounces `GFileMonitor` events (500 ms) into `on_watcher_event()` (`src/app.c:1527–1578`), which calls `bt_index_upsert_note()`, `vault_rescan()`, `rebuild_link_snapshot()`, and `refresh_graph()`. Since `bt_index_upsert_note()` checks content hash on the serialized writer thread (`skipped_unchanged`), trailing watcher events are idempotent (`CX04`). |
+| G-9 | Existing app accelerators | `on_startup()` (`src/app.c:3578–3605`): `<Primary>s`, `<Primary>n`, `F2`, `<Primary>p`, `<Primary>e`, `<Primary>o`, `F5`, `F9`, `<Primary>g`, `<Primary><Shift>f`, `<Alt>Left`, `<Alt>Right`, `<Primary>grave`, `<Primary>q`. |
+| G-10 | App menu & single-click toggle wiring | `build_primary_menu()` (`src/app.c:3125–3151`) adds `"Open links with single click"` -> `"app.links-single-click"` at line `3142`; action map entry at `src/app.c:2583` triggers `act_links_single_click_state()` (`src/app.c:2444–2450`) -> `bt_app_set_links_open_on_click()`. |
+| G-11 | `state.ini` helpers & active sections | Implemented in `src/app.c:119–335` (`bt_app_state_file_path()` at `140`, `save_state_str()` at `161`, etc. — no `src/state.c`). Sections: `[vault]`, `[ui]`, `[graph]`, `[editor]`. |
+| G-12 | Existing popover helpers in `src/ui/` | No reusable popover widget header in `src/ui/*.h` (`askbar.h`, `editorpane.h`, `filetree.h`, `graphcapture.h`, `graphgl.h`, `graphview_renderer.h`, `quickopen.h`, `sessionspanel.h`, `termtabs.h`, `themeload.h`). Only ad-hoc `GtkPopover` builders in `src/app.c:662` (`confirm_open_popover`), `src/graphview.c:1908`, and `src/ui/filetree.c:158`. |
+| G-13 | Click resolve & open-target dispatch | `src/ui/editorpane.c:770–790` calls `bt_link_resolve(pane->snapshot, pane->relpath, sp->raw_target)`. Link click emits `on_editor_link` (`src/app.c:1413`) -> `bt_app_activate_link()` (`src/app.c:778–865`), which calls `bt_link_check_open_policy()`, opens `show_confirm_open_popover()` when confirmation is required, or calls `bt_link_dispatch_open()`. |
+| G-14 | `BtLinkStatus` enum values | `src/linkresolve.h:18–25`: `BT_LINK_RESOLVED`, `BT_LINK_AMBIGUOUS`, `BT_LINK_UNRESOLVED`, `BT_LINK_EXTERNAL`, `BT_LINK_BLOCKED`, `BT_LINK_PLACEHOLDER`. |
+| G-15 | Tests covering click path today | `tests/unit/test_editor_links.c` (8 tests): `test_l2_1_incremental_500_seeded_edits`, `test_l2_2_click_and_gesture_rules`, `test_l2_3_hover_styles_and_tooltips`, `test_l2_5_flush_before_navigation`, `test_l2_4_dispatcher_and_launcher_mock`, `test_l2_8_unresolved_click_does_not_call_stub_writer`, `test_l2_6_nav_history_5_jumps_and_deleted_skip`, `test_l2_7_settings_persistence`. |
+
+## 4. Deviations from Brief Noted in Recon
+| Brief Reference | Repository Reality | Action for L3 |
+|---|---|---|
+| Brief G-1 / §1.2 ("near lines 594 to 622") | `bt_app_open_or_create_wikilink()` is at `src/app.c:1243–1271`, called only at `src/app.c:1616`. | Target actual line numbers. |
+| Brief G-3 (`create_named_note_in_app`) | `create_named_note_in_app()` (`src/app.c:1750`) omits `agent`, `tags_ai`, and `links` keys. | New `bt_createnote_render_template()` writes all 9 keys specified in §6.1.5 (`id`..`links`). |
+| Brief G-4 (existing `bt-YYYYMMDD-NNNNNN` ID helper) | No shared `bt-YYYYMMDD-NNNNNN` generator exists yet in `src/`; `create_named_note_in_app()` uses `%H%M%S`. | Implement `bt_createnote_generate_id()` matching `bt-YYYYMMDD-NNNNNN` so `CW09`/`CW10` pass without 1-second timestamp collisions. |
+| Brief G-6 / §5.3 step 6 (`vault_atomic_write` in create mode) | `vault_atomic_write()` uses `MOVEFILE_REPLACE_EXISTING` (`src/platform_win.c`) and has no create-only mode. | Keep `vault_atomic_write()` unchanged and implement create-only atomic write+rename directly in `bt_createnote_commit()` (non-replacing `MoveFileExW` / `link+unlink`). |
+| Brief G-11 (`src/state.c/.h`) | `state.ini` helpers reside in `src/app.c:119–335`, not a separate `src/state.c`. | Extend existing `[editor]` helpers in `src/app.c/.h`. |
+| Brief Appendix C vs Plan | Use brief's exact enum names `BtCreatePlanResult` (`BT_CREATE_PLAN_*`) and `BtCreateCommitResult` (`BT_CREATE_COMMIT_*`). | Adopted cleanly. |
