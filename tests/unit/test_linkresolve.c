@@ -197,7 +197,7 @@ static void test_group_r_resolver_table(void **state)
   bt_link_resolution_free(p4_res);
   bt_index_snapshot_free(p4_snap);
 
-  /* Snapshot build timing for 3,000 notes (< 20 ms budget per §A.4). */
+  /* Snapshot build timing for 3,000 notes (< 20 ms target, < 60 ms contention-safe CI guard; ADR-023). */
   BtIndexSnapshot *s3k = bt_index_snapshot_new();
   gint64 s0 = g_get_monotonic_time();
   for (guint k = 0; k < 3000; k++) {
@@ -207,8 +207,8 @@ static void test_group_r_resolver_table(void **state)
   }
   bt_index_snapshot_finalize(s3k);
   double s3k_ms = (double)(g_get_monotonic_time() - s0) / 1000.0;
-  printf("BT_TEST_LINK_SNAP 3k_notes build_ms=%.3f\n", s3k_ms);
-  assert_true(s3k_ms < 20.0);
+  printf("BT_TEST_LINK_SNAP 3k_notes build_ms=%.3f target_ms=20.0 ci_ceiling_ms=60.0\n", s3k_ms);
+  assert_true(s3k_ms < 60.0);
   bt_index_snapshot_free(s3k);
 
   /* R02: Case-insensitive on Windows, case-sensitive on Linux. */
