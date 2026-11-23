@@ -609,13 +609,35 @@ The draft's M1–M8 shape is kept exactly (owner decision); each milestone now c
 ```
 brainterm/
 ├─ meson.build                # + src/meson.build, tests/meson.build; wraps pin libvterm/md4c
-├─ src/…                      # the §5.2 module map is the authoritative layout
-├─ vault-template/            # AGENTS.md, CLAUDE.md (@AGENTS.md), .gemini/settings.json, .gitignore
+├─ src/…                      # the §5.2 module map + linkresolve, navhistory, createnote, choosermodel,
+│                             #   ui/createpopover, ui/chooserpopover, math/mathtok
+├─ vault-template/            # AGENTS.md, CLAUDE.md (@AGENTS.md), .gemini/settings.json, .gitignore,
+│                             #   examples/links-demo.md (+ sibling/ambiguous targets)
 ├─ tests/                    # unit/ · vtcorpus/ (byte streams + expected grids) · crash-rig/ · bench/
 ├─ docs/                      # project.md (this file), PROMPT.md, DECISIONS.md
 ├─ .github/workflows/ci.yml   # windows-latest + ubuntu-latest; bench asserts §10 budgets
-└─ migrations/               # 0001_init.sql … embedded in the binary
+└─ migrations/               # 0001_init.sql, 0002_links_resolution.sql … embedded in the binary
 ```
+
+### 13.1 Clickable Links & Create/Chooser Flow (Phases L1–L3)
+
+- **Core modules (`libbt_core`, GTK-free):**
+  - `src/linkresolve.c/.h`: link scanner (`bt_link_scan`, `bt_link_scan_range`), immutable snapshot (`BtIndexSnapshot`), 13-stage resolver (`bt_link_resolve`), and security policy (`bt_link_check_open_policy`).
+  - `src/navhistory.c/.h`: per-session back/forward stack (`BtNavHistory`, cap 100).
+  - `src/createnote.c/.h`: unresolved-link create planner (`bt_createnote_plan`), Windows/POSIX filename validator (`bt_createnote_validate_component`), canonical 9-key frontmatter template renderer (`bt_createnote_render_template`), and create-only atomic commit (`bt_createnote_commit`).
+  - `src/choosermodel.c/.h`: ambiguity chooser selection model (`BtChooserModel`, wrap navigation, visible cap 10, `+N more` footer, `[[folder/name]]` copy formatter).
+- **UI modules (`src/ui/`):**
+  - `src/ui/createpopover.c/.h`: confirmation popover (`BtCreatePopover`) for unresolved note links (`Enter` creates, `Escape` cancels, `Tab` cycles Create → Cancel).
+  - `src/ui/chooserpopover.c/.h`: candidate selection popover (`BtChooserPopover`) for ambiguous wikilinks (`Up`/`Down`/`Home`/`End` selection, `Enter` opens, `Ctrl+C` copies full-path wikilink without closing, `Escape` cancels).
+- **State keys (`state.ini` under `[editor]`):**
+  - `links_open_on_click` (boolean, default `true`) — menu toggle `Open links with single click`.
+  - `confirm_external_urls` (boolean, default `true`) — menu toggle `Confirm external URLs`.
+- **Editor-scoped keyboard shortcuts:**
+  - `Ctrl+Enter` / `Ctrl+KP_Enter`: activate link at caret (opens resolved note, opens create popover for unresolved note, opens chooser for ambiguous link, or shows blocked reason).
+  - `Ctrl+Alt+Right` / `Ctrl+Alt+Left`: jump caret to start of next / previous link in the active note (wraps at document ends; does not open link or push navigation history).
+  - `Alt+Left` / `Alt+Right` (and mouse buttons 8 / 9): navigate back / forward in session history.
+- **Status-bar link notices:**
+  - `Created <relpath>` (4 s), `Note already existed, opened it` (6 s), `Index refreshed` (4 s), `Copied link for <target>` (3 s), `That note no longer exists` (6 s), `No matching notes now` (6 s), `Not a note: <ext> files cannot be created here` (6 s), `Cannot create: path is outside the vault` (6 s), `Cannot create: invalid character '<c>' in name` (6 s), `Cannot create: "<name>" is a reserved system name` (6 s), `Cannot create: a folder exists at <relpath>` (6 s).
 
 ---
 

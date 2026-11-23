@@ -100,12 +100,15 @@ Executed throwaway C17 spike (`spike_hb_math.c`, outside repo) loading an OpenTy
   - Implement async open-target dispatcher (`GtkFileLauncher` / `GtkUriLauncher`, zero shell calls) with A.9 enforcement: session-scoped one-time external URL confirm popover (with userinfo warning), non-allow-listed file confirm popover, directory reveal confirm popover.
   - Implement per-session navigation history (`BtNavHistory`, cap 100, `(relpath, caret_offset, scroll_y)`): `Alt+Left` / `Alt+Right`, mouse back/forward buttons, pushing from link clicks, sidebar, and Ctrl+P, skipping deleted notes.
 
-- **Phase L3 — Create-Note Flow, Ambiguity Chooser, Keyboard, Settings & STOP 1**
-  - Unresolved link popover (`Create "<name>"?`, exact vault-relative path, Windows-illegal character validation, atomic creation with full BrainTerm YAML frontmatter template, index refresh + re-resolve + open; never modifies source note).
-  - Ambiguity chooser popover (ranked candidates, filename + muted folder path, `Enter`/`Esc`/arrows, plus `Copy full path link` button).
-  - Keyboard shortcuts: `Ctrl+Enter` open link at caret, `Ctrl+Alt+Right` / `Ctrl+Alt+Left` next/prev link.
-  - App menu toggles (`Open links with single click`, `Confirm external URLs`) persisted under `[editor]` in `state.ini`.
-  - Add `vault-template/examples/links-demo.md`, update `docs/DECISIONS.md`, `docs/project.md`, `CHANGELOG.md`, run full verification + `--selftest-links` on `life2` + package Windows dist → **STOP 1**.
+- **Phase L3 — Create-Note Flow, Ambiguity Chooser, Keyboard, Settings & STOP 1 (Completed)**
+  - Recon & shortcut conflict audit: commits `1e0dcc7` (`docs: L3 recon (L3 pre)`) and `e89e1f8` (`docs: L3 shortcut audit (L3 pre)`).
+  - Unresolved link planner, template, create-only atomic commit, index re-resolution, and `BtCreatePopover` UI: commits `1befaf2` (`L3-1a`), `6c2b9f5` (`L3-1b`), `ddc13c5` (`L3-1c`), `66ffcae` (`L3-1d`), and `33db34b` (`L3-1e`).
+  - Ambiguity chooser selection model (`BtChooserModel`) and `BtChooserPopover` UI: commits `18cd165` (`L3-2a`), `e1712a5` (`L3-2b`), and `f5582d0` (`L3-2b fix`).
+  - Keyboard shortcuts (`Ctrl+Enter`, `Ctrl+Alt+Right`, `Ctrl+Alt+Left`): commit `2759009` (`L3-3`).
+  - App menu toggle `Confirm external URLs` persisted under `[editor] confirm_external_urls` in `state.ini`: commit `10ece82` (`L3-4`).
+  - Legacy stub wikilink writer routed away and removed with grep proof: commits `aeef6df` (`L3-5a`) and `d3720f6` (`L3-5b`).
+  - Added `vault-template/examples/links-demo.md` and duplicate-basename demo folders: commit `052124b` (`L3-6a`).
+  - Updated `docs/DECISIONS.md` (`ADR-023`..`ADR-026`), `docs/project.md`, and `CHANGELOG.md` (`L3-6b`), followed by full verification and Windows package smoke test (`L3-6c`) → **STOP 1**.
 
 ### Part B — LaTeX / Math Rendering
 
