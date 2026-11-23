@@ -459,3 +459,4 @@ BrainTerm is built on top of open-source libraries including [GTK 4](https://gtk
 ## Maintainer
 
 **Riza Wahyu Nugraha** — [@rizawn](https://github.com/rizawn)
+**@izolabs_**
