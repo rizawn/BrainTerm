@@ -458,6 +458,118 @@ static void test_group_u_security(void **state)
   bt_index_snapshot_free(snap);
 }
 
+static void test_live_containment_lc01_lc04(void **state)
+{
+  (void)state;
+  gchar *parent = g_dir_make_tmp("bt-lc-XXXXXX", NULL);
+  gchar *vdir = g_build_filename(parent, "vault", NULL);
+  gchar *out_dir = g_build_filename(parent, "outside", NULL);
+  gchar *sub_dir = g_build_filename(vdir, "sub", NULL);
+  gchar *sub_doc = g_build_filename(sub_dir, "doc.md", NULL);
+  g_mkdir_with_parents(sub_dir, 0755);
+  g_mkdir_with_parents(out_dir, 0755);
+  bt_test_put(vdir, "welcome.md", "# Welcome\n[[sub/doc]]\n");
+  bt_test_put(vdir, "sub/doc.md", "# Safe Sub Doc\n");
+  bt_test_put(vdir, "sub/pdf_asset.pdf", "%PDF-1.4 safe\n");
+  bt_test_put(out_dir, "doc.md", "# Escaped External Doc\n");
+  bt_test_put(out_dir, "pdf_asset.pdf", "%PDF-1.4 escaped\n");
+  bt_test_put(out_dir, "secret.txt", "SECRET\n");
+
+  BtVault *v = vault_open(vdir, NULL, NULL);
+  assert_non_null(v);
+  BtIndexSnapshot *snap = bt_index_snapshot_from_vault(v);
+  assert_non_null(snap);
+
+  /* Baseline before swap: both sub/doc and sub/pdf_asset.pdf resolve cleanly. */
+  BtLinkResolution *pre = bt_link_resolve(snap, "welcome.md", "sub/doc");
+  assert_int_equal(pre->status, BT_LINK_RESOLVED);
+  assert_string_equal(pre->path, "sub/doc.md");
+  bt_link_resolution_free(pre);
+
+  /* Swap real sub/ directory for a directory junction/symlink pointing to outside/. */
+  bt_test_rm_rf(sub_dir);
+  gboolean linked = create_dir_junction_or_symlink(sub_dir, out_dir);
+  assert_true(linked);
+
+  /* LC01: Default live mode catches post-snapshot swap to escaping junction/symlink immediately. */
+  BtLinkResolution *lc01 = bt_link_resolve(snap, "welcome.md", "sub/doc");
+  assert_non_null(lc01);
+  assert_int_equal(lc01->status, BT_LINK_BLOCKED);
+  assert_int_equal(lc01->block_reason, BT_LINK_BLOCK_ESCAPES_VAULT);
+
+  /* LC02: Disabling fast_tag_mode never inherits stale cached containment for live click checks. */
+  bt_index_snapshot_set_fast_tag_mode(snap, TRUE);
+  g_rmdir(sub_dir);
+  g_mkdir_with_parents(sub_dir, 0755);
+  bt_test_put(vdir, "sub/doc.md", "# Safe Again\n");
+  bt_index_snapshot_set_vault(snap, v);
+  BtLinkResolution *fast_warm = bt_link_resolve(snap, "welcome.md", "sub/doc");
+  assert_int_equal(fast_warm->status, BT_LINK_RESOLVED);
+  bt_link_resolution_free(fast_warm);
+  bt_test_rm_rf(sub_dir);
+  assert_true(create_dir_junction_or_symlink(sub_dir, out_dir));
+  /* In fast_tag_mode, cached entry stays 1; switching back to live mode catches escape! */
+  bt_index_snapshot_set_fast_tag_mode(snap, FALSE);
+  BtLinkResolution *lc02 = bt_link_resolve(snap, "welcome.md", "sub/doc");
+  assert_int_equal(lc02->status, BT_LINK_BLOCKED);
+  assert_int_equal(lc02->block_reason, BT_LINK_BLOCK_ESCAPES_VAULT);
+  bt_link_resolution_free(lc02);
+
+  /* LC03: Dispatch open and vault_read also enforce live containment on post-snapshot escape. */
+  guint mock_calls = 0;
+  BtLinkOpenPolicy lc03_pol;
+  assert_false(bt_link_dispatch_open(lc01, v, TRUE, FALSE, mock_launcher, &mock_calls, &lc03_pol));
+  assert_int_equal(lc03_pol.action, BT_LINK_OPEN_BLOCKED);
+  assert_int_equal(lc03_pol.block_reason, BT_LINK_BLOCK_ESCAPES_VAULT);
+  assert_int_equal(mock_calls, 0);
+  bt_link_open_policy_clear(&lc03_pol);
+
+  BtLinkResolution *r_pdf = bt_link_resolve(snap, "welcome.md", "sub/pdf_asset.pdf");
+  assert_int_equal(r_pdf->status, BT_LINK_BLOCKED);
+  assert_int_equal(r_pdf->block_reason, BT_LINK_BLOCK_ESCAPES_VAULT);
+  bt_link_resolution_free(r_pdf);
+
+  GError *rerr = NULL;
+  gsize rlen = 0;
+  gchar *rdata = NULL;
+  assert_false(vault_read(v, "sub/doc.md", &rdata, &rlen, &rerr));
+  assert_null(rdata);
+  assert_non_null(rerr);
+  g_clear_error(&rerr);
+  bt_link_resolution_free(lc01);
+
+  /* LC04: Unlisted new junction added post-snapshot + nested relative path + safe sibling intact. */
+  gchar *sub2_dir = g_build_filename(vdir, "nested", NULL);
+  g_mkdir_with_parents(sub2_dir, 0755);
+  bt_test_put(vdir, "nested/host.md", "# Nested\n");
+  gchar *unlisted_junc = g_build_filename(sub2_dir, "esc", NULL);
+  assert_true(create_dir_junction_or_symlink(unlisted_junc, out_dir));
+  BtLinkResolution *lc04_esc = bt_link_resolve(snap, "nested/host.md", "esc/secret.txt");
+  assert_int_equal(lc04_esc->status, BT_LINK_BLOCKED);
+  assert_int_equal(lc04_esc->block_reason, BT_LINK_BLOCK_ESCAPES_VAULT);
+  bt_link_resolution_free(lc04_esc);
+
+  BtLinkResolution *lc04_ok = bt_link_resolve(snap, "nested/host.md", "welcome");
+  assert_int_equal(lc04_ok->status, BT_LINK_RESOLVED);
+  assert_string_equal(lc04_ok->path, "welcome.md");
+  bt_link_resolution_free(lc04_ok);
+
+  printf("BT_TEST_LC01_LC04 passed=4 live_containment=ok\n");
+
+  g_rmdir(unlisted_junc);
+  g_rmdir(sub_dir);
+  g_free(unlisted_junc);
+  g_free(sub2_dir);
+  g_free(sub_doc);
+  g_free(sub_dir);
+  g_free(out_dir);
+  g_free(vdir);
+  bt_index_snapshot_free(snap);
+  vault_free(v);
+  bt_test_rm_rf(parent);
+  g_free(parent);
+}
+
 int main(void)
 {
   setlocale(LC_NUMERIC, "C");
@@ -465,6 +577,7 @@ int main(void)
     cmocka_unit_test(test_group_r_resolver_table),
     cmocka_unit_test(test_group_p_parser),
     cmocka_unit_test(test_group_u_security),
+    cmocka_unit_test(test_live_containment_lc01_lc04),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

@@ -90,6 +90,7 @@ BtIndexSnapshot *bt_index_snapshot_new(void);
 void bt_index_snapshot_free(BtIndexSnapshot *snap);
 void bt_index_snapshot_set_case_sensitive(BtIndexSnapshot *snap, gboolean case_sensitive);
 void bt_index_snapshot_set_vault(BtIndexSnapshot *snap, const BtVault *vault);
+void bt_index_snapshot_set_fast_tag_mode(BtIndexSnapshot *snap, gboolean fast_mode);
 void bt_index_snapshot_add_entry(BtIndexSnapshot *snap, const char *relpath, gboolean is_dir,
                                  const char *title, const char *const *aliases);
 void bt_index_snapshot_finalize(BtIndexSnapshot *snap);

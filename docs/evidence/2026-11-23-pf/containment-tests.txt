@@ -1,0 +1,15 @@
+﻿[==========] tests: Running 4 test(s).
+[ RUN      ] test_group_r_resolver_table
+BT_TEST_LINK_SNAP 3k_notes build_ms=7.920 target_ms=20.0 ci_ceiling_ms=60.0
+[       OK ] test_group_r_resolver_table
+[ RUN      ] test_group_p_parser
+BT_TEST_LINK_SCAN 10k_links count=10000 elapsed_ms=1.774
+[       OK ] test_group_p_parser
+[ RUN      ] test_group_u_security
+BT_TEST_LINK_SECURITY blocked_exts=32 hostile=14 mock_calls_after_allow_and_confirm=2
+[       OK ] test_group_u_security
+[ RUN      ] test_live_containment_lc01_lc04
+BT_TEST_LC01_LC04 passed=4 live_containment=ok
+[       OK ] test_live_containment_lc01_lc04
+[==========] tests: 4 test(s) run.
+[  PASSED  ] 4 test(s).

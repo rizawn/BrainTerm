@@ -915,6 +915,7 @@ struct BtIndexSnapshot {
   GHashTable *unresolved_escape_cache;
   gboolean case_sensitive;
   gboolean finalized;
+  gboolean fast_tag_mode;
   const BtVault *vault;
 };
 
@@ -1000,6 +1001,12 @@ void bt_index_snapshot_set_vault(BtIndexSnapshot *snap, const BtVault *vault)
     SnapEntry *ce = g_ptr_array_index(snap->entries, i);
     ce->vault_contained = 0;
   }
+}
+
+void bt_index_snapshot_set_fast_tag_mode(BtIndexSnapshot *snap, gboolean fast_mode)
+{
+  g_return_if_fail(snap != NULL);
+  snap->fast_tag_mode = fast_mode;
 }
 
 void bt_index_snapshot_add_entry(BtIndexSnapshot *snap, const char *relpath, gboolean is_dir,
@@ -1582,37 +1589,67 @@ BtLinkResolution *bt_link_resolve(const BtIndexSnapshot *idx, const char *source
       collect_matches(idx, idx->by_alias, clean_target, TRUE, matches);
   }
 
-  /* Step 12: Symlink / junction escape check through vault_resolve() if vault attached (cached). */
+  /* Step 12: Symlink / junction escape check through vault_resolve() if vault attached.
+   * Live mode (fast_tag_mode == FALSE, default) checks vault_resolve() uncached on every
+   * resolve so post-snapshot symlink/junction swaps are caught immediately. fast_tag_mode
+   * caches containment only during bulk editor tag-styling passes. */
   if (idx->vault != NULL) {
     if (matches->len > 0) {
       for (guint i = 0; i < matches->len; i++) {
         SnapEntry *ce = g_ptr_array_index(idx->entries, g_array_index(matches, guint, i));
-        if (ce->vault_contained == 0) {
+        gboolean escaped = FALSE;
+        if (idx->fast_tag_mode) {
+          if (ce->vault_contained == 0) {
+            g_autofree gchar *real = vault_resolve(idx->vault, ce->relpath, NULL);
+            ce->vault_contained = (real != NULL) ? 1 : -1;
+          }
+          escaped = (ce->vault_contained < 0);
+        } else {
           g_autofree gchar *real = vault_resolve(idx->vault, ce->relpath, NULL);
-          ce->vault_contained = (real != NULL) ? 1 : -1;
+          escaped = (real == NULL);
         }
-        if (ce->vault_contained < 0) {
+        if (escaped) {
           return make_blocked(BT_LINK_BLOCK_ESCAPES_VAULT, BT_LINK_KIND_FILE,
                               alias_part ? alias_part : clean_target, anchor, block_id);
         }
       }
     } else {
-      gint cached = idx->unresolved_escape_cache
-                        ? GPOINTER_TO_INT(g_hash_table_lookup(idx->unresolved_escape_cache,
-                                                              clean_target))
-                        : 0;
-      if (cached == 0) {
+      gboolean escaped = FALSE;
+      if (idx->fast_tag_mode) {
+        gint cached = idx->unresolved_escape_cache
+                          ? GPOINTER_TO_INT(g_hash_table_lookup(idx->unresolved_escape_cache,
+                                                                clean_target))
+                          : 0;
+        if (cached == 0) {
+          g_autoptr(GError) verr = NULL;
+          g_autofree gchar *chk = vault_resolve(idx->vault, clean_target, &verr);
+          cached = (chk == NULL && verr != NULL && verr->message != NULL &&
+                    strstr(verr->message, "through a link") != NULL)
+                       ? -1
+                       : 1;
+          if (idx->unresolved_escape_cache != NULL)
+            g_hash_table_insert(idx->unresolved_escape_cache, g_strdup(clean_target),
+                                GINT_TO_POINTER(cached));
+        }
+        escaped = (cached < 0);
+      } else {
         g_autoptr(GError) verr = NULL;
         g_autofree gchar *chk = vault_resolve(idx->vault, clean_target, &verr);
-        cached = (chk == NULL && verr != NULL && verr->message != NULL &&
-                  strstr(verr->message, "through a link") != NULL)
-                     ? -1
-                     : 1;
-        if (idx->unresolved_escape_cache != NULL)
-          g_hash_table_insert(idx->unresolved_escape_cache, g_strdup(clean_target),
-                              GINT_TO_POINTER(cached));
+        escaped = (chk == NULL && verr != NULL && verr->message != NULL &&
+                   strstr(verr->message, "through a link") != NULL);
+        if (!escaped && source_note != NULL && strchr(source_note, '/') != NULL) {
+          g_autofree gchar *sdir = g_path_get_dirname(source_note);
+          if (sdir != NULL && sdir[0] != '\0' && strcmp(sdir, ".") != 0) {
+            g_autofree gchar *rel_from_src = g_strdup_printf("%s/%s", sdir, clean_target);
+            g_autoptr(GError) verr2 = NULL;
+            g_autofree gchar *chk2 = vault_resolve(idx->vault, rel_from_src, &verr2);
+            if (chk2 == NULL && verr2 != NULL && verr2->message != NULL &&
+                strstr(verr2->message, "through a link") != NULL)
+              escaped = TRUE;
+          }
+        }
       }
-      if (cached < 0) {
+      if (escaped) {
         return make_blocked(BT_LINK_BLOCK_ESCAPES_VAULT, BT_LINK_KIND_FILE,
                             alias_part ? alias_part : clean_target, anchor, block_id);
       }

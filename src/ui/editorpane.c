@@ -65,7 +65,7 @@ struct BtEditorPane {
 
   /* Incremental link span model (L2-1, sorted by byte offset). */
   GArray *link_spans;
-  const BtIndexSnapshot *snapshot;
+  BtIndexSnapshot *snapshot;
   const BtVault *vault;
   gint pending_del_char;
   gsize pending_del_bytes;
@@ -815,7 +815,7 @@ static GtkTextTag *tag_for_span(const BtEditorPane *pane, const BtLinkSpan *sp,
   return tag;
 }
 
-static void apply_link_tags_range(BtEditorPane *p, gsize byte_lo, gsize byte_hi)
+static void apply_link_tags_range_inner(BtEditorPane *p, gsize byte_lo, gsize byte_hi)
 {
   if (p == NULL || p->buffer == NULL || p->link_spans == NULL)
     return;
@@ -909,6 +909,17 @@ static void apply_link_tags_range(BtEditorPane *p, gsize byte_lo, gsize byte_hi)
       gtk_text_buffer_apply_tag(buf, ltag, &s_it, &e_it);
     }
   }
+}
+
+static void apply_link_tags_range(BtEditorPane *p, gsize byte_lo, gsize byte_hi)
+{
+  if (p == NULL)
+    return;
+  if (p->snapshot != NULL)
+    bt_index_snapshot_set_fast_tag_mode(p->snapshot, TRUE);
+  apply_link_tags_range_inner(p, byte_lo, byte_hi);
+  if (p->snapshot != NULL)
+    bt_index_snapshot_set_fast_tag_mode(p->snapshot, FALSE);
 }
 
 static gsize iter_byte_in_buffer(GtkTextBuffer *buf, const GtkTextIter *it)
