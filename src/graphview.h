@@ -18,6 +18,7 @@ typedef struct BtGraphView BtGraphView;
 typedef void (*BtGraphOpenNoteFn)(const gchar *relpath, gboolean is_ghost, gpointer user_data);
 typedef void (*BtGraphOpenTermFn)(const gchar *rel_dir, gpointer user_data);
 typedef void (*BtGraphRenameNoteFn)(const gchar *relpath, gpointer user_data);
+typedef void (*BtGraphSelectNoteFn)(const gchar *relpath, gpointer user_data);
 typedef void (*BtGraphNoticeFn)(const gchar *message, gpointer user_data);
 typedef void (*BtGraphPrefsChangedFn)(gboolean show_tags, gboolean show_ghosts, gpointer user_data);
 
@@ -40,6 +41,10 @@ void bt_graphview_set_show_tags(BtGraphView *gv, gboolean show_tags);
 gboolean bt_graphview_get_show_tags(const BtGraphView *gv);
 void bt_graphview_set_show_ghosts(BtGraphView *gv, gboolean show_ghosts);
 gboolean bt_graphview_get_show_ghosts(const BtGraphView *gv);
+void bt_graphview_set_show_links(BtGraphView *gv, gboolean show_links);
+gboolean bt_graphview_get_show_links(const BtGraphView *gv);
+void bt_graphview_set_select_cb(BtGraphView *gv, BtGraphSelectNoteFn on_select, gpointer user_data);
+void bt_graphview_select_relpath(BtGraphView *gv, const gchar *relpath);
 void bt_graphview_set_prefs_cb(BtGraphView *gv, BtGraphPrefsChangedFn on_prefs, gpointer user_data);
 void bt_graphview_set_debug_overlay(BtGraphView *gv, gboolean enabled);
 gboolean bt_graphview_get_debug_overlay(const BtGraphView *gv);

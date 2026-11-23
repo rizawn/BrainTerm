@@ -21,6 +21,7 @@ uniform int u_mode_3d;
 uniform mat4 u_mvp;
 uniform int u_pulse_enabled;
 uniform float u_pulse_phase;
+uniform int u_show_links;
 
 out float v_cross;
 out float v_t;
@@ -74,22 +75,29 @@ void main()
   bool is_src_foc = has_focus && (abs(a_meta.y - float(u_focus_idx)) < 0.5);
   bool is_dst_foc = has_focus && (abs(a_meta.z - float(u_focus_idx)) < 0.5);
   bool is_active = is_src_foc || is_dst_foc;
+  bool is_tether = (a_meta.w >= 3.5); /* BT_EDGE_CONTAINS */
+
+  if (!is_tether && !is_active && u_show_links == 0) {
+    gl_Position = vec4(-2.0, -2.0, 0.0, 1.0);
+    v_cross = 0.0; v_t = 0.0; v_color = vec3(0.0); v_alpha = 0.0; v_pulse = 0.0;
+    return;
+  }
 
   bool has_sel = (u_selected_idx >= 0);
   bool is_src_sel = has_sel && (abs(a_meta.y - float(u_selected_idx)) < 0.5);
   bool is_dst_sel = has_sel && (abs(a_meta.z - float(u_selected_idx)) < 0.5);
 
   float pulse_w = 0.0;
-  if (u_pulse_enabled != 0 && (is_src_sel || is_dst_sel)) {
+  if (u_pulse_enabled != 0 && !is_tether && (is_src_sel || is_dst_sel)) {
     float t_out = is_src_sel ? t : (1.0 - t);
     float diff = t_out - u_pulse_phase;
     pulse_w = exp(-diff * diff * 72.0);
   }
 
-  float dim_factor = has_focus ? (1.0 - 0.75 * u_hover_fade) : 1.0;
+  float dim_factor = has_focus ? (1.0 - 0.78 * u_hover_fade) : 1.0;
   float hw = u_half_width * u_scale *
-             (is_active ? (1.35 + 0.45 * u_hover_fade) : (1.0 + 0.75 * pulse_w));
-  hw = max(hw, 0.85 * u_scale);
+             (is_active ? (1.35 + 0.45 * u_hover_fade) : (is_tether ? 0.65 : (1.0 + 0.75 * pulse_w)));
+  hw = max(hw, 0.70 * u_scale);
 
   vec2 px = pos + norm * (side * hw);
   vec2 ndc = (px / u_viewport) * 2.0 - 1.0;
@@ -99,7 +107,8 @@ void main()
   v_cross = side;
   v_t = t;
   v_color = (is_active || pulse_w > 0.12) ? u_active_col : u_dim_col;
-  v_alpha = (is_active ? (0.32 + 0.65 * u_hover_fade) : (u_base_alpha * dim_factor)) * depth_fade;
+  float base_a = is_tether ? (u_base_alpha * 0.42 * dim_factor) : (u_base_alpha * dim_factor);
+  v_alpha = (is_active ? (0.32 + 0.62 * u_hover_fade) : base_a) * depth_fade;
   v_pulse = pulse_w * depth_fade;
   if (len < 1.0)
     v_alpha = 0.0;

@@ -43,6 +43,11 @@ typedef struct {
   BtGraphMode mode;
   gboolean reduce_motion;
   gboolean pulse_enabled;
+  gboolean show_links;
+  gboolean focus_isolated; /* TRUE when user clicked Focus neighbors (others fade to 8%) */
+  gdouble mouse_x;
+  gdouble mouse_y;
+  gdouble spread_str;      /* [0..1] local fisheye hover spread in 3D/Galaxy */
 } BtGraphRenderState;
 
 typedef struct BtGraphRenderer BtGraphRenderer;

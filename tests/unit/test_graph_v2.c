@@ -354,6 +354,30 @@ static void test_cursor_anchored_zoom(void **state)
   assert_true(fabs(after_sy - my) < 1e-6);
 }
 
+static void test_spatial_pick_stack_and_spread(void **state)
+{
+  (void)state;
+  BtScreenNode nodes[4] = {
+    {.node_idx = 0, .sx = 200.0f, .sy = 150.0f, .radius = 5.0f, .depth = 3.0f, .visible = TRUE},
+    {.node_idx = 1, .sx = 202.0f, .sy = 150.0f, .radius = 5.0f, .depth = 1.5f, .visible = TRUE},
+    {.node_idx = 2, .sx = 200.0f, .sy = 151.0f, .radius = 5.0f, .depth = 1.5f, .visible = TRUE},
+    {.node_idx = 3, .sx = 400.0f, .sy = 400.0f, .radius = 5.0f, .depth = 1.0f, .visible = TRUE},
+  };
+  BtPickCand out[8];
+  guint cnt = bt_graph_pick_screen(nodes, 4u, 800.0f, 600.0f, 200.0f, 150.0f, out, 8u);
+  assert_int_equal(cnt, 3u);
+  /* Front-most (depth 1.5), tie-broken by closest to cursor (node 2 dist2=1 < node 1 dist2=4). */
+  assert_int_equal(out[0].node_idx, 2u);
+  assert_int_equal(out[1].node_idx, 1u);
+  assert_int_equal(out[2].node_idx, 0u);
+
+  /* Hover spread pushes nodes within 40px away from cursor and leaves far nodes untouched. */
+  bt_graph_apply_hover_spread(nodes, 4u, 200.0f, 150.0f, 40.0f, 1.0f);
+  assert_true(nodes[1].sx > 202.0f);
+  assert_true(nodes[2].sy > 151.0f);
+  assert_true(fabsf(nodes[3].sx - 400.0f) < 1e-5f);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -364,6 +388,7 @@ int main(void)
     cmocka_unit_test(test_3d_layout_deterministic_and_bounded),
     cmocka_unit_test(test_label_placement_no_overlap_and_caps),
     cmocka_unit_test(test_cursor_anchored_zoom),
+    cmocka_unit_test(test_spatial_pick_stack_and_spread),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

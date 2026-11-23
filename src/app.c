@@ -1822,6 +1822,8 @@ static void on_tree_select(const gchar *relpath, gpointer ud)
     bt_app_show_error(app, "Cannot open note", err->message);
     g_error_free(err);
   }
+  if (app->graphview != NULL && relpath != NULL)
+    bt_graphview_select_relpath(app->graphview, relpath);
 }
 
 static void on_tree_open_term(const gchar *rel_dir, gpointer ud)
@@ -2073,6 +2075,14 @@ static void on_editor_conflict_reload(const gchar *relpath, gpointer ud)
   } else {
     bt_editorpane_clear(app->editor);
   }
+}
+
+static void on_graph_select_note(const gchar *relpath, gpointer ud)
+{
+  BtApp *app = ud;
+  if (app == NULL || app->tree == NULL || relpath == NULL)
+    return;
+  bt_filetree_select_path(app->tree, relpath);
 }
 
 static void on_graph_open_note(const gchar *relpath, gboolean is_ghost, gpointer ud)
@@ -3777,6 +3787,7 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
   }
   app->graphview = bt_graphview_new(on_graph_open_note, on_tree_open_term, app);
   bt_graphview_set_rename_cb(app->graphview, on_graph_rename_note, app);
+  bt_graphview_set_select_cb(app->graphview, on_graph_select_note, app);
   if (!app->smoke_test && app->capture_dir == NULL && !app_is_ro_bench(app)) {
     bt_graphview_set_show_tags(app->graphview, load_saved_graph_bool("show_tags", FALSE));
     bt_graphview_set_show_ghosts(app->graphview, load_saved_graph_bool("show_ghosts", FALSE));

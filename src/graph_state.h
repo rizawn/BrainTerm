@@ -31,6 +31,7 @@ typedef enum {
 #define BT_NBR_NONE     ((guint8)0u)
 #define BT_NBR_NEIGHBOR ((guint8)1u)
 #define BT_NBR_FOCUS    ((guint8)2u)
+#define BT_NBR_HOP2     ((guint8)3u)
 
 typedef struct {
   gboolean gl_context_ok;
@@ -61,6 +62,37 @@ void bt_graph_select_backend(const BtGraphGlProbe *probe, BtGraphBackendDecision
 /* Fills caller-allocated mask[0..mask_len-1] with BT_NBR_* for focus_idx.
  * Zero heap allocations; safe for NULL graph or out-of-range focus_idx. */
 void bt_graph_compute_neighbors(const BtGraph *g, gint focus_idx, guint8 *mask, guint mask_len);
+
+/* Multi-hop variant (1 or 2 hops). Hop-2 nodes receive BT_NBR_HOP2. */
+void bt_graph_compute_neighbors_hops(const BtGraph *g, gint focus_idx, guint max_hops,
+                                     guint8 *mask, guint mask_len);
+
+/* Screen-space node representation for spatial-hash picking & hover spread. */
+typedef struct {
+  guint node_idx;
+  float sx, sy;
+  float radius;
+  float depth;      /* smaller = closer to camera */
+  gboolean visible;
+} BtScreenNode;
+
+typedef struct {
+  guint node_idx;
+  float depth;
+  float dist2;
+} BtPickCand;
+
+/* Exact deterministic picking with uniform screen-space grid (O(1)-ish at 5k nodes).
+ * Candidates: circle (MAX(radius + 4px, 8px)) containing (mx, my).
+ * Sorted front-to-back by (depth asc, dist2 asc, node_idx asc).
+ * Writes up to out_cap candidates to out[]; returns total overlapping candidate count. */
+guint bt_graph_pick_screen(const BtScreenNode *nodes, guint count, float vp_w, float vp_h,
+                           float mx, float my, BtPickCand *out, guint out_cap);
+
+/* Local fisheye hover spread for dense stacks (~40px radius around cursor).
+ * Modifies sx/sy in place; no-op when strength <= 0. */
+void bt_graph_apply_hover_spread(BtScreenNode *nodes, guint count, float mx, float my,
+                                 float radius_px, float strength);
 
 /* Computes degree threshold for hub labels so dense graphs stay readable. */
 guint bt_graph_hub_degree_threshold(const BtGraph *g);

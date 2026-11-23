@@ -19,6 +19,7 @@ static void node_free(gpointer p)
   g_free(n->relpath);
   g_free(n->source);
   g_free(n->dom_tag);
+  g_free(n->top_folder);
   g_free(n);
 }
 
@@ -44,6 +45,7 @@ static guint add_node(BtGraph *g, GHashTable *id_map, const gchar *id, const gch
   n->source = source ? g_strdup(source) : NULL;
   n->kind = kind;
   n->created = created;
+  n->parent_idx = -1;
   n->visible = TRUE;
   n->hue = 210.0;
   n->radius = 6.0;
@@ -75,6 +77,7 @@ BtGraph *bt_graph_build(const BtVault *vault, BtIndex *index, const BtSessionSto
     BtNodeKind k = (g_strcmp0(r->source, "human") == 0) ? BT_NODE_HUMAN_NOTE : BT_NODE_AI_NOTE;
     guint idx = add_node(g, id_map, r->id, r->title[0] ? r->title : r->path, r->path, r->source, k,
                          r->created);
+    ((BtGraphNode *)g_ptr_array_index(g->nodes, idx))->updated = r->updated;
     g->note_node_count++;
 
     g_hash_table_insert(path_map, g_ascii_strdown(r->path, -1), GUINT_TO_POINTER(idx + 1));
@@ -239,16 +242,100 @@ BtGraph *bt_graph_build(const BtVault *vault, BtIndex *index, const BtSessionSto
     }
   }
 
-  /* Update note radii proportional to degree. */
+  /* 3b. First-class folder nodes from directory hierarchy (Phase 1). */
+  {
+    GHashTable *folder_map = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    guint base_note_limit = g->nodes->len;
+    for (guint i = 0; i < base_note_limit; i++) {
+      BtGraphNode *nd = g_ptr_array_index(g->nodes, i);
+      if ((nd->kind != BT_NODE_HUMAN_NOTE && nd->kind != BT_NODE_AI_NOTE) ||
+          nd->relpath == NULL)
+        continue;
+
+      /* Normalize separators and split directory components. */
+      g_autofree gchar *norm = g_strdup(nd->relpath);
+      for (gchar *p = norm; *p != '\0'; p++) {
+        if (*p == '\\')
+          *p = '/';
+      }
+      gchar *slash = strrchr(norm, '/');
+      if (slash == NULL)
+        continue; /* vault root note: parent_idx = -1, top_folder = NULL */
+      *slash = '\0';
+
+      gchar **parts = g_strsplit(norm, "/", -1);
+      gint cur_parent = -1;
+      GString *acc = g_string_new(NULL);
+      const gchar *top_name = (parts[0] != NULL && parts[0][0] != '\0') ? parts[0] : NULL;
+
+      for (guint p = 0; parts[p] != NULL && parts[p][0] != '\0'; p++) {
+        if (acc->len > 0)
+          g_string_append_c(acc, '/');
+        g_string_append(acc, parts[p]);
+
+        gpointer fp = g_hash_table_lookup(folder_map, acc->str);
+        guint fidx = 0;
+        if (fp == NULL) {
+          g_autofree gchar *fid = g_strdup_printf("folder:%s", acc->str);
+          fidx = add_node(g, id_map, fid, parts[p], acc->str, NULL, BT_NODE_FOLDER, 0);
+          BtGraphNode *fn = g_ptr_array_index(g->nodes, fidx);
+          fn->parent_idx = cur_parent;
+          fn->top_folder = g_strdup(top_name);
+          fn->hue = hash_hue(top_name ? top_name : acc->str);
+          g->folder_node_count++;
+          g_hash_table_insert(folder_map, g_strdup(acc->str), GUINT_TO_POINTER(fidx + 1));
+
+          if (cur_parent >= 0) {
+            BtGraphEdge fe = {
+              .src_idx = (guint)cur_parent,
+              .dst_idx = fidx,
+              .kind = BT_EDGE_CONTAINS,
+              .weight = 0.35,
+            };
+            g_array_append_val(g->edges, fe);
+          }
+        } else {
+          fidx = GPOINTER_TO_UINT(fp) - 1;
+        }
+        ((BtGraphNode *)g_ptr_array_index(g->nodes, fidx))->child_count++;
+        cur_parent = (gint)fidx;
+      }
+
+      /* Re-fetch nd in case g->nodes reallocated during add_node. */
+      nd = g_ptr_array_index(g->nodes, i);
+      nd->parent_idx = cur_parent;
+      g_free(nd->top_folder);
+      nd->top_folder = top_name ? g_strdup(top_name) : NULL;
+      if (cur_parent >= 0) {
+        BtGraphEdge te = {
+          .src_idx = (guint)cur_parent,
+          .dst_idx = i,
+          .kind = BT_EDGE_CONTAINS,
+          .weight = 0.25,
+        };
+        g_array_append_val(g->edges, te);
+      }
+
+      g_string_free(acc, TRUE);
+      g_strfreev(parts);
+    }
+    g_hash_table_destroy(folder_map);
+  }
+
+  /* Update note & folder radii proportional to degree / child count. */
   for (guint i = 0; i < g->nodes->len; i++) {
     BtGraphNode *n = g_ptr_array_index(g->nodes, i);
     if (n->kind == BT_NODE_HUMAN_NOTE || n->kind == BT_NODE_AI_NOTE)
-      n->radius = CLAMP(5.0 + sqrt((gdouble)n->degree) * 2.2, 5.0, 18.0);
+      n->radius = CLAMP(4.0 + sqrt((gdouble)n->degree) * 1.9, 4.0, 14.0);
+    else if (n->kind == BT_NODE_FOLDER)
+      n->radius = CLAMP(7.5 + sqrt((gdouble)n->child_count) * 1.1, 8.0, 14.0);
     else if (n->kind == BT_NODE_IMPORT_ROOT)
       n->radius = 10.0;
     else if (n->kind == BT_NODE_SESSION)
       n->radius = 7.0;
   }
+
+  bt_graph_apply_default_collapse(g);
 
   bt_index_snapshot_free(snap);
   g_hash_table_destroy(node_rel_map);
@@ -265,6 +352,83 @@ void bt_graph_free(BtGraph *g)
   g_ptr_array_unref(g->nodes);
   g_array_unref(g->edges);
   g_free(g);
+}
+
+void bt_graph_apply_default_collapse(BtGraph *g)
+{
+  if (g == NULL || g->nodes == NULL)
+    return;
+  gboolean collapse_sub = (g->nodes->len > 1500u);
+  for (guint i = 0; i < g->nodes->len; i++) {
+    BtGraphNode *nd = g_ptr_array_index(g->nodes, i);
+    if (nd->kind == BT_NODE_FOLDER)
+      nd->collapsed = collapse_sub && (nd->parent_idx >= 0);
+  }
+  bt_graph_recompute_visibility(g, TRUE, TRUE);
+}
+
+gboolean bt_graph_is_descendant_of(const BtGraph *g, guint node_idx, guint folder_idx)
+{
+  if (g == NULL || g->nodes == NULL || node_idx >= g->nodes->len || folder_idx >= g->nodes->len)
+    return FALSE;
+  const BtGraphNode *cur = g_ptr_array_index(g->nodes, node_idx);
+  for (guint guard = 0; guard < 64u && cur->parent_idx >= 0; guard++) {
+    if ((guint)cur->parent_idx == folder_idx)
+      return TRUE;
+    if ((guint)cur->parent_idx >= g->nodes->len)
+      break;
+    cur = g_ptr_array_index(g->nodes, (guint)cur->parent_idx);
+  }
+  return FALSE;
+}
+
+void bt_graph_set_folder_collapsed(BtGraph *g, guint folder_idx, gboolean collapsed)
+{
+  if (g == NULL || g->nodes == NULL || folder_idx >= g->nodes->len)
+    return;
+  BtGraphNode *fn = g_ptr_array_index(g->nodes, folder_idx);
+  if (fn->kind != BT_NODE_FOLDER)
+    return;
+  fn->collapsed = collapsed;
+}
+
+void bt_graph_set_folder_hidden(BtGraph *g, guint folder_idx, gboolean hidden)
+{
+  if (g == NULL || g->nodes == NULL || folder_idx >= g->nodes->len)
+    return;
+  BtGraphNode *fn = g_ptr_array_index(g->nodes, folder_idx);
+  if (fn->kind != BT_NODE_FOLDER)
+    return;
+  fn->hidden_by_user = hidden;
+}
+
+void bt_graph_recompute_visibility(BtGraph *g, gboolean show_tags, gboolean show_ghosts)
+{
+  if (g == NULL || g->nodes == NULL)
+    return;
+  for (guint i = 0; i < g->nodes->len; i++) {
+    BtGraphNode *nd = g_ptr_array_index(g->nodes, i);
+    gboolean vis = TRUE;
+    if (nd->kind == BT_NODE_TAG && !show_tags)
+      vis = FALSE;
+    else if (nd->kind == BT_NODE_GHOST && !show_ghosts)
+      vis = FALSE;
+    else if (nd->hidden_by_user)
+      vis = FALSE;
+
+    if (vis && nd->parent_idx >= 0) {
+      gint p = nd->parent_idx;
+      for (guint guard = 0; guard < 64u && p >= 0 && (guint)p < g->nodes->len; guard++) {
+        const BtGraphNode *pnd = g_ptr_array_index(g->nodes, (guint)p);
+        if (pnd->collapsed || pnd->hidden_by_user) {
+          vis = FALSE;
+          break;
+        }
+        p = pnd->parent_idx;
+      }
+    }
+    nd->visible = vis;
+  }
 }
 
 void bt_graph_layout(BtGraph *g, guint relax_iters)

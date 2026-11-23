@@ -61,17 +61,27 @@ static inline void set_tok(cairo_t *cr, guint32 rgb, gdouble alpha)
     cairo_set_source_rgba(cr, r, g, b, alpha);
 }
 
-static guint32 node_color(BtNodeKind k)
+static guint32 node_color(const BtGraphNode *nd)
 {
+  if (nd != NULL && nd->color_rgb != 0u)
+    return nd->color_rgb;
+  BtNodeKind k = nd ? nd->kind : BT_NODE_HUMAN_NOTE;
   switch (k) {
-  case BT_NODE_HUMAN_NOTE:  return BT_COL_NODE_NOTE;
+  case BT_NODE_HUMAN_NOTE:  return 0xBFD7FFu;
   case BT_NODE_AI_NOTE:     return BT_COL_NODE_AI;
   case BT_NODE_TAG:         return BT_COL_NODE_TAG;
+  case BT_NODE_FOLDER:      return 0xFFC857u;
   case BT_NODE_IMPORT_ROOT: return BT_COL_NODE_FOLDER;
   case BT_NODE_SESSION:     return BT_COL_TEXT_SECONDARY;
   case BT_NODE_GHOST:
   default:                  return BT_COL_TEXT_MUTED;
   }
+}
+
+static guint32 kind_default_color(BtNodeKind k)
+{
+  BtGraphNode tmp = {.kind = k, .color_rgb = 0u};
+  return node_color(&tmp);
 }
 
 static guint sprite_slot_for_kind(BtNodeKind k)
@@ -140,7 +150,7 @@ static gboolean cairo_backend_init(BtGraphRenderer *r)
     BT_NODE_SESSION, BT_NODE_IMPORT_ROOT, BT_NODE_GHOST,
   };
   for (guint i = 0; i < 6; i++)
-    p->glow[i] = bake_glow_sprite(node_color(kinds[i]));
+    p->glow[i] = bake_glow_sprite(kind_default_color(kinds[i]));
   p->glow[BT_SPRITE_ACCENT] = bake_glow_sprite(BT_COL_GRAPH_NODE_GLOW);
   p->vignette = bake_vignette_surface();
 
@@ -324,20 +334,21 @@ static void cairo_backend_render(BtGraphRenderer *r, cairo_t *cr, const BtGraphR
   gdouble hf = has_focus ? CLAMP(st->hover_fade, 0.0, 1.0) : 0.0;
   if (st->hover_idx < 0 && (st->focus_idx >= 0 || st->selected_idx >= 0))
     hf = 1.0;
-  gdouble dim_factor = has_focus ? (1.0 - 0.75 * hf) : 1.0;
+  gdouble dim_target = st->focus_isolated ? 0.08 : 0.25;
+  gdouble dim_factor = has_focus ? (1.0 - (1.0 - dim_target) * hf) : 1.0;
   gboolean use_curved_edges = (high && g->edges->len <= 600u);
   gboolean lod_collapse = (g->nodes->len > 2000u && zoom < 0.6);
 
-  /* Pass 1: base edges — additive glow on High, fast batched stroke on heavy/Low. */
+  /* Pass 1: base edges — faint folder tethers always, wikilinks only if show_links. */
   cairo_save(cr);
   cairo_set_antialias(cr, (heavy || !high) ? CAIRO_ANTIALIAS_NONE : CAIRO_ANTIALIAS_GOOD);
-  if (high && !very_heavy)
-    cairo_set_operator(cr, CAIRO_OPERATOR_ADD);
   cairo_set_line_width(cr, (high ? 1.0 : 0.9) / zoom);
-  set_tok(cr, BT_COL_GRAPH_EDGE_DIM, (high ? 0.22 : 0.16) * dim_factor);
+  set_tok(cr, BT_COL_GRAPH_EDGE_DIM, (high ? 0.18 : 0.14) * dim_factor);
 
   for (guint i = 0; i < g->edges->len; i++) {
     const BtGraphEdge *e = &g_array_index(g->edges, BtGraphEdge, i);
+    if (e->kind != BT_EDGE_CONTAINS && !st->show_links)
+      continue;
     if (lod_collapse && e->kind == BT_EDGE_TAGGED)
       continue;
     if (has_focus && ((gint)e->src_idx == focus_idx || (gint)e->dst_idx == focus_idx))
@@ -463,10 +474,17 @@ static void cairo_backend_render(BtGraphRenderer *r, cairo_t *cr, const BtGraphR
     gboolean is_foc = ((gint)i == focus_idx);
     gboolean is_sel = ((gint)i == st->selected_idx);
     gdouble alpha = (has_focus && nbr == BT_NBR_NONE && !is_sel) ? dim_factor : 1.0;
-    guint32 col = node_color(nd->kind);
+    guint32 col = node_color(nd);
     gdouble rad = bt_graph_screen_core_radius(nd->radius, zoom) / zoom;
 
-    if (nd->kind == BT_NODE_SESSION || nd->kind == BT_NODE_IMPORT_ROOT) {
+    if (nd->kind == BT_NODE_FOLDER) {
+      set_tok(cr, col, 0.92 * alpha);
+      cairo_set_line_width(cr, 1.8 / zoom);
+      cairo_arc(cr, nx, ny, rad, 0.0, 2.0 * M_PI);
+      cairo_stroke(cr);
+      cairo_arc(cr, nx, ny, rad * 0.42, 0.0, 2.0 * M_PI);
+      cairo_fill(cr);
+    } else if (nd->kind == BT_NODE_SESSION || nd->kind == BT_NODE_IMPORT_ROOT) {
       gdouble s = rad * 1.9;
       draw_rrect(cr, nx - s * 0.5, ny - s * 0.5, s, s, 3.0);
       set_tok(cr, BT_COL_SURFACE_2, alpha);
@@ -488,10 +506,10 @@ static void cairo_backend_render(BtGraphRenderer *r, cairo_t *cr, const BtGraphR
       set_tok(cr, col, alpha);
       cairo_arc(cr, nx, ny, rad, 0.0, 2.0 * M_PI);
       cairo_fill(cr);
-      /* Pinpoint luminous inner core on High quality. */
-      if (high && !very_heavy && rad >= 4.0) {
-        set_tok(cr, BT_COL_TEXT_PRIMARY, 0.55 * alpha);
-        cairo_arc(cr, nx, ny, rad * 0.42, 0.0, 2.0 * M_PI);
+      /* White hot-center ONLY for hovered/selected nodes. */
+      if ((is_foc || is_sel) && rad >= 3.0) {
+        set_tok(cr, BT_COL_TEXT_PRIMARY, 0.72 * alpha);
+        cairo_arc(cr, nx, ny, rad * 0.45, 0.0, 2.0 * M_PI);
         cairo_fill(cr);
       }
     }
@@ -751,6 +769,7 @@ struct BtGraphView {
   GtkWidget *btn_motion;
   GtkWidget *btn_tags;
   GtkWidget *btn_ghosts;
+  GtkWidget *btn_links;
   GtkWidget *legend_lbl;
   GtkWidget *hover_lbl;
   GtkWidget *debug_lbl;
@@ -790,6 +809,19 @@ struct BtGraphView {
   gboolean reduce_motion;
   gboolean show_tags;
   gboolean show_ghosts;
+  gboolean show_links;
+  gboolean focus_isolated;
+  guint focus_hops;
+  gdouble spread_str;
+
+  /* Exact spatial-hash picking & overlapping stack cycling */
+  BtPickCand stack_cands[16];
+  guint stack_count;
+  guint stack_total;
+  guint stack_idx;
+  gdouble stack_x, stack_y;
+  BtScreenNode *pick_scratch;
+  guint pick_scratch_cap;
 
   gboolean dragging;
   gboolean drag_moved;
@@ -825,10 +857,12 @@ struct BtGraphView {
   BtGraphOpenNoteFn on_open;
   BtGraphOpenTermFn on_open_term;
   BtGraphRenameNoteFn on_rename;
+  BtGraphSelectNoteFn on_select;
   BtGraphNoticeFn on_notice;
   BtGraphPrefsChangedFn on_prefs;
   gpointer user_data;
   gpointer rename_ud;
+  gpointer select_ud;
   gpointer notice_ud;
   gpointer prefs_ud;
 };
@@ -866,10 +900,13 @@ static void refresh_neighbor_mask(BtGraphView *gv)
     return;
   guint n = gv->graph->nodes->len;
   ensure_nbr_mask(gv, n);
-  gint foc = (gv->hover_idx >= 0)
-                 ? gv->hover_idx
-                 : ((gv->focus_idx >= 0) ? gv->focus_idx : gv->selected_idx);
-  bt_graph_compute_neighbors(gv->graph, foc, gv->nbr_mask, n);
+  gint foc = (gv->focus_isolated && gv->selected_idx >= 0)
+                 ? gv->selected_idx
+                 : ((gv->hover_idx >= 0)
+                        ? gv->hover_idx
+                        : ((gv->focus_idx >= 0) ? gv->focus_idx : gv->selected_idx));
+  guint hops = (gv->focus_isolated && gv->focus_hops >= 2u) ? 2u : 1u;
+  bt_graph_compute_neighbors_hops(gv->graph, foc, hops, gv->nbr_mask, n);
   bt_graph_gl_mark_state_dirty(gv->gl);
 }
 
@@ -1196,6 +1233,20 @@ static gboolean on_tick(GtkWidget *widget, GdkFrameClock *clock, gpointer ud)
     gv->hover_fade = target_hf;
   }
 
+  /* 2b. Smooth hover fisheye spread in 3D when hovering (disabled by Reduce motion). */
+  gdouble target_spread = (gv->has_mouse && !gv->dragging && !gv->reduce_motion &&
+                           gv->mode == BT_GRAPH_MODE_3D && gv->active_backend == BT_GRAPH_BACKEND_GL)
+                              ? 1.0
+                              : 0.0;
+  if (gv->reduce_motion) {
+    gv->spread_str = 0.0;
+  } else if (fabs(gv->spread_str - target_spread) > 0.02) {
+    gv->spread_str += (target_spread - gv->spread_str) * 0.28;
+    active = TRUE;
+  } else {
+    gv->spread_str = target_spread;
+  }
+
   /* 3. Smooth 2D camera transition. */
   if (gv->animating_cam) {
     if (gv->reduce_motion) {
@@ -1337,6 +1388,11 @@ static void fill_render_state(BtGraphView *gv, int w, int h, int scale, BtGraphR
   out->mode = (gv->active_backend == BT_GRAPH_BACKEND_GL) ? gv->mode : BT_GRAPH_MODE_2D;
   out->reduce_motion = gv->reduce_motion;
   out->pulse_enabled = gv->pulse_enabled;
+  out->show_links = gv->show_links;
+  out->focus_isolated = gv->focus_isolated;
+  out->mouse_x = gv->last_mouse_x;
+  out->mouse_y = gv->last_mouse_y;
+  out->spread_str = gv->spread_str;
 }
 
 static void sync_toolbar_buttons(BtGraphView *gv);
@@ -1370,50 +1426,90 @@ static void on_cairo_draw(GtkDrawingArea *area, cairo_t *cr, int w, int h, gpoin
     gv->cairo_renderer->vt->render_cairo(gv->cairo_renderer, cr, &st);
 }
 
-static void screen_to_world(BtGraphView *gv, gdouble sx, gdouble sy, gdouble *wx, gdouble *wy)
-{
-  int w = gtk_widget_get_width(gv->canvas_stack);
-  int h = gtk_widget_get_height(gv->canvas_stack);
-  *wx = (sx - w * 0.5 - gv->pan_x) / gv->zoom;
-  *wy = (sy - h * 0.5 - gv->pan_y) / gv->zoom;
-}
-
-static gint pick_node_at(BtGraphView *gv, gdouble sx, gdouble sy)
+static guint pick_stack_at(BtGraphView *gv, gdouble sx, gdouble sy, BtPickCand *out, guint out_cap)
 {
   if (gv->graph == NULL || gv->graph->nodes->len == 0 || gv->canvas_stack == NULL)
-    return -1;
-  if (gv->mode == BT_GRAPH_MODE_3D && gv->active_backend == BT_GRAPH_BACKEND_GL &&
-      gv->pts3d != NULL && gv->pts3d_count > 0) {
-    int w = gtk_widget_get_width(gv->canvas_stack);
-    int h = gtk_widget_get_height(gv->canvas_stack);
-    if (w <= 1 || h <= 1)
-      return -1;
-    float mvp[16];
+    return 0u;
+  int w = gtk_widget_get_width(gv->canvas_stack);
+  int h = gtk_widget_get_height(gv->canvas_stack);
+  if (w <= 1 || h <= 1)
+    return 0u;
+
+  guint n = gv->graph->nodes->len;
+  if (n > gv->pick_scratch_cap) {
+    g_free(gv->pick_scratch);
+    gv->pick_scratch = g_new0(BtScreenNode, n);
+    gv->pick_scratch_cap = n;
+  }
+
+  gboolean is3d = (gv->mode == BT_GRAPH_MODE_3D && gv->active_backend == BT_GRAPH_BACKEND_GL &&
+                   gv->pts3d != NULL && gv->pts3d_count > 0);
+  float mvp[16];
+  if (is3d) {
     bt_graph_build_orbit_mvp(gv->yaw, gv->pitch, MAX(gv->dist3d, 1.2),
                              (gdouble)w / (gdouble)h, mvp);
-    gint best = -1;
-    gdouble best_score = 1e9;
-    guint n = MIN(gv->graph->nodes->len, gv->pts3d_count);
-    for (guint i = 0; i < n; i++) {
-      const BtGraphNode *nd = g_ptr_array_index(gv->graph->nodes, i);
-      if (!nd->visible)
+  }
+
+  for (guint i = 0; i < n; i++) {
+    const BtGraphNode *nd = g_ptr_array_index(gv->graph->nodes, i);
+    BtScreenNode *sn = &gv->pick_scratch[i];
+    sn->node_idx = i;
+    sn->visible = FALSE;
+    if (!nd->visible)
+      continue;
+
+    if (is3d) {
+      if (i >= gv->pts3d_count)
         continue;
       gdouble px = 0.0, py = 0.0, pw = 0.0;
       if (!bt_graph_project_3d(mvp, &gv->pts3d[i], (gdouble)w, (gdouble)h, &px, &py, &pw))
         continue;
-      gdouble d2 = (px - sx) * (px - sx) + (py - sy) * (py - sy);
-      gdouble hr = MAX(nd->radius * (2.2 / MAX(pw, 0.5)), 12.0);
-      if (d2 <= hr * hr && pw < best_score) {
-        best_score = pw;
-        best = (gint)i;
-      }
+      float persp = CLAMP(2.4f / MAX((float)pw, 0.35f), 0.40f, 2.2f);
+      sn->sx = (float)px;
+      sn->sy = (float)py;
+      sn->radius = CLAMP((float)nd->radius * persp * 0.85f, 3.0f, 14.0f);
+      sn->depth = (float)pw;
+      sn->visible = TRUE;
+    } else {
+      sn->sx = (float)(w * 0.5 + gv->pan_x + nd->x * gv->zoom);
+      sn->sy = (float)(h * 0.5 + gv->pan_y + nd->y * gv->zoom);
+      sn->radius = (float)bt_graph_screen_core_radius(nd->radius, gv->zoom);
+      /* In 2D, put folders slightly in front, then higher degree */
+      sn->depth = (nd->kind == BT_NODE_FOLDER) ? -1.0f : (0.0f - (float)nd->degree * 0.0001f);
+      sn->visible = TRUE;
     }
-    return best;
   }
 
-  gdouble wx = 0.0, wy = 0.0;
-  screen_to_world(gv, sx, sy, &wx, &wy);
-  return bt_graph_pick(gv->graph, wx, wy, 14.0 / gv->zoom);
+  if (is3d && !gv->reduce_motion && gv->spread_str > 0.01) {
+    bt_graph_apply_hover_spread(gv->pick_scratch, n, (float)gv->last_mouse_x,
+                                (float)gv->last_mouse_y, 40.0f, (float)gv->spread_str);
+  }
+
+  return bt_graph_pick_screen(gv->pick_scratch, n, (float)w, (float)h,
+                              (float)sx, (float)sy, out, out_cap);
+}
+
+static gint pick_node_at(BtGraphView *gv, gdouble sx, gdouble sy)
+{
+  BtPickCand cands[16];
+  guint total = pick_stack_at(gv, sx, sy, cands, 16u);
+  if (total == 0u) {
+    gv->stack_count = 0u;
+    gv->stack_total = 0u;
+    gv->stack_idx = 0u;
+    return -1;
+  }
+  gboolean same_spot = (hypot(sx - gv->stack_x, sy - gv->stack_y) <= 6.0 && gv->stack_count > 0u);
+  guint cnt = MIN(total, 16u);
+  memcpy(gv->stack_cands, cands, cnt * sizeof(BtPickCand));
+  gv->stack_count = cnt;
+  gv->stack_total = total;
+  if (!same_spot || gv->stack_idx >= cnt) {
+    gv->stack_idx = 0u;
+    gv->stack_x = sx;
+    gv->stack_y = sy;
+  }
+  return (gint)gv->stack_cands[gv->stack_idx].node_idx;
 }
 
 /* ---------------------------------------------- pointer & toolbar UI -- */
@@ -1442,11 +1538,31 @@ static void center_on_node(BtGraphView *gv, gint hit)
 
 static void show_graph_context_menu(BtGraphView *gv, gdouble x, gdouble y);
 
+static void apply_kind_visibility(BtGraphView *gv, gboolean upload_gl);
+static void update_hover_readout(BtGraphView *gv);
+
+static void toggle_folder_node(BtGraphView *gv, gint idx)
+{
+  if (gv == NULL || gv->graph == NULL || idx < 0 || (guint)idx >= gv->graph->nodes->len)
+    return;
+  BtGraphNode *nd = g_ptr_array_index(gv->graph->nodes, (guint)idx);
+  if (nd->kind != BT_NODE_FOLDER)
+    return;
+  bt_graph_set_folder_collapsed(gv->graph, (guint)idx, !nd->collapsed);
+  apply_kind_visibility(gv, TRUE);
+  update_hover_readout(gv);
+}
+
 static void clear_selection(BtGraphView *gv)
 {
-  if (gv == NULL || gv->selected_idx < 0)
+  if (gv == NULL)
     return;
+  gboolean had = (gv->selected_idx >= 0 || gv->focus_isolated);
   gv->selected_idx = -1;
+  gv->focus_isolated = FALSE;
+  gv->focus_hops = 1u;
+  if (!had)
+    return;
   refresh_neighbor_mask(gv);
   sync_toolbar_buttons(gv);
   if (gv->reduce_motion) {
@@ -1467,8 +1583,43 @@ static gboolean on_key_pressed(GtkEventControllerKey *c, guint keyval, guint key
     bt_graphview_toggle_debug_overlay(gv);
     return TRUE;
   }
-  if (keyval == GDK_KEY_Escape && gv->selected_idx >= 0) {
+  if (keyval == GDK_KEY_Escape && (gv->selected_idx >= 0 || gv->focus_isolated)) {
     clear_selection(gv);
+    return TRUE;
+  }
+  if (keyval == GDK_KEY_Tab && gv->stack_count >= 2u) {
+    gv->stack_idx = (gv->stack_idx + 1u) % gv->stack_count;
+    gint hit = (gint)gv->stack_cands[gv->stack_idx].node_idx;
+    gv->hover_idx = hit;
+    gv->selected_idx = hit;
+    refresh_neighbor_mask(gv);
+    update_hover_readout(gv);
+    queue_canvas_draw(gv);
+    return TRUE;
+  }
+  if (keyval == GDK_KEY_space && gv->selected_idx >= 0 && gv->graph != NULL &&
+      (guint)gv->selected_idx < gv->graph->nodes->len) {
+    const BtGraphNode *nd = g_ptr_array_index(gv->graph->nodes, (guint)gv->selected_idx);
+    if (nd->kind == BT_NODE_FOLDER) {
+      toggle_folder_node(gv, gv->selected_idx);
+      return TRUE;
+    }
+  }
+  if ((keyval == GDK_KEY_Return || keyval == GDK_KEY_KP_Enter) && gv->selected_idx >= 0 &&
+      gv->graph != NULL && (guint)gv->selected_idx < gv->graph->nodes->len) {
+    const BtGraphNode *nd = g_ptr_array_index(gv->graph->nodes, (guint)gv->selected_idx);
+    if (nd->kind == BT_NODE_FOLDER) {
+      toggle_folder_node(gv, gv->selected_idx);
+      return TRUE;
+    }
+    if (nd->relpath != NULL && !nd->broken && gv->on_open != NULL) {
+      gv->on_open(nd->relpath, nd->kind == BT_NODE_GHOST, gv->user_data);
+      return TRUE;
+    }
+  }
+  if ((keyval == GDK_KEY_f || keyval == GDK_KEY_F) && (state & GDK_CONTROL_MASK) == 0 &&
+      gv->selected_idx >= 0) {
+    center_on_node(gv, gv->selected_idx);
     return TRUE;
   }
   return FALSE;
@@ -1482,19 +1633,35 @@ static void on_click_pressed(GtkGestureClick *g, gint n_press, gdouble x, gdoubl
     gtk_widget_grab_focus(gv->canvas_stack);
   if (gv->graph == NULL)
     return;
+
+  /* Single click at same spot with overlapping stack cycles front-to-back. */
+  gboolean was_same_spot = (n_press == 1 && gv->stack_count >= 2u &&
+                            hypot(x - gv->stack_x, y - gv->stack_y) <= 6.0 &&
+                            gv->selected_idx == (gint)gv->stack_cands[gv->stack_idx].node_idx);
+  if (was_same_spot)
+    gv->stack_idx = (gv->stack_idx + 1u) % gv->stack_count;
+
   gint hit = pick_node_at(gv, x, y);
   if (hit >= 0) {
     gv->selected_idx = hit;
+    gv->hover_idx = hit;
     gv->pulse_phase = 0.0;
     refresh_neighbor_mask(gv);
     sync_toolbar_buttons(gv);
+    update_hover_readout(gv);
     const BtGraphNode *nd = g_ptr_array_index(gv->graph->nodes, (guint)hit);
+    if (n_press == 1 && nd->relpath != NULL && !nd->broken && gv->on_select != NULL)
+      gv->on_select(nd->relpath, gv->select_ud);
     if (n_press == 2) {
-      center_on_node(gv, hit);
+      if (nd->kind == BT_NODE_FOLDER) {
+        toggle_folder_node(gv, hit);
+      } else if (nd->relpath != NULL && !nd->broken && gv->on_open != NULL) {
+        gv->on_open(nd->relpath, nd->kind == BT_NODE_GHOST, gv->user_data);
+      } else {
+        center_on_node(gv, hit);
+      }
       return;
     }
-    if (n_press == 1 && nd->relpath != NULL && !nd->broken && gv->on_open != NULL)
-      gv->on_open(nd->relpath, nd->kind == BT_NODE_GHOST, gv->user_data);
     if (gv->reduce_motion) {
       gv->hover_fade = 1.0;
       queue_canvas_draw(gv);
@@ -1574,6 +1741,10 @@ static void on_motion(GtkEventControllerMotion *c, gdouble x, gdouble y, gpointe
       } else {
         ensure_tick(gv);
       }
+    } else if (gv->mode == BT_GRAPH_MODE_3D && gv->active_backend == BT_GRAPH_BACKEND_GL &&
+               !gv->reduce_motion) {
+      ensure_tick(gv);
+      queue_canvas_draw(gv);
     }
   }
 }
@@ -1742,6 +1913,9 @@ static void sync_toolbar_buttons(BtGraphView *gv)
   if (gv->btn_ghosts != NULL) {
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(gv->btn_ghosts), gv->show_ghosts);
   }
+  if (gv->btn_links != NULL) {
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(gv->btn_links), gv->show_links);
+  }
 }
 
 static const gchar *node_kind_label(BtNodeKind k)
@@ -1750,6 +1924,7 @@ static const gchar *node_kind_label(BtNodeKind k)
   case BT_NODE_HUMAN_NOTE:  return "Note";
   case BT_NODE_AI_NOTE:     return "AI note";
   case BT_NODE_TAG:         return "Tag";
+  case BT_NODE_FOLDER:      return "Folder";
   case BT_NODE_SESSION:     return "Session";
   case BT_NODE_IMPORT_ROOT: return "Import root";
   case BT_NODE_GHOST:       return "Ghost";
@@ -1771,11 +1946,27 @@ static void update_hover_readout(BtGraphView *gv)
     return;
   }
   const gchar *title = (nd->label != NULL && nd->label[0] != '\0') ? nd->label : nd->id;
-  gchar *txt = g_strdup_printf("%s · %u %s · %s",
-                               title ? title : "Untitled",
-                               nd->degree,
-                               nd->degree == 1u ? "link" : "links",
-                               node_kind_label(nd->kind));
+  g_autofree gchar *stack_chip = NULL;
+  if (gv->stack_total >= 2u) {
+    stack_chip = g_strdup_printf("  [+%u · %u/%u Tab/click]",
+                                 gv->stack_total - 1u, gv->stack_idx + 1u, gv->stack_total);
+  }
+  gchar *txt = NULL;
+  if (nd->kind == BT_NODE_FOLDER) {
+    txt = g_strdup_printf("%s · %u %s · Folder%s%s",
+                          title ? title : "Folder",
+                          nd->child_count,
+                          nd->child_count == 1u ? "note" : "notes",
+                          nd->collapsed ? " (collapsed)" : "",
+                          stack_chip ? stack_chip : "");
+  } else {
+    txt = g_strdup_printf("%s · %u %s · %s%s",
+                          title ? title : "Untitled",
+                          nd->degree,
+                          nd->degree == 1u ? "link" : "links",
+                          node_kind_label(nd->kind),
+                          stack_chip ? stack_chip : "");
+  }
   gtk_label_set_text(GTK_LABEL(gv->hover_lbl), txt);
   gtk_widget_set_visible(gv->hover_lbl, TRUE);
   g_free(txt);
@@ -1804,13 +1995,7 @@ static void apply_kind_visibility(BtGraphView *gv, gboolean upload_gl)
 {
   if (gv == NULL || gv->graph == NULL)
     return;
-  for (guint i = 0; i < gv->graph->nodes->len; i++) {
-    BtGraphNode *nd = g_ptr_array_index(gv->graph->nodes, i);
-    if (nd->kind == BT_NODE_TAG)
-      nd->visible = gv->show_tags;
-    else if (nd->kind == BT_NODE_GHOST)
-      nd->visible = gv->show_ghosts;
-  }
+  bt_graph_recompute_visibility(gv->graph, gv->show_tags, gv->show_ghosts);
   if (gv->hover_idx >= 0 && (guint)gv->hover_idx < gv->graph->nodes->len &&
       !((const BtGraphNode *)g_ptr_array_index(gv->graph->nodes, (guint)gv->hover_idx))->visible)
     gv->hover_idx = -1;
@@ -1888,6 +2073,14 @@ static void on_btn_ghosts_toggled(GtkToggleButton *b, gpointer ud)
     if (gv->on_prefs != NULL)
       gv->on_prefs(gv->show_tags, gv->show_ghosts, gv->prefs_ud);
   }
+}
+
+static void on_btn_links_toggled(GtkToggleButton *b, gpointer ud)
+{
+  BtGraphView *gv = ud;
+  gboolean en = gtk_toggle_button_get_active(b);
+  if (en != gv->show_links)
+    bt_graphview_set_show_links(gv, en);
 }
 
 /* ------------------------------------------- right-click context menu -- */
@@ -1977,6 +2170,111 @@ static void on_gctx_reset(GtkButton *b, gpointer ud)
   on_btn_reset(NULL, gv);
 }
 
+static void on_gctx_toggle_folder(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  BtGraphView *gv = ud;
+  gint hit = gv->ctx_hit_idx;
+  dismiss_ctx_popover(gv);
+  toggle_folder_node(gv, hit);
+}
+
+static void on_gctx_reveal_sidebar(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  BtGraphView *gv = ud;
+  gchar *rel = g_strdup(gv->ctx_relpath);
+  dismiss_ctx_popover(gv);
+  if (rel != NULL && gv->on_select != NULL)
+    gv->on_select(rel, gv->select_ud);
+  g_free(rel);
+}
+
+static void on_gctx_focus_1hop(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  BtGraphView *gv = ud;
+  gint hit = gv->ctx_hit_idx;
+  dismiss_ctx_popover(gv);
+  if (hit >= 0) {
+    gv->selected_idx = hit;
+    gv->focus_isolated = TRUE;
+    gv->focus_hops = 1u;
+    refresh_neighbor_mask(gv);
+    gv->hover_fade = 1.0;
+    queue_canvas_draw(gv);
+  }
+}
+
+static void on_gctx_focus_2hop(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  BtGraphView *gv = ud;
+  gint hit = gv->ctx_hit_idx;
+  dismiss_ctx_popover(gv);
+  if (hit >= 0) {
+    gv->selected_idx = hit;
+    gv->focus_isolated = TRUE;
+    gv->focus_hops = 2u;
+    refresh_neighbor_mask(gv);
+    gv->hover_fade = 1.0;
+    queue_canvas_draw(gv);
+  }
+}
+
+static void on_gctx_copy_wikilink(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  BtGraphView *gv = ud;
+  gint hit = gv->ctx_hit_idx;
+  g_autofree gchar *link = NULL;
+  if (gv->graph != NULL && hit >= 0 && (guint)hit < gv->graph->nodes->len) {
+    const BtGraphNode *nd = g_ptr_array_index(gv->graph->nodes, (guint)hit);
+    const gchar *name = (nd->label != NULL && nd->label[0] != '\0') ? nd->label : nd->relpath;
+    if (name != NULL)
+      link = g_strdup_printf("[[%s]]", name);
+  }
+  dismiss_ctx_popover(gv);
+  if (link != NULL && gv->canvas_stack != NULL) {
+    GdkClipboard *cb = gtk_widget_get_clipboard(gv->canvas_stack);
+    if (cb != NULL)
+      gdk_clipboard_set_text(cb, link);
+    emit_notice(gv, "Copied wikilink to clipboard");
+  }
+}
+
+static void on_gctx_hide_folder(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  BtGraphView *gv = ud;
+  gint hit = gv->ctx_hit_idx;
+  dismiss_ctx_popover(gv);
+  if (gv->graph != NULL && hit >= 0 && (guint)hit < gv->graph->nodes->len) {
+    const BtGraphNode *nd = g_ptr_array_index(gv->graph->nodes, (guint)hit);
+    gint fidx = (nd->kind == BT_NODE_FOLDER) ? hit : nd->parent_idx;
+    if (fidx >= 0) {
+      bt_graph_set_folder_hidden(gv->graph, (guint)fidx, TRUE);
+      apply_kind_visibility(gv, TRUE);
+      queue_canvas_draw(gv);
+    }
+  }
+}
+
+static void on_gctx_show_all_folders(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  BtGraphView *gv = ud;
+  dismiss_ctx_popover(gv);
+  if (gv->graph == NULL)
+    return;
+  for (guint i = 0; i < gv->graph->nodes->len; i++) {
+    BtGraphNode *nd = g_ptr_array_index(gv->graph->nodes, i);
+    nd->hidden_by_user = FALSE;
+  }
+  apply_kind_visibility(gv, TRUE);
+  queue_canvas_draw(gv);
+}
+
 static void on_gctx_toggle_mode(GtkButton *b, gpointer ud)
 {
   (void)b;
@@ -2033,15 +2331,39 @@ static void show_graph_context_menu(BtGraphView *gv, gdouble x, gdouble y)
     bt_graph_gl_mark_state_dirty(gv->gl);
     queue_canvas_draw(gv);
 
-    gboolean has_note = (nd->relpath != NULL && !nd->broken);
+    gboolean is_folder = (nd->kind == BT_NODE_FOLDER);
+    gboolean has_note = (!is_folder && nd->relpath != NULL && !nd->broken);
     gboolean is_real_note = has_note && (nd->kind != BT_NODE_GHOST);
 
-    if (has_note && gv->on_open != NULL)
+    if (is_folder) {
       gtk_box_append(GTK_BOX(box),
-                     make_gctx_btn(gv->ctx_is_ghost ? "Create Note" : "Open Note", NULL,
+                     make_gctx_btn(nd->collapsed ? "Expand Folder" : "Collapse Folder", "Space",
+                                   G_CALLBACK(on_gctx_toggle_folder), gv));
+    } else if (has_note && gv->on_open != NULL) {
+      gtk_box_append(GTK_BOX(box),
+                     make_gctx_btn(gv->ctx_is_ghost ? "Create Note" : "Open Note", "Enter",
                                    G_CALLBACK(on_gctx_open), gv));
+    }
+    if ((is_real_note || is_folder) && gv->on_select != NULL)
+      gtk_box_append(GTK_BOX(box),
+                     make_gctx_btn("Reveal in Sidebar", NULL,
+                                   G_CALLBACK(on_gctx_reveal_sidebar), gv));
+    gtk_box_append(GTK_BOX(box), make_gctx_sep());
     gtk_box_append(GTK_BOX(box),
-                   make_gctx_btn("Center on Node", NULL, G_CALLBACK(on_gctx_center), gv));
+                   make_gctx_btn("Focus Neighbors (1 hop)", NULL,
+                                 G_CALLBACK(on_gctx_focus_1hop), gv));
+    gtk_box_append(GTK_BOX(box),
+                   make_gctx_btn("Focus Neighbors (2 hops)", NULL,
+                                 G_CALLBACK(on_gctx_focus_2hop), gv));
+    gtk_box_append(GTK_BOX(box),
+                   make_gctx_btn("Center on Node", "F", G_CALLBACK(on_gctx_center), gv));
+    if (has_note)
+      gtk_box_append(GTK_BOX(box),
+                     make_gctx_btn("Copy [[wikilink]]", NULL,
+                                   G_CALLBACK(on_gctx_copy_wikilink), gv));
+    if (is_folder || nd->parent_idx >= 0)
+      gtk_box_append(GTK_BOX(box),
+                     make_gctx_btn("Hide Folder", NULL, G_CALLBACK(on_gctx_hide_folder), gv));
     if (is_real_note && (gv->on_open_term != NULL || gv->on_rename != NULL))
       gtk_box_append(GTK_BOX(box), make_gctx_sep());
     if (is_real_note && gv->on_open_term != NULL)
@@ -2053,6 +2375,9 @@ static void show_graph_context_menu(BtGraphView *gv, gdouble x, gdouble y)
   } else {
     gtk_box_append(GTK_BOX(box), make_gctx_btn("Fit Graph", NULL, G_CALLBACK(on_gctx_fit), gv));
     gtk_box_append(GTK_BOX(box), make_gctx_btn("Reset View", NULL, G_CALLBACK(on_gctx_reset), gv));
+    gtk_box_append(GTK_BOX(box),
+                   make_gctx_btn("Show All Hidden Folders", NULL,
+                                 G_CALLBACK(on_gctx_show_all_folders), gv));
     if (gv->active_backend == BT_GRAPH_BACKEND_GL) {
       gtk_box_append(GTK_BOX(box), make_gctx_sep());
       gtk_box_append(GTK_BOX(box),
@@ -2144,6 +2469,7 @@ static void on_canvas_destroy(GtkWidget *area, gpointer ud)
   gv->btn_motion = NULL;
   gv->btn_tags = NULL;
   gv->btn_ghosts = NULL;
+  gv->btn_links = NULL;
   gv->legend_lbl = NULL;
   gv->hover_lbl = NULL;
   gv->debug_lbl = NULL;
@@ -2319,6 +2645,12 @@ BtGraphView *bt_graphview_new(BtGraphOpenNoteFn on_open, BtGraphOpenTermFn on_op
                               "Show or hide unresolved [[wiki-link]] ghost nodes");
   g_signal_connect(gv->btn_ghosts, "toggled", G_CALLBACK(on_btn_ghosts_toggled), gv);
 
+  gv->btn_links = gtk_toggle_button_new_with_label("Links");
+  gtk_widget_add_css_class(gv->btn_links, "bt-graph-pill");
+  gtk_widget_set_tooltip_text(gv->btn_links,
+                              "Show all [[wiki-link]] edges (when off, 1-hop links appear on hover/select)");
+  g_signal_connect(gv->btn_links, "toggled", G_CALLBACK(on_btn_links_toggled), gv);
+
   gtk_box_append(GTK_BOX(mode_bar), lbl_view);
   gtk_box_append(GTK_BOX(mode_bar), gv->btn_2d);
   gtk_box_append(GTK_BOX(mode_bar), gv->btn_3d);
@@ -2327,6 +2659,7 @@ BtGraphView *bt_graphview_new(BtGraphOpenNoteFn on_open, BtGraphOpenTermFn on_op
   gtk_box_append(GTK_BOX(mode_bar), gv->btn_q_low);
   gtk_box_append(GTK_BOX(mode_bar), gv->btn_q_high);
   gtk_box_append(GTK_BOX(mode_bar), sep2);
+  gtk_box_append(GTK_BOX(mode_bar), gv->btn_links);
   gtk_box_append(GTK_BOX(mode_bar), gv->btn_tags);
   gtk_box_append(GTK_BOX(mode_bar), gv->btn_ghosts);
   gtk_box_append(GTK_BOX(mode_bar), gv->btn_pulse);
@@ -2435,6 +2768,7 @@ void bt_graphview_free(BtGraphView *gv)
   g_free(gv->pts3d);
   g_free(gv->pending_notice);
   g_free(gv->nbr_mask);
+  g_free(gv->pick_scratch);
   bt_graph_free(gv->graph);
   g_free(gv);
 }
@@ -2453,8 +2787,14 @@ void bt_graphview_set_graph(BtGraphView *gv, BtGraph *graph, gboolean animate_gr
   gv->selected_idx = -1;
   gv->focus_idx = -1;
   gv->ctx_hit_idx = -1;
+  gv->focus_isolated = FALSE;
+  gv->focus_hops = 1u;
+  gv->stack_count = 0u;
+  gv->stack_total = 0u;
   gv->hover_fade = 0.0;
   gv->needs_fit = TRUE;
+  /* Hide wikilink clutter by default in dense views (>80 nodes); user can toggle "Links". */
+  gv->show_links = (graph == NULL || graph->nodes->len <= 80u);
   apply_kind_visibility(gv, FALSE);
   sync_toolbar_buttons(gv);
   bt_graph_gl_set_graph(gv->gl, graph);
@@ -2599,6 +2939,46 @@ gboolean bt_graphview_get_show_ghosts(const BtGraphView *gv)
   return gv ? gv->show_ghosts : FALSE;
 }
 
+void bt_graphview_set_show_links(BtGraphView *gv, gboolean show_links)
+{
+  if (gv == NULL)
+    return;
+  gv->show_links = show_links;
+  sync_toolbar_buttons(gv);
+  queue_canvas_draw(gv);
+}
+
+gboolean bt_graphview_get_show_links(const BtGraphView *gv)
+{
+  return gv ? gv->show_links : FALSE;
+}
+
+void bt_graphview_set_select_cb(BtGraphView *gv, BtGraphSelectNoteFn on_select, gpointer user_data)
+{
+  if (gv == NULL)
+    return;
+  gv->on_select = on_select;
+  gv->select_ud = user_data;
+}
+
+void bt_graphview_select_relpath(BtGraphView *gv, const gchar *relpath)
+{
+  if (gv == NULL || gv->graph == NULL || relpath == NULL)
+    return;
+  for (guint i = 0; i < gv->graph->nodes->len; i++) {
+    const BtGraphNode *nd = g_ptr_array_index(gv->graph->nodes, i);
+    if (nd->relpath != NULL && g_ascii_strcasecmp(nd->relpath, relpath) == 0) {
+      if (gv->selected_idx != (gint)i) {
+        gv->selected_idx = (gint)i;
+        refresh_neighbor_mask(gv);
+        sync_toolbar_buttons(gv);
+        queue_canvas_draw(gv);
+      }
+      return;
+    }
+  }
+}
+
 void bt_graphview_set_prefs_cb(BtGraphView *gv, BtGraphPrefsChangedFn on_prefs, gpointer user_data)
 {
   if (gv == NULL)
@@ -2707,7 +3087,8 @@ void bt_graphview_apply_capture_state(BtGraphView *gv, const BtGraphCaptureSpec 
     gv->target_pan_x = gv->pan_x;
     gv->target_pan_y = gv->pan_y;
   } else if (spec->cam == BT_CAP_CAM_3D_ORBIT) {
-    gv->yaw = 0.35;
+    const gchar *yaw_env = g_getenv("BT_CAPTURE_YAW");
+    gv->yaw = (yaw_env != NULL && yaw_env[0] != '\0') ? g_ascii_strtod(yaw_env, NULL) : 0.35;
     gv->pitch = 0.20;
     gv->dist3d = 2.8;
     gv->target_yaw = gv->yaw;

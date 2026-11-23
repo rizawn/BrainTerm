@@ -17,30 +17,39 @@ typedef enum {
   BT_NODE_TAG,         /* small colored dot */
   BT_NODE_SESSION,     /* square (brainstem) */
   BT_NODE_IMPORT_ROOT, /* large square (brainstem) */
-  BT_NODE_GHOST        /* dashed circle (missing wiki-link target) */
+  BT_NODE_GHOST,       /* dashed circle (missing wiki-link target) */
+  BT_NODE_FOLDER       /* first-class directory parent node (ring + glow) */
 } BtNodeKind;
 
 typedef enum {
   BT_EDGE_LINK,
   BT_EDGE_SIMILAR,
   BT_EDGE_TEMPORAL,
-  BT_EDGE_TAGGED
+  BT_EDGE_TAGGED,
+  BT_EDGE_CONTAINS     /* faint folder -> child tether */
 } BtEdgeKind;
 
 typedef struct {
   gchar *id;
   gchar *label;
-  gchar *relpath;   /* non-NULL for notes; target path for valid ghosts */
+  gchar *relpath;   /* non-NULL for notes/folders; target path for valid ghosts */
   gchar *source;    /* "human" | "ai" | "import" | NULL */
   gchar *dom_tag;   /* dominant tag for cortex clustering & hue */
+  gchar *top_folder;/* top-level folder name, or NULL if at vault root */
   BtNodeKind kind;
   gint64 created;
+  gint64 updated;   /* mtime / last modified timestamp (unix sec) */
   guint degree;
+  gint parent_idx;  /* index of parent BT_NODE_FOLDER, or -1 if root */
+  guint child_count;/* descendant note count (for BT_NODE_FOLDER) */
+  gboolean collapsed;     /* TRUE if BT_NODE_FOLDER subtree is collapsed */
+  gboolean hidden_by_user;/* TRUE if hidden via context menu / legend */
   gboolean broken;  /* TRUE if ghost escapes vault (§8.3: dimmed, unclickable) */
-  gboolean visible; /* filter result */
+  gboolean visible; /* filter + collapse result */
 
   gdouble x, y;     /* resting layout coordinates */
   gdouble hue;      /* [0, 360) */
+  guint32 color_rgb;/* 0x00RRGGBB assigned folder/node color (0 = unset) */
   gdouble radius;
   gdouble birth_t;  /* [0..1] growth animation progress */
 } BtGraphNode;
@@ -64,12 +73,20 @@ typedef struct {
   GArray *edges;    /* BtGraphEdge */
   guint note_node_count;
   guint ghost_node_count;
+  guint folder_node_count;
 } BtGraph;
 
 /* Builds the full Brain Graph from SQLite index + optional sessions store.
  * Guarantees note_node_count == number of indexed .md notes (§6.C2). */
 BtGraph *bt_graph_build(const BtVault *vault, BtIndex *index, const BtSessionStore *sessions);
 void bt_graph_free(BtGraph *g);
+
+/* Folder expand/collapse & subtree visibility helpers (Phase 1). */
+void bt_graph_apply_default_collapse(BtGraph *g);
+gboolean bt_graph_is_descendant_of(const BtGraph *g, guint node_idx, guint folder_idx);
+void bt_graph_set_folder_collapsed(BtGraph *g, guint folder_idx, gboolean collapsed);
+void bt_graph_set_folder_hidden(BtGraph *g, guint folder_idx, gboolean hidden);
+void bt_graph_recompute_visibility(BtGraph *g, gboolean show_tags, gboolean show_ghosts);
 
 /* Deterministic brain layout: forced brainstem (bottom), forced spine (center
  * chronological axis), force-relaxed cortex clusters radial from spine. */

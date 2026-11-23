@@ -57,7 +57,8 @@ void bt_graph_select_backend(const BtGraphGlProbe *probe, BtGraphBackendDecision
     out->reason[0] = '\0';
 }
 
-void bt_graph_compute_neighbors(const BtGraph *g, gint focus_idx, guint8 *mask, guint mask_len)
+void bt_graph_compute_neighbors_hops(const BtGraph *g, gint focus_idx, guint max_hops,
+                                     guint8 *mask, guint mask_len)
 {
   if (mask == NULL || mask_len == 0)
     return;
@@ -72,10 +73,16 @@ void bt_graph_compute_neighbors(const BtGraph *g, gint focus_idx, guint8 *mask, 
   if (f < mask_len)
     mask[f] = BT_NBR_FOCUS;
 
-  if (g->edges == NULL)
+  if (g->edges == NULL || max_hops == 0u)
     return;
+
+  gboolean focus_is_folder = (fnd->kind == BT_NODE_FOLDER);
+
+  /* Hop 1 */
   for (guint i = 0; i < g->edges->len; i++) {
     const BtGraphEdge *e = &g_array_index(g->edges, BtGraphEdge, i);
+    if (e->kind == BT_EDGE_CONTAINS && !focus_is_folder)
+      continue;
     if (e->src_idx == f && e->dst_idx != f && e->dst_idx < mask_len &&
         e->dst_idx < g->nodes->len) {
       const BtGraphNode *dn = g_ptr_array_index(g->nodes, e->dst_idx);
@@ -88,6 +95,32 @@ void bt_graph_compute_neighbors(const BtGraph *g, gint focus_idx, guint8 *mask, 
         mask[e->src_idx] = BT_NBR_NEIGHBOR;
     }
   }
+
+  /* Optional Hop 2 */
+  if (max_hops >= 2u) {
+    for (guint i = 0; i < g->edges->len; i++) {
+      const BtGraphEdge *e = &g_array_index(g->edges, BtGraphEdge, i);
+      if (e->kind == BT_EDGE_CONTAINS)
+        continue;
+      if (e->src_idx >= mask_len || e->dst_idx >= mask_len ||
+          e->src_idx >= g->nodes->len || e->dst_idx >= g->nodes->len)
+        continue;
+      if (mask[e->src_idx] == BT_NBR_NEIGHBOR && mask[e->dst_idx] == BT_NBR_NONE) {
+        const BtGraphNode *dn = g_ptr_array_index(g->nodes, e->dst_idx);
+        if (dn->visible)
+          mask[e->dst_idx] = BT_NBR_HOP2;
+      } else if (mask[e->dst_idx] == BT_NBR_NEIGHBOR && mask[e->src_idx] == BT_NBR_NONE) {
+        const BtGraphNode *sn = g_ptr_array_index(g->nodes, e->src_idx);
+        if (sn->visible)
+          mask[e->src_idx] = BT_NBR_HOP2;
+      }
+    }
+  }
+}
+
+void bt_graph_compute_neighbors(const BtGraph *g, gint focus_idx, guint8 *mask, guint mask_len)
+{
+  bt_graph_compute_neighbors_hops(g, focus_idx, 1u, mask, mask_len);
 }
 
 guint bt_graph_hub_degree_threshold(const BtGraph *g)
@@ -137,8 +170,17 @@ gdouble bt_graph_label_alpha(const BtGraphNode *nd, guint8 nbr_state, gboolean i
     return 0.45 + 0.55 * hf;
   if (nbr_state == BT_NBR_NEIGHBOR)
     return 0.35 + 0.55 * hf;
+  if (nbr_state == BT_NBR_HOP2)
+    return 0.20 + 0.40 * hf;
 
   gdouble dim = has_focus ? (1.0 - 0.75 * hf) : 1.0;
+
+  /* Folders are first-class landmarks: label always visible unless strongly dimmed. */
+  if (nd->kind == BT_NODE_FOLDER) {
+    gdouble a = 0.92 * dim;
+    return (has_focus && a < 0.35) ? 0.0 : a;
+  }
+
   if (zoom < 0.45)
     return 0.0;
 
@@ -162,7 +204,7 @@ gdouble bt_graph_label_alpha(const BtGraphNode *nd, guint8 nbr_state, gboolean i
 
 gdouble bt_graph_screen_core_radius(gdouble base_radius, gdouble zoom)
 {
-  return CLAMP(base_radius * pow(MAX(zoom, 0.05), 0.35), 2.2, 14.0);
+  return CLAMP(base_radius * pow(MAX(zoom, 0.05), 0.35), 3.0, 14.0);
 }
 
 void bt_graph_zoom_at_point(gdouble *pan_x, gdouble *pan_y, gdouble *zoom, gdouble new_zoom,
@@ -470,4 +512,117 @@ gboolean bt_graph_project_3d(const float mvp[16], const BtGraphVec3 *pt, gdouble
   if (sy_out) *sy_out = (0.5 - (gdouble)ny * 0.5) * vp_h;
   if (w_out) *w_out = (gdouble)cw;
   return TRUE;
+}
+
+static gboolean pick_cand_better(const BtPickCand *a, const BtPickCand *b)
+{
+  float dz = a->depth - b->depth;
+  if (fabsf(dz) > 1e-4f)
+    return dz < 0.0f; /* smaller depth = closer to camera */
+  if (fabsf(a->dist2 - b->dist2) > 1e-3f)
+    return a->dist2 < b->dist2; /* tie -> closest to cursor center */
+  return a->node_idx < b->node_idx;
+}
+
+guint bt_graph_pick_screen(const BtScreenNode *nodes, guint count, float vp_w, float vp_h,
+                           float mx, float my, BtPickCand *out, guint out_cap)
+{
+  if (nodes == NULL || count == 0u || vp_w <= 1.0f || vp_h <= 1.0f)
+    return 0u;
+
+  /* Uniform spatial hash grid (32px cells, 1024 buckets) for O(1)-ish picking at 5k nodes. */
+  enum { CELL_PX = 32, BUCKETS = 1024 };
+  gint head[BUCKETS];
+  for (int i = 0; i < BUCKETS; i++)
+    head[i] = -1;
+
+  g_autofree gint *next = g_new(gint, count);
+  int qcx = (int)floorf(mx / (float)CELL_PX);
+  int qcy = (int)floorf(my / (float)CELL_PX);
+
+  for (guint i = 0; i < count; i++) {
+    next[i] = -1;
+    if (!nodes[i].visible)
+      continue;
+    /* Coarse reject outside 3x3 neighborhood of cursor before inserting. */
+    int cx = (int)floorf(nodes[i].sx / (float)CELL_PX);
+    int cy = (int)floorf(nodes[i].sy / (float)CELL_PX);
+    if (cx < qcx - 1 || cx > qcx + 1 || cy < qcy - 1 || cy > qcy + 1)
+      continue;
+    guint h = ((guint)(cx * 73856093) ^ (guint)(cy * 19349663)) & (BUCKETS - 1u);
+    next[i] = head[h];
+    head[h] = (gint)i;
+  }
+
+  BtPickCand hits[64];
+  guint hit_n = 0u;
+  guint total_hits = 0u;
+
+  for (int dy = -1; dy <= 1; dy++) {
+    for (int dx = -1; dx <= 1; dx++) {
+      int cx = qcx + dx;
+      int cy = qcy + dy;
+      guint h = ((guint)(cx * 73856093) ^ (guint)(cy * 19349663)) & (BUCKETS - 1u);
+      for (gint idx = head[h]; idx >= 0; idx = next[idx]) {
+        const BtScreenNode *sn = &nodes[idx];
+        int ncx = (int)floorf(sn->sx / (float)CELL_PX);
+        int ncy = (int)floorf(sn->sy / (float)CELL_PX);
+        if (ncx != cx || ncy != cy)
+          continue;
+        float ddx = sn->sx - mx;
+        float ddy = sn->sy - my;
+        float d2 = ddx * ddx + ddy * ddy;
+        float hr = MAX(sn->radius + 4.0f, 8.0f);
+        if (d2 <= hr * hr) {
+          total_hits++;
+          if (hit_n < 64u) {
+            hits[hit_n].node_idx = sn->node_idx;
+            hits[hit_n].depth = sn->depth;
+            hits[hit_n].dist2 = d2;
+            hit_n++;
+          }
+        }
+      }
+    }
+  }
+
+  /* Insertion sort hits by (depth asc, dist2 asc, node_idx asc). */
+  for (guint i = 1; i < hit_n; i++) {
+    BtPickCand tmp = hits[i];
+    guint j = i;
+    while (j > 0 && pick_cand_better(&tmp, &hits[j - 1])) {
+      hits[j] = hits[j - 1];
+      j--;
+    }
+    hits[j] = tmp;
+  }
+
+  if (out != NULL && out_cap > 0u) {
+    guint copy_n = MIN(hit_n, out_cap);
+    for (guint i = 0; i < copy_n; i++)
+      out[i] = hits[i];
+  }
+  return total_hits;
+}
+
+void bt_graph_apply_hover_spread(BtScreenNode *nodes, guint count, float mx, float my,
+                                 float radius_px, float strength)
+{
+  if (nodes == NULL || count == 0u || radius_px <= 1.0f || strength <= 1e-4f)
+    return;
+  float r2 = radius_px * radius_px;
+  for (guint i = 0; i < count; i++) {
+    if (!nodes[i].visible)
+      continue;
+    float dx = nodes[i].sx - mx;
+    float dy = nodes[i].sy - my;
+    float d2 = dx * dx + dy * dy;
+    if (d2 >= r2 || d2 < 1e-4f)
+      continue;
+    float d = sqrtf(d2);
+    float t = 1.0f - (d / radius_px);
+    float push = t * t * (radius_px * 0.42f) * strength;
+    nodes[i].sx += (dx / d) * push;
+    nodes[i].sy += (dy / d) * push;
+  }
 }
