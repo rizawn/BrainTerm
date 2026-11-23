@@ -807,6 +807,143 @@ gboolean bt_index_upsert_note(BtIndex *idx, const BtVault *vault, const gchar *r
   return c.ok;
 }
 
+static gboolean target_may_match_created(const char *raw_target, const char *status_txt,
+                                         const char *new_rel, const char *new_stem)
+{
+  if (status_txt == NULL || strcmp(status_txt, "resolved") != 0)
+    return TRUE;
+  if (raw_target == NULL || raw_target[0] == '\0')
+    return FALSE;
+  /* Strip optional |alias and #anchor or ^block to inspect stem/basename match. */
+  g_autofree gchar *clean = g_strdup(raw_target);
+  char *bar = strchr(clean, '|');
+  if (bar != NULL) *bar = '\0';
+  char *hash = strchr(clean, '#');
+  if (hash != NULL) *hash = '\0';
+  char *caret = strchr(clean, '^');
+  if (caret != NULL) *caret = '\0';
+  gsize clen = strlen(clean);
+  if (clen > 3 && g_ascii_strcasecmp(clean + clen - 3, ".md") == 0)
+    clean[clen - 3] = '\0';
+  else if (clen > 9 && g_ascii_strcasecmp(clean + clen - 9, ".markdown") == 0)
+    clean[clen - 9] = '\0';
+  const char *slash = strrchr(clean, '/');
+  const char *cand_stem = slash ? (slash + 1) : clean;
+  if (new_stem != NULL && g_ascii_strcasecmp(cand_stem, new_stem) == 0)
+    return TRUE;
+  if (new_rel != NULL && g_ascii_strcasecmp(clean, new_rel) == 0)
+    return TRUE;
+  return FALSE;
+}
+
+static void job_upsert_created(sqlite3 *db, gpointer ud)
+{
+  UpsertCtx *c = ud;
+  if (!exec_sql(db, "BEGIN IMMEDIATE;", c->error))
+    return;
+  c->ok = upsert_in_db(db, c->relpath, c->raw, c->raw_len, c->skipped, c->error);
+  if (!c->ok) {
+    sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL);
+    return;
+  }
+
+  BtIndexSnapshot *snap = snapshot_from_db_notes(db);
+  if (snap != NULL) {
+    if (c->vault != NULL)
+      bt_index_snapshot_set_vault(snap, c->vault);
+
+    const char *base_ptr = strrchr(c->relpath, '/');
+    base_ptr = base_ptr ? (base_ptr + 1) : c->relpath;
+    g_autofree gchar *new_stem = g_strdup(base_ptr);
+    gsize nlen = strlen(new_stem);
+    if (nlen > 3 && g_ascii_strcasecmp(new_stem + nlen - 3, ".md") == 0)
+      new_stem[nlen - 3] = '\0';
+    else if (nlen > 9 && g_ascii_strcasecmp(new_stem + nlen - 9, ".markdown") == 0)
+      new_stem[nlen - 9] = '\0';
+
+    typedef struct {
+      sqlite3_int64 rowid;
+      gchar *src_path;
+      gchar *raw_target;
+    } TargetRow;
+    GPtrArray *rows = g_ptr_array_new_with_free_func(g_free);
+
+    sqlite3_stmt *sel = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT id, src_path, raw_target, status FROM link_resolutions;",
+                           -1, &sel, NULL) == SQLITE_OK) {
+      while (sqlite3_step(sel) == SQLITE_ROW) {
+        const char *st_txt = (const char *)sqlite3_column_text(sel, 3);
+        const char *rt = (const char *)sqlite3_column_text(sel, 2);
+        if (!target_may_match_created(rt, st_txt, c->relpath, new_stem))
+          continue;
+        TargetRow *r = g_new0(TargetRow, 1);
+        r->rowid = sqlite3_column_int64(sel, 0);
+        r->src_path = g_strdup((const char *)sqlite3_column_text(sel, 1));
+        r->raw_target = g_strdup(rt);
+        g_ptr_array_add(rows, r);
+      }
+      sqlite3_finalize(sel);
+    }
+
+    sqlite3_stmt *del = NULL;
+    sqlite3_stmt *upd = NULL;
+    sqlite3_prepare_v2(db, "DELETE FROM link_resolutions WHERE id=?1;", -1, &del, NULL);
+    sqlite3_prepare_v2(
+        db, "UPDATE link_resolutions SET resolved_path=?1, status=?2, kind=?3 WHERE id=?4;",
+        -1, &upd, NULL);
+    for (guint i = 0; i < rows->len; i++) {
+      TargetRow *r = g_ptr_array_index(rows, i);
+      BtLinkResolution *res = bt_link_resolve(snap, r->src_path, r->raw_target);
+      if (res == NULL) {
+        if (del != NULL) {
+          sqlite3_reset(del);
+          sqlite3_clear_bindings(del);
+          sqlite3_bind_int64(del, 1, r->rowid);
+          sqlite3_step(del);
+        }
+      } else {
+        if (upd != NULL) {
+          sqlite3_reset(upd);
+          sqlite3_clear_bindings(upd);
+          if (res->path != NULL)
+            sqlite3_bind_text(upd, 1, res->path, -1, SQLITE_TRANSIENT);
+          else
+            sqlite3_bind_null(upd, 1);
+          sqlite3_bind_text(upd, 2, bt_link_status_name(res->status), -1, SQLITE_STATIC);
+          sqlite3_bind_text(upd, 3, bt_link_kind_name(res->kind), -1, SQLITE_STATIC);
+          sqlite3_bind_int64(upd, 4, r->rowid);
+          sqlite3_step(upd);
+        }
+        bt_link_resolution_free(res);
+      }
+      g_free(r->src_path);
+      g_free(r->raw_target);
+    }
+    if (upd != NULL) sqlite3_finalize(upd);
+    if (del != NULL) sqlite3_finalize(del);
+    g_ptr_array_unref(rows);
+    bt_index_snapshot_free(snap);
+  }
+  c->ok = exec_sql(db, "COMMIT;", c->error);
+}
+
+gboolean bt_index_upsert_after_create(BtIndex *idx, const BtVault *vault, const gchar *relpath,
+                                      GError **error)
+{
+  g_return_val_if_fail(idx != NULL && vault != NULL && relpath != NULL, FALSE);
+  gchar *raw = NULL;
+  gsize len = 0;
+  if (!vault_read(vault, relpath, &raw, &len, error))
+    return FALSE;
+  UpsertCtx c = {
+    .vault = vault, .relpath = relpath, .raw = raw, .raw_len = len,
+    .skipped = NULL, .error = error, .ok = FALSE,
+  };
+  run_on_writer(idx, job_upsert_created, &c);
+  g_free(raw);
+  return c.ok;
+}
+
 typedef struct {
   const gchar *relpath;
   GError **error;

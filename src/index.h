@@ -84,6 +84,11 @@ guint bt_index_note_count(BtIndex *idx);
 gboolean bt_index_upsert_note(BtIndex *idx, const BtVault *vault, const gchar *relpath,
                               gboolean *skipped_unchanged, GError **error);
 
+/* Fast post-create upsert: indexes newly created relpath, builds snapshot from DB,
+ * and re-resolves unresolved/ambiguous or matching link_resolutions rows. */
+gboolean bt_index_upsert_after_create(BtIndex *idx, const BtVault *vault, const gchar *relpath,
+                                      GError **error);
+
 gboolean bt_index_delete_path(BtIndex *idx, const gchar *relpath, GError **error);
 
 /* P5 full rebuild from L0 in deterministic path order. */

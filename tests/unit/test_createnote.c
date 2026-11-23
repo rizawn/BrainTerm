@@ -18,6 +18,8 @@
 
 #include "createnote.h"
 #include "frontmatter.h"
+#include "graph.h"
+#include "index.h"
 #include "linkresolve.h"
 #include "testutil.h"
 #include "vault.h"
@@ -778,6 +780,177 @@ static void test_cw01_to_cw14_commit(void **state)
   printf("BT_TEST_CW CW01..CW14 passed\n");
 }
 
+static void hash_vault_files_rec(const char *root, const char *rel, GHashTable *map)
+{
+  g_autofree gchar *abs = (rel && rel[0]) ? g_build_filename(root, rel, NULL) : g_strdup(root);
+  g_autoptr(GDir) dir = g_dir_open(abs, 0, NULL);
+  if (dir == NULL)
+    return;
+  const gchar *nm;
+  while ((nm = g_dir_read_name(dir)) != NULL) {
+    if (strcmp(nm, ".bt") == 0)
+      continue;
+    g_autofree gchar *child_rel = (rel && rel[0]) ? g_strdup_printf("%s/%s", rel, nm) : g_strdup(nm);
+    g_autofree gchar *full = g_build_filename(abs, nm, NULL);
+    if (g_file_test(full, G_FILE_TEST_IS_DIR)) {
+      hash_vault_files_rec(root, child_rel, map);
+    } else if (g_file_test(full, G_FILE_TEST_IS_REGULAR)) {
+      g_autofree gchar *buf = NULL;
+      gsize len = 0;
+      if (g_file_get_contents(full, &buf, &len, NULL)) {
+        gchar *sha = g_compute_checksum_for_string(G_CHECKSUM_SHA256, buf, (gssize)len);
+        g_hash_table_insert(map, g_strdup(child_rel), sha);
+      }
+    }
+  }
+}
+
+static void test_cx_index_integration(void **state)
+{
+  (void)state;
+  g_autofree gchar *parent = g_dir_make_tmp("bt-l3-cx-XXXXXX", NULL);
+  g_autofree gchar *vdir = g_build_filename(parent, "vault", NULL);
+  g_autofree gchar *out_dir = g_build_filename(parent, "outside", NULL);
+  g_mkdir_with_parents(vdir, 0755);
+  g_mkdir_with_parents(out_dir, 0755);
+
+  bt_test_put(vdir, "welcome.md",
+              "---\nid: bt-20261123-000001\ntitle: \"Welcome\"\ncreated: 2026-11-23T00:00:00Z\nsource: human\n---\n"
+              "Link to [[future-note]] and [[projects/conpty]].\n");
+  bt_test_put(vdir, "projects/conpty.md",
+              "---\nid: bt-20261123-000002\ntitle: \"ConPTY\"\ncreated: 2026-11-23T00:00:00Z\nsource: human\n---\n"
+              "# ConPTY\n");
+  bt_test_put(out_dir, "escaped.md", "# Outside Secret\n");
+
+  /* CX06 baseline hash map before create. */
+  GHashTable *before_hashes = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+  hash_vault_files_rec(vdir, "", before_hashes);
+
+  BtVault *v = vault_open(vdir, NULL, NULL);
+  assert_non_null(v);
+  BtIndex *idx = bt_index_open(vdir, NULL, NULL);
+  assert_non_null(idx);
+  assert_true(bt_index_rebuild(idx, v, NULL));
+  BtIndexSnapshot *snap = bt_index_snapshot_from_vault(v);
+
+  /* Verify future-note is initially UNRESOLVED in index and a ghost in graph. */
+  GPtrArray *lr0 = bt_index_list_link_resolutions(idx, "bt-20261123-000001", NULL);
+  assert_non_null(lr0);
+  gboolean found_unres = FALSE;
+  for (guint i = 0; i < lr0->len; i++) {
+    const BtLinkResRow *r = g_ptr_array_index(lr0, i);
+    if (g_strcmp0(r->raw_target, "future-note") == 0) {
+      assert_string_equal(r->status, "unresolved");
+      assert_null(r->resolved_path);
+      found_unres = TRUE;
+    }
+  }
+  assert_true(found_unres);
+  g_ptr_array_unref(lr0);
+
+  BtGraph *g_before = bt_graph_build(v, idx, NULL);
+  assert_int_equal(g_before->note_node_count, 2);
+  assert_int_equal(g_before->ghost_node_count, 1);
+  bt_graph_free(g_before);
+
+  /* CX01: Create future-note and run bt_index_upsert_after_create(). */
+  BtCreatePlan *pl = bt_createnote_plan(v, snap, "welcome.md", "future-note");
+  assert_int_equal(pl->result, BT_CREATE_PLAN_OK);
+  g_autofree gchar *c_rel = NULL;
+  assert_int_equal(bt_createnote_commit(v, pl, &c_rel, NULL, NULL, NULL), BT_CREATE_COMMIT_OK);
+  bt_createnote_plan_free(pl);
+  vault_rescan(v, NULL, NULL);
+  assert_true(bt_index_upsert_after_create(idx, v, c_rel, NULL));
+
+  GPtrArray *lr1 = bt_index_list_link_resolutions(idx, "bt-20261123-000001", NULL);
+  gboolean found_res = FALSE;
+  for (guint i = 0; i < lr1->len; i++) {
+    const BtLinkResRow *r = g_ptr_array_index(lr1, i);
+    if (g_strcmp0(r->raw_target, "future-note") == 0) {
+      assert_string_equal(r->status, "resolved");
+      assert_string_equal(r->resolved_path, "future-note.md");
+      found_res = TRUE;
+    }
+  }
+  assert_true(found_res);
+  g_ptr_array_unref(lr1);
+
+  /* CX02: Graph ghost drops by 1 and new note node appears. */
+  BtGraph *g_after = bt_graph_build(v, idx, NULL);
+  assert_int_equal(g_after->note_node_count, 3);
+  assert_int_equal(g_after->ghost_node_count, 0);
+  bt_graph_free(g_after);
+
+  /* CX04: Watcher event upsert after create is idempotent, no duplicate rows. */
+  gboolean skipped = FALSE;
+  assert_true(bt_index_upsert_note(idx, v, "future-note.md", &skipped, NULL));
+  assert_true(skipped);
+  GPtrArray *all_notes = bt_index_list_notes(idx, NULL);
+  assert_int_equal(all_notes->len, 3);
+  g_ptr_array_unref(all_notes);
+
+  /* CX06: Full hash diff shows exactly 1 added file and 0 modified existing files. */
+  GHashTable *after_hashes = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+  hash_vault_files_rec(vdir, "", after_hashes);
+  assert_int_equal(g_hash_table_size(after_hashes), g_hash_table_size(before_hashes) + 1);
+  GHashTableIter it;
+  gpointer k, val;
+  g_hash_table_iter_init(&it, before_hashes);
+  while (g_hash_table_iter_next(&it, &k, &val)) {
+    const char *after_v = g_hash_table_lookup(after_hashes, k);
+    assert_non_null(after_v);
+    assert_string_equal(after_v, (const char *)val);
+  }
+  assert_true(g_hash_table_contains(after_hashes, "future-note.md"));
+  g_hash_table_destroy(after_hashes);
+  g_hash_table_destroy(before_hashes);
+
+  /* Section 0.5 Step-5 override: symlink/junction created after snapshot build is caught live. */
+  {
+    g_autofree gchar *late_junc = g_build_filename(vdir, "late_esc", NULL);
+    if (create_outside_link(late_junc, out_dir)) {
+      BtLinkResolution *live_r = bt_link_resolve(snap, "welcome.md", "late_esc/escaped");
+      assert_non_null(live_r);
+      assert_int_equal(live_r->status, BT_LINK_BLOCKED);
+      assert_int_equal(live_r->block_reason, BT_LINK_BLOCK_ESCAPES_VAULT);
+      bt_link_resolution_free(live_r);
+
+      BtCreatePlan *p_esc = bt_createnote_plan(v, snap, "welcome.md", "late_esc/new");
+      assert_int_equal(p_esc->result, BT_CREATE_PLAN_OUTSIDE_VAULT);
+      bt_createnote_plan_free(p_esc);
+      g_rmdir(late_junc);
+    }
+  }
+
+  /* CX05: Create inside a folder with 500 notes + index upsert under 500 ms. */
+  for (guint i = 0; i < 500u; i++) {
+    g_autofree gchar *rel5 = g_strdup_printf("big500/n_%03u.md", i);
+    bt_test_put(vdir, rel5, "---\nid: bt-500\ntitle: \"N\"\ncreated: 2026-11-23T00:00:00Z\nsource: human\n---\nbody\n");
+  }
+  vault_rescan(v, NULL, NULL);
+  assert_true(bt_index_rebuild(idx, v, NULL));
+  bt_index_snapshot_free(snap);
+  snap = bt_index_snapshot_from_vault(v);
+
+  BtCreatePlan *p5 = bt_createnote_plan(v, snap, "welcome.md", "big500/n_new");
+  assert_int_equal(p5->result, BT_CREATE_PLAN_OK);
+  gint64 t500 = g_get_monotonic_time();
+  g_autofree gchar *rel_new500 = NULL;
+  assert_int_equal(bt_createnote_commit(v, p5, &rel_new500, NULL, NULL, NULL), BT_CREATE_COMMIT_OK);
+  assert_true(bt_index_upsert_after_create(idx, v, rel_new500, NULL));
+  double cx05_ms = (double)(g_get_monotonic_time() - t500) / 1000.0;
+  printf("BT_TEST_CX05 500_note_folder_commit_and_reresolve_ms=%.3f\n", cx05_ms);
+  assert_true(cx05_ms < 500.0);
+  bt_createnote_plan_free(p5);
+
+  bt_index_snapshot_free(snap);
+  bt_index_close(idx);
+  vault_free(v);
+  if (g_getenv("BT_KEEP_TEST_VAULTS") == NULL)
+    bt_test_rm_rf(parent);
+  printf("BT_TEST_CX index integration CX01,CX02,CX04,CX05,CX06 passed\n");
+}
+
 int main(int argc, char **argv)
 {
   setlocale(LC_NUMERIC, "C");
@@ -796,6 +969,7 @@ int main(int argc, char **argv)
     cmocka_unit_test(test_cn_name_validation_helpers),
     cmocka_unit_test(test_ct_template_rendering),
     cmocka_unit_test(test_cw01_to_cw14_commit),
+    cmocka_unit_test(test_cx_index_integration),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }
