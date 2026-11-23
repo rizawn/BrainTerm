@@ -224,9 +224,9 @@ test('math_tok', t_math_tok, suite: 'unit')
 
 t_math_highlight = executable(
   'test_math_highlight',
-  ['unit/test_math_highlight.c', '../src/ui/editorpane.c', '../src/ui/themeload.c', bt_resources],
+  ['unit/test_math_highlight.c', '../src/ui/editorpane.c', '../src/ui/mathrender.c', '../src/ui/themeload.c', bt_resources],
   include_directories: [test_inc, include_directories('../src')],
-  dependencies: [bt_core_dep, bt_math_dep, gtk4_dep, gtksource_dep, cmocka_dep],
+  dependencies: [bt_core_dep, bt_math_dep, gtk4_dep, gtksource_dep, freetype_dep, cairo_dep, cmocka_dep, m_dep],
 )
 test(
   'math_highlight',
@@ -247,6 +247,7 @@ t_editor_links = executable(
     '../src/ui/graphcapture.c',
     '../src/ui/filetree.c',
     '../src/ui/editorpane.c',
+    '../src/ui/mathrender.c',
     '../src/ui/createpopover.c',
     '../src/ui/chooserpopover.c',
     '../src/ui/quickopen.c',
@@ -258,7 +259,7 @@ t_editor_links = executable(
     bt_build_stamp_h,
   ],
   include_directories: [test_inc, include_directories('../src')],
-  dependencies: [bt_core_dep, bt_math_dep, gtk4_dep, adw_dep, epoxy_dep, gtksource_dep, cmocka_dep, m_dep],
+  dependencies: [bt_core_dep, bt_math_dep, gtk4_dep, adw_dep, epoxy_dep, gtksource_dep, freetype_dep, cairo_dep, cmocka_dep, m_dep],
 )
 test(
   'editor_links',
@@ -340,6 +341,7 @@ t_fix_ui = executable(
     '../src/ui/graphcapture.c',
     '../src/ui/filetree.c',
     '../src/ui/editorpane.c',
+    '../src/ui/mathrender.c',
     '../src/ui/createpopover.c',
     '../src/ui/chooserpopover.c',
     '../src/ui/quickopen.c',
@@ -351,7 +353,7 @@ t_fix_ui = executable(
     bt_build_stamp_h,
   ],
   include_directories: [test_inc, include_directories('../src')],
-  dependencies: [bt_core_dep, gtk4_dep, adw_dep, epoxy_dep, gtksource_dep, cmocka_dep, m_dep],
+  dependencies: [bt_core_dep, gtk4_dep, adw_dep, epoxy_dep, gtksource_dep, freetype_dep, cairo_dep, cmocka_dep, m_dep],
 )
 test(
   'fix_ui',

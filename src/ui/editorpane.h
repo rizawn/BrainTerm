@@ -79,6 +79,11 @@ gboolean bt_editorpane_range_has_emphasis_tag(const BtEditorPane *pane, gsize by
 gboolean bt_editorpane_offset_has_tag_name(const BtEditorPane *pane, gsize byte_offset, const gchar *tag_name);
 const gchar *bt_editorpane_language_id(const BtEditorPane *pane);
 
+/* Math auto-compile inspection & control (M5). */
+const GArray *bt_editorpane_math_spans(const BtEditorPane *pane);
+gboolean bt_editorpane_is_math_span_compiled(const BtEditorPane *pane, guint span_index);
+guint bt_editorpane_compiled_math_count(const BtEditorPane *pane);
+
 G_END_DECLS
 
 #endif

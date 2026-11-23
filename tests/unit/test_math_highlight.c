@@ -15,7 +15,11 @@
 #include <string.h>
 
 #include "math/mathtok.h"
+#include "math/mathparse.h"
+#include "math/mathfont.h"
+#include "math/mathlayout.h"
 #include "ui/editorpane.h"
+#include "ui/mathrender.h"
 
 static void test_bootstrap_zero_emphasis_in_math(void **state)
 {
@@ -144,6 +148,84 @@ static void test_multiline_display_math_and_lang_order(void **state)
   bt_editorpane_free(pane);
 }
 
+static void test_m2_m3_m4_m5_auto_compile_latex_in_editor(void **state)
+{
+  (void)state;
+  if (!gtk_init_check()) {
+    skip();
+    return;
+  }
+
+  /* 1. Verify OpenType MATH font & layout engine on the exact screenshot formulas */
+  BtMathFont *mf = bt_math_font_get_default();
+  assert_non_null(mf);
+  assert_true(bt_math_font_get_upem(mf) > 0);
+
+  const char *f_mean = "\\bar{x} = \\frac{1}{n}\\sum_{i=1}^n x_i";
+  BtMathLayout *lay_mean = bt_math_layout_from_latex(mf, f_mean, strlen(f_mean), BT_MATH_INLINE);
+  assert_non_null(lay_mean);
+  assert_true(lay_mean->width_em > 2.5);
+  assert_true(lay_mean->ascent_em > 0.6);
+  assert_true(lay_mean->descent_em > 0.2);
+  assert_true(lay_mean->ops->len >= 10);
+  bt_math_layout_free(lay_mean);
+
+  const char *f_var = "s^2 = \\frac{1}{n-1}\\sum_{i=1}^n (x_i - \\bar{x})^2";
+  BtMathLayout *lay_var = bt_math_layout_from_latex(mf, f_var, strlen(f_var), BT_MATH_INLINE);
+  assert_non_null(lay_var);
+  assert_true(lay_var->width_em > 4.0);
+  assert_true(lay_var->ops->len >= 18);
+  bt_math_layout_free(lay_var);
+
+  /* 2. Verify Cairo-FT renderer produces non-empty ARGB32 surface */
+  BtMathRenderer *mr = bt_math_renderer_get_default();
+  assert_non_null(mr);
+  const BtMathRendered *rend = bt_math_renderer_get_cached(mr, f_mean, strlen(f_mean),
+                                                           BT_MATH_INLINE, 16.0, 1);
+  assert_non_null(rend);
+  assert_non_null(rend->surface);
+  assert_int_equal(rend->error_count, 0);
+  assert_true(rend->width_px > 40.0);
+  assert_true(rend->height_px > 18.0);
+
+  /* 3. Verify editor auto-compiles formulas on load, reveals raw LaTeX when caret enters,
+   *    and auto-compiles when pressing Enter inside an inline $...$ formula! */
+  BtEditorPane *pane = bt_editorpane_new(NULL, NULL, NULL, NULL);
+  const char *doc =
+      "### Measures of Central Tendency\n\n"
+      "| Measure | Formula | Use Case |\n"
+      "|---|---|---|\n"
+      "| **Mean** | $\\bar{x} = \\frac{1}{n}\\sum_{i=1}^n x_i$ | Symmetric, no outliers |\n"
+      "| **Variance** | $s^2 = \\frac{1}{n-1}\\sum_{i=1}^n (x_i - \\bar{x})^2$ |\n";
+
+  bt_editorpane_load(pane, "03-numerical-description.md", doc, strlen(doc));
+
+  const GArray *mspans = bt_editorpane_math_spans(pane);
+  assert_non_null(mspans);
+  assert_int_equal(mspans->len, 2);
+
+  /* On initial load (caret at 0, outside both spans), both formulas are auto-compiled! */
+  assert_int_equal(bt_editorpane_compiled_math_count(pane), 2);
+  assert_true(bt_editorpane_is_math_span_compiled(pane, 0));
+  assert_true(bt_editorpane_is_math_span_compiled(pane, 1));
+
+  /* Move caret inside the first formula -> span 0 reveals raw LaTeX for editing, span 1 stays compiled */
+  const BtMathSpan *sp0 = &g_array_index(mspans, BtMathSpan, 0);
+  bt_editorpane_set_caret_byte_offset(pane, sp0->src_start + 3);
+  assert_false(bt_editorpane_is_math_span_compiled(pane, 0));
+  assert_true(bt_editorpane_is_math_span_compiled(pane, 1));
+
+  /* Press plain Enter while inside inline formula -> caret exits past closing $ and formula auto-compiles! */
+  gboolean consumed = bt_editorpane_handle_key_event(pane, GDK_KEY_Return, 0);
+  assert_true(consumed);
+  assert_int_equal((int)bt_editorpane_caret_byte_offset(pane), (int)sp0->end);
+  assert_true(bt_editorpane_is_math_span_compiled(pane, 0));
+  assert_true(bt_editorpane_is_math_span_compiled(pane, 1));
+  assert_int_equal(bt_editorpane_compiled_math_count(pane), 2);
+
+  bt_editorpane_free(pane);
+}
+
 static guint gsv_warnings = 0;
 
 static void on_gsv_log(const gchar *domain, GLogLevelFlags level, const gchar *msg, gpointer ud)
@@ -162,6 +244,7 @@ int main(void)
     cmocka_unit_test(test_bootstrap_zero_emphasis_in_math),
     cmocka_unit_test(test_emphasis_outside_math_and_underscore_protection),
     cmocka_unit_test(test_multiline_display_math_and_lang_order),
+    cmocka_unit_test(test_m2_m3_m4_m5_auto_compile_latex_in_editor),
   };
   int rc = cmocka_run_group_tests(tests, NULL, NULL);
   if (gsv_warnings > 0)

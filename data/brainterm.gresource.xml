@@ -2,6 +2,8 @@
 <gresources>
   <gresource prefix="/local/brainterm">
     <file>theme.css</file>
+    <file>fonts/STIXTwoMath-Regular.otf</file>
+    <file>fonts/LICENSE-STIXTwoMath.txt</file>
     <file>language-specs/bt-markdown.lang</file>
     <file>styles/bt-ink-dark.xml</file>
     <file>styles/bt-ink-light.xml</file>

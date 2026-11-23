@@ -8,6 +8,7 @@
 #include "math/mathtok.h"
 #include "noteutil.h"
 #include "theme.h"
+#include "ui/mathrender.h"
 #include "ui/themeload.h"
 
 #include <gtksourceview/gtksource.h>
@@ -56,8 +57,15 @@ struct BtEditorPane {
   GtkTextTag *t_ai_heading;
   GtkTextTag *t_ai_body;
   GtkTextTag *t_math;
+  GtkTextTag *t_math_compiled;
+  GtkTextTag *t_math_tall;
+  GtkTextTag *t_math_display;
   GtkTextTag *t_anchor_flash;
   guint anchor_flash_id;
+
+  /* Live auto-compiled math spans (M5, sorted by byte offset). */
+  GArray *math_spans;
+  gssize active_math_span; /* index in math_spans when caret is inside, else -1 */
 
   BtEditorSaveFn on_save;
   BtEditorLinkFn on_link;
@@ -222,8 +230,17 @@ static void init_markdown_tags(BtEditorPane *p)
       "foreground", "#C4BFFA", "paragraph-background", "#181724", NULL);
   p->t_math = gtk_text_buffer_create_tag(b, "bt-math",
       "family", mono, "foreground", "#E6E8EC", "style", PANGO_STYLE_NORMAL, NULL);
+  GdkRGBA trans = { 0.082f, 0.090f, 0.110f, 0.0f };
+  p->t_math_compiled = gtk_text_buffer_create_tag(b, "bt-math-compiled",
+      "foreground-rgba", &trans, NULL);
+  p->t_math_tall = gtk_text_buffer_create_tag(b, "bt-math-tall",
+      "pixels-above-lines", 10, "pixels-below-lines", 10, NULL);
+  p->t_math_display = gtk_text_buffer_create_tag(b, "bt-math-display",
+      "pixels-above-lines", 14, "pixels-below-lines", 14, NULL);
   p->t_anchor_flash = gtk_text_buffer_create_tag(b, "bt-anchor-flash",
       "paragraph-background", "#2A2447", NULL);
+  gtk_text_tag_set_priority(p->t_math_compiled,
+                            gtk_text_tag_table_get_size(gtk_text_buffer_get_tag_table(b)) - 1);
   gtk_text_tag_set_priority(p->t_link_hover,
                             gtk_text_tag_table_get_size(gtk_text_buffer_get_tag_table(b)) - 1);
 }
@@ -933,6 +950,125 @@ static gsize iter_byte_in_buffer(GtkTextBuffer *buf, const GtkTextIter *it)
   return strlen(prefix);
 }
 
+/* --------------------- live auto-compiled LaTeX math spans (M5) ---------- */
+
+static gboolean formula_is_tall(const char *src, gsize len, BtMathMode mode)
+{
+  if (mode == BT_MATH_DISPLAY)
+    return TRUE;
+  if (src == NULL || len == 0)
+    return FALSE;
+  g_autofree char *s = g_strndup(src, len);
+  return strstr(s, "\\frac") != NULL || strstr(s, "\\dfrac") != NULL ||
+         strstr(s, "\\cfrac") != NULL || strstr(s, "\\binom") != NULL ||
+         strstr(s, "\\sum") != NULL || strstr(s, "\\prod") != NULL ||
+         strstr(s, "\\int") != NULL || strstr(s, "\\oint") != NULL ||
+         strstr(s, "\\sqrt") != NULL || strstr(s, "\\left") != NULL ||
+         strstr(s, "\\begin") != NULL || strstr(s, "\\lim") != NULL ||
+         strstr(s, "\\overbrace") != NULL || strstr(s, "\\underbrace") != NULL;
+}
+
+static void refresh_math_compiled_tags(BtEditorPane *p)
+{
+  if (p == NULL || p->buffer == NULL)
+    return;
+  GtkTextBuffer *buf = GTK_TEXT_BUFFER(p->buffer);
+  GtkTextIter bstart, bend;
+  gtk_text_buffer_get_bounds(buf, &bstart, &bend);
+  gtk_text_buffer_remove_tag(buf, p->t_math_compiled, &bstart, &bend);
+  gtk_text_buffer_remove_tag(buf, p->t_math_tall, &bstart, &bend);
+  gtk_text_buffer_remove_tag(buf, p->t_math_display, &bstart, &bend);
+
+  if (p->math_spans == NULL || p->math_spans->len == 0) {
+    p->active_math_span = -1;
+    if (p->decor_area != NULL)
+      gtk_widget_queue_draw(p->decor_area);
+    return;
+  }
+
+  g_autofree gchar *txt = gtk_text_buffer_get_text(buf, &bstart, &bend, TRUE);
+  gsize total = strlen(txt);
+
+  GtkTextIter caret_it;
+  gtk_text_buffer_get_iter_at_mark(buf, &caret_it, gtk_text_buffer_get_insert(buf));
+  gsize caret_byte = iter_byte_in_buffer(buf, &caret_it);
+  gboolean has_sel = gtk_text_buffer_get_has_selection(buf);
+  gsize sel_a = caret_byte, sel_b = caret_byte;
+  if (has_sel) {
+    GtkTextIter s0, s1;
+    gtk_text_buffer_get_selection_bounds(buf, &s0, &s1);
+    sel_a = iter_byte_in_buffer(buf, &s0);
+    sel_b = iter_byte_in_buffer(buf, &s1);
+    if (sel_a > sel_b) {
+      gsize tmp = sel_a;
+      sel_a = sel_b;
+      sel_b = tmp;
+    }
+  }
+
+  p->active_math_span = -1;
+
+  for (guint i = 0; i < p->math_spans->len; i++) {
+    const BtMathSpan *sp = &g_array_index(p->math_spans, BtMathSpan, i);
+    if (sp->end > total || sp->src_end <= sp->src_start)
+      continue;
+
+    /* A math span is in active source-editing mode only when the caret is
+     * strictly inside (sp->start < caret <= sp->end - 1) or a selection overlaps it.
+     * When the caret is at offset 0 (on initial note load) or after sp->end,
+     * the formula auto-compiles and renders as mathematical notation! */
+    gboolean caret_inside = (!p->loading) &&
+                            ((caret_byte > sp->start && caret_byte < sp->end) ||
+                             (has_sel && sel_a < sp->end && sel_b > sp->start));
+    if (caret_inside) {
+      p->active_math_span = (gssize)i;
+      continue;
+    }
+
+    gint cs = (gint)g_utf8_strlen(txt, (gssize)sp->start);
+    gint ce = cs + (gint)g_utf8_strlen(txt + sp->start, (gssize)(sp->end - sp->start));
+    GtkTextIter s_it, e_it;
+    gtk_text_buffer_get_iter_at_offset(buf, &s_it, cs);
+    gtk_text_buffer_get_iter_at_offset(buf, &e_it, ce);
+    gtk_text_buffer_apply_tag(buf, p->t_math_compiled, &s_it, &e_it);
+
+    if (sp->mode == BT_MATH_DISPLAY) {
+      gtk_text_buffer_apply_tag(buf, p->t_math_display, &s_it, &e_it);
+    } else if (formula_is_tall(txt + sp->src_start, sp->src_end - sp->src_start, sp->mode)) {
+      gtk_text_buffer_apply_tag(buf, p->t_math_tall, &s_it, &e_it);
+    }
+  }
+
+  if (p->decor_area != NULL)
+    gtk_widget_queue_draw(p->decor_area);
+}
+
+static void rescan_math_spans(BtEditorPane *p)
+{
+  if (p == NULL || p->buffer == NULL)
+    return;
+  GtkTextBuffer *buf = GTK_TEXT_BUFFER(p->buffer);
+  GtkTextIter bstart, bend;
+  gtk_text_buffer_get_bounds(buf, &bstart, &bend);
+  g_autofree gchar *txt = gtk_text_buffer_get_text(buf, &bstart, &bend, TRUE);
+  g_clear_pointer(&p->math_spans, g_array_unref);
+  p->math_spans = bt_math_scan(txt, strlen(txt), NULL);
+  refresh_math_compiled_tags(p);
+}
+
+static void on_cursor_mark_set(GtkTextBuffer *buf, const GtkTextIter *loc,
+                               GtkTextMark *mark, gpointer ud)
+{
+  (void)loc;
+  BtEditorPane *p = ud;
+  if (p == NULL || p->loading || p->buffer == NULL)
+    return;
+  if (mark != gtk_text_buffer_get_insert(buf) &&
+      mark != gtk_text_buffer_get_selection_bound(buf))
+    return;
+  refresh_math_compiled_tags(p);
+}
+
 static void on_insert_text_after(GtkTextBuffer *buf, GtkTextIter *loc, gchar *text, gint len,
                                  gpointer ud)
 {
@@ -966,6 +1102,7 @@ static void on_insert_text_after(GtkTextBuffer *buf, GtkTextIter *loc, gchar *te
     r1 = G_MAXSIZE;
   }
   apply_link_tags_range(p, r0, r1);
+  rescan_math_spans(p);
 }
 
 static void on_delete_range_before(GtkTextBuffer *buf, GtkTextIter *start, GtkTextIter *end,
@@ -1008,6 +1145,7 @@ static void on_delete_range_after(GtkTextBuffer *buf, GtkTextIter *start, GtkTex
   p->pending_del_bytes = 0;
   p->pending_del_nl = 0;
   p->pending_del_structural = FALSE;
+  rescan_math_spans(p);
 }
 
 /* --------------------- centered ~72ch column & visual gutter overlay -- */
@@ -1183,6 +1321,188 @@ static void on_decor_draw(GtkDrawingArea *area, cairo_t *cr, int w, int h, gpoin
       cairo_set_source_rgba(cr, br, bg, bb, 0.95);
       cairo_rectangle(cr, bar_x + 2.0, (gdouble)wy + 2.0, 2.0, MAX((gdouble)bh - 4.0, 4.0));
       cairo_fill(cr);
+    }
+  }
+
+  /* ---- Live auto-compiled LaTeX math overlay & live editing preview (M5) ---- */
+  if (p->math_spans != NULL && p->math_spans->len > 0) {
+    BtMathRenderer *mr = bt_math_renderer_get_default();
+    if (mr != NULL) {
+      GtkTextIter bstart, bend;
+      gtk_text_buffer_get_bounds(buf, &bstart, &bend);
+      g_autofree gchar *txt = gtk_text_buffer_get_text(buf, &bstart, &bend, TRUE);
+      gsize total = strlen(txt);
+      int scale_factor = gtk_widget_get_scale_factor(GTK_WIDGET(p->view));
+      if (scale_factor < 1)
+        scale_factor = 1;
+
+      for (guint i = 0; i < p->math_spans->len; i++) {
+        const BtMathSpan *sp = &g_array_index(p->math_spans, BtMathSpan, i);
+        if ((int)sp->line_last < l0 + 1 || (int)sp->line_first > l1 + 1)
+          continue;
+        if (sp->end > total || sp->src_end <= sp->src_start)
+          continue;
+        if ((gssize)i == p->active_math_span)
+          continue; /* Caret is inside this span -> raw LaTeX shown, floating preview drawn below */
+
+        const char *latex = txt + sp->src_start;
+        gsize latex_len = sp->src_end - sp->src_start;
+        double font_px = (sp->mode == BT_MATH_DISPLAY) ? 17.5 : 15.5;
+        const BtMathRendered *rend = bt_math_renderer_get_cached(mr, latex, latex_len,
+                                                                 sp->mode, font_px, scale_factor);
+        if (rend == NULL || rend->surface == NULL)
+          continue;
+
+        gint cs = (gint)g_utf8_strlen(txt, (gssize)sp->start);
+        gint ce = cs + (gint)g_utf8_strlen(txt + sp->start, (gssize)(sp->end - sp->start));
+        GtkTextIter s_it, e_it;
+        gtk_text_buffer_get_iter_at_offset(buf, &s_it, cs);
+        gtk_text_buffer_get_iter_at_offset(buf, &e_it, ce);
+
+        gboolean in_ai = gtk_text_iter_has_tag(&s_it, p->t_ai_body) ||
+                         gtk_text_iter_has_tag(&s_it, p->t_ai_heading);
+
+        /* Erase underlying raw LaTeX span characters (line-by-line if wrapped/multi-line) */
+        gint s_ln = gtk_text_iter_get_line(&s_it);
+        gint e_ln = gtk_text_iter_get_line(&e_it);
+        gdouble first_wx = 0.0, first_wy = 0.0, first_h = 20.0, span_box_w = 0.0;
+        gdouble block_top_wy = 1e9, block_bot_wy = -1e9;
+
+        for (gint mln = s_ln; mln <= e_ln; mln++) {
+          GtkTextIter ls_it, le_it;
+          if (mln == s_ln) {
+            ls_it = s_it;
+          } else {
+            gtk_text_buffer_get_iter_at_line(buf, &ls_it, mln);
+          }
+          if (mln == e_ln) {
+            le_it = e_it;
+          } else {
+            gtk_text_buffer_get_iter_at_line(buf, &le_it, mln);
+            if (!gtk_text_iter_ends_line(&le_it))
+              gtk_text_iter_forward_to_line_end(&le_it);
+          }
+
+          GdkRectangle r0 = {0}, r1 = {0};
+          gtk_text_view_get_iter_location(GTK_TEXT_VIEW(p->view), &ls_it, &r0);
+          gtk_text_view_get_iter_location(GTK_TEXT_VIEW(p->view), &le_it, &r1);
+          gint by = 0, bh = 0;
+          gtk_text_view_get_line_yrange(GTK_TEXT_VIEW(p->view), &ls_it, &by, &bh);
+          gint wx0 = 0, wy0 = 0, wx1 = 0, wy1 = 0, lwy = 0;
+          gtk_text_view_buffer_to_window_coords(GTK_TEXT_VIEW(p->view), GTK_TEXT_WINDOW_WIDGET,
+                                                r0.x, r0.y, &wx0, &wy0);
+          gtk_text_view_buffer_to_window_coords(GTK_TEXT_VIEW(p->view), GTK_TEXT_WINDOW_WIDGET,
+                                                r1.x + r1.width, r1.y, &wx1, &wy1);
+          gtk_text_view_buffer_to_window_coords(GTK_TEXT_VIEW(p->view), GTK_TEXT_WINDOW_WIDGET,
+                                                0, by, NULL, &lwy);
+
+          if (mln == s_ln) {
+            first_wx = (gdouble)wx0;
+            first_wy = (gdouble)lwy;
+            first_h = (gdouble)MAX(bh, r0.height);
+            span_box_w = (gdouble)MAX(wx1 - wx0, 12);
+          }
+          block_top_wy = MIN(block_top_wy, (gdouble)lwy);
+          block_bot_wy = MAX(block_bot_wy, (gdouble)(lwy + bh));
+
+          /* Paint opaque background matching editor pane (#15171C or #181724 in AI draft) */
+          if (in_ai)
+            cairo_set_source_rgba(cr, 0.094, 0.090, 0.141, 1.0);
+          else
+            cairo_set_source_rgba(cr, 0.082, 0.090, 0.110, 1.0);
+          cairo_rectangle(cr, (gdouble)wx0 - 1.0, (gdouble)lwy,
+                          (gdouble)MAX(wx1 - wx0 + 2, 8), (gdouble)bh);
+          cairo_fill(cr);
+        }
+
+        if (sp->mode == BT_MATH_DISPLAY) {
+          /* Display math $$...$$: draw centered card in the column */
+          gdouble col_left = (gdouble)(col_x + p->cur_margin);
+          gdouble col_w = MAX((gdouble)w - 2.0 * col_left, 240.0);
+          gdouble blk_h = MAX(block_bot_wy - block_top_wy, rend->height_px + 12.0);
+          gdouble card_w = MIN(MAX(rend->width_px + 28.0, 140.0), col_w);
+          gdouble card_h = MIN(rend->height_px + 10.0, blk_h);
+          gdouble card_x = col_left + 0.5 * (col_w - card_w);
+          gdouble card_y = block_top_wy + 0.5 * (blk_h - card_h);
+
+          draw_rounded_rect(cr, card_x, card_y, card_w, card_h, 6.0);
+          cairo_set_source_rgba(cr, 0.106, 0.118, 0.145, 0.96);
+          cairo_fill_preserve(cr);
+          cairo_set_source_rgba(cr, ar, ag, ab, 0.28);
+          cairo_set_line_width(cr, 1.0);
+          cairo_stroke(cr);
+
+          gdouble draw_x = round(card_x + 0.5 * (card_w - rend->width_px));
+          gdouble draw_y = round(card_y + 0.5 * (card_h - rend->height_px));
+          cairo_set_source_surface(cr, rend->surface, draw_x, draw_y);
+          cairo_paint(cr);
+        } else {
+          /* Inline math $...$: draw compiled formula pill right inside the span box */
+          gdouble pill_w = rend->width_px + 8.0;
+          gdouble pill_h = rend->height_px + 2.0;
+          gdouble draw_x = first_wx;
+          if (span_box_w > pill_w + 4.0)
+            draw_x = first_wx + 2.0;
+          gdouble draw_y = round(first_wy + 0.5 * (first_h - rend->height_px));
+
+          /* Paint subtle Dusk math pill background so formula stands out cleanly even if wider than source */
+          draw_rounded_rect(cr, draw_x - 3.0, draw_y - 1.0, pill_w, pill_h, 4.0);
+          if (in_ai)
+            cairo_set_source_rgba(cr, 0.110, 0.102, 0.165, 0.98);
+          else
+            cairo_set_source_rgba(cr, 0.098, 0.108, 0.133, 0.98);
+          cairo_fill_preserve(cr);
+          if (rend->error_count > 0)
+            cairo_set_source_rgba(cr, 0.85, 0.42, 0.42, 0.55);
+          else
+            cairo_set_source_rgba(cr, ar, ag, ab, 0.22);
+          cairo_set_line_width(cr, 1.0);
+          cairo_stroke(cr);
+
+          cairo_set_source_surface(cr, rend->surface, round(draw_x + 1.0), draw_y);
+          cairo_paint(cr);
+        }
+      }
+
+      /* Floating live-preview card when the caret IS inside a math span being edited! */
+      if (p->active_math_span >= 0 && (guint)p->active_math_span < p->math_spans->len) {
+        const BtMathSpan *sp = &g_array_index(p->math_spans, BtMathSpan, (guint)p->active_math_span);
+        if (sp->end <= total && sp->src_end > sp->src_start) {
+          const char *latex = txt + sp->src_start;
+          gsize latex_len = sp->src_end - sp->src_start;
+          const BtMathRendered *rend = bt_math_renderer_get_cached(mr, latex, latex_len,
+                                                                   BT_MATH_DISPLAY, 16.5, scale_factor);
+          if (rend != NULL && rend->surface != NULL) {
+            gint cs = (gint)g_utf8_strlen(txt, (gssize)sp->start);
+            GtkTextIter s_it;
+            gtk_text_buffer_get_iter_at_offset(buf, &s_it, cs);
+            GdkRectangle r0 = {0};
+            gtk_text_view_get_iter_location(GTK_TEXT_VIEW(p->view), &s_it, &r0);
+            gint by = 0, bh = 0, wx0 = 0, lwy = 0;
+            gtk_text_view_get_line_yrange(GTK_TEXT_VIEW(p->view), &s_it, &by, &bh);
+            gtk_text_view_buffer_to_window_coords(GTK_TEXT_VIEW(p->view), GTK_TEXT_WINDOW_WIDGET,
+                                                  r0.x, by, &wx0, &lwy);
+
+            gdouble card_w = rend->width_px + 20.0;
+            gdouble card_h = rend->height_px + 12.0;
+            gdouble card_x = CLAMP((gdouble)wx0, 12.0, MAX((gdouble)w - card_w - 12.0, 12.0));
+            gdouble card_y = (gdouble)lwy - card_h - 6.0;
+            if (card_y < 8.0)
+              card_y = (gdouble)(lwy + bh + 6);
+
+            draw_rounded_rect(cr, card_x, card_y, card_w, card_h, 6.0);
+            cairo_set_source_rgba(cr, 0.118, 0.129, 0.161, 0.98);
+            cairo_fill_preserve(cr);
+            cairo_set_source_rgba(cr, ar, ag, ab, 0.65);
+            cairo_set_line_width(cr, 1.2);
+            cairo_stroke(cr);
+
+            cairo_set_source_surface(cr, rend->surface,
+                                     round(card_x + 10.0), round(card_y + 6.0));
+            cairo_paint(cr);
+          }
+        }
+      }
     }
   }
 }
@@ -1838,6 +2158,7 @@ BtEditorPane *bt_editorpane_new(BtEditorSaveFn on_save, BtEditorLinkFn on_link,
   pane->user_data = user_data;
   pane->cur_margin = BT_COLUMN_MIN_PAD;
   pane->links_open_on_click = TRUE;
+  pane->active_math_span = -1;
 
   pane->buffer = gtk_source_buffer_new(NULL);
   configure_language(pane->buffer);
@@ -1847,6 +2168,7 @@ BtEditorPane *bt_editorpane_new(BtEditorSaveFn on_save, BtEditorLinkFn on_link,
   g_signal_connect_after(pane->buffer, "insert-text", G_CALLBACK(on_insert_text_after), pane);
   g_signal_connect(pane->buffer, "delete-range", G_CALLBACK(on_delete_range_before), pane);
   g_signal_connect_after(pane->buffer, "delete-range", G_CALLBACK(on_delete_range_after), pane);
+  g_signal_connect_after(pane->buffer, "mark-set", G_CALLBACK(on_cursor_mark_set), pane);
 
   pane->view = GTK_SOURCE_VIEW(gtk_source_view_new_with_buffer(pane->buffer));
   g_object_add_weak_pointer(G_OBJECT(pane->view), (gpointer *)&pane->view);
@@ -2257,6 +2579,7 @@ void bt_editorpane_free(BtEditorPane *pane)
     pane->scroll_idle_id = 0;
   }
   g_clear_pointer(&pane->link_spans, g_array_unref);
+  g_clear_pointer(&pane->math_spans, g_array_unref);
   g_free(pane->relpath);
   g_clear_object(&pane->buffer);
   g_free(pane);
@@ -2301,6 +2624,8 @@ void bt_editorpane_load(BtEditorPane *pane, const gchar *relpath, const gchar *t
   g_autofree gchar *buf_txt = gtk_text_buffer_get_text(GTK_TEXT_BUFFER(pane->buffer), &bstart, &bend, TRUE);
   g_clear_pointer(&pane->link_spans, g_array_unref);
   pane->link_spans = bt_link_scan(buf_txt, strlen(buf_txt));
+  g_clear_pointer(&pane->math_spans, g_array_unref);
+  pane->math_spans = bt_math_scan(buf_txt, strlen(buf_txt), NULL);
   gint nlines = gtk_text_buffer_get_line_count(GTK_TEXT_BUFFER(pane->buffer));
   retag_lines(pane, 0, MAX(nlines - 1, 0));
   apply_link_tags_range(pane, 0, G_MAXSIZE);
@@ -2308,6 +2633,7 @@ void bt_editorpane_load(BtEditorPane *pane, const gchar *relpath, const gchar *t
   gtk_text_buffer_get_start_iter(GTK_TEXT_BUFFER(pane->buffer), &start);
   gtk_text_buffer_place_cursor(GTK_TEXT_BUFFER(pane->buffer), &start);
   pane->loading = FALSE;
+  refresh_math_compiled_tags(pane);
 
   pane->dirty = FALSE;
   if (pane->on_dirty != NULL)
@@ -2338,6 +2664,8 @@ void bt_editorpane_clear(BtEditorPane *pane)
   pane->loading = TRUE;
   gtk_text_buffer_set_text(GTK_TEXT_BUFFER(pane->buffer), "", 0);
   g_clear_pointer(&pane->link_spans, g_array_unref);
+  g_clear_pointer(&pane->math_spans, g_array_unref);
+  pane->active_math_span = -1;
   pane->loading = FALSE;
   pane->dirty = FALSE;
   gtk_widget_set_visible(pane->overlay, FALSE);
@@ -2532,6 +2860,27 @@ gboolean bt_editorpane_handle_key_event(BtEditorPane *pane, guint keyval,
 {
   if (pane == NULL || pane->relpath == NULL || pane->buffer == NULL)
     return FALSE;
+
+  /* Plain Enter or Escape while editing inside an inline $...$ math span:
+   * exit the math span (moving the caret right past the closing $) so the
+   * formula immediately auto-compiles into rendered mathematical notation! */
+  GdkModifierType mods = state & (GDK_CONTROL_MASK | GDK_SHIFT_MASK | GDK_ALT_MASK);
+  if (mods == 0 && (keyval == GDK_KEY_Return || keyval == GDK_KEY_KP_Enter || keyval == GDK_KEY_Escape)) {
+    if (pane->math_spans != NULL) {
+      gsize caret = caret_byte_in_buffer(pane);
+      for (guint i = 0; i < pane->math_spans->len; i++) {
+        const BtMathSpan *sp = &g_array_index(pane->math_spans, BtMathSpan, i);
+        if (caret > sp->start && caret < sp->end) {
+          if (sp->mode == BT_MATH_INLINE || keyval == GDK_KEY_Escape) {
+            place_caret_byte_in_buffer(pane, sp->end);
+            refresh_math_compiled_tags(pane);
+            return TRUE;
+          }
+        }
+      }
+    }
+  }
+
   if ((state & GDK_CONTROL_MASK) == 0)
     return FALSE;
   if (keyval != GDK_KEY_Return && keyval != GDK_KEY_KP_Enter)
@@ -2623,4 +2972,29 @@ const gchar *bt_editorpane_language_id(const BtEditorPane *pane)
     return "none";
   GtkSourceLanguage *lang = gtk_source_buffer_get_language(pane->buffer);
   return lang ? gtk_source_language_get_id(lang) : "none";
+}
+
+const GArray *bt_editorpane_math_spans(const BtEditorPane *pane)
+{
+  return pane ? pane->math_spans : NULL;
+}
+
+gboolean bt_editorpane_is_math_span_compiled(const BtEditorPane *pane, guint span_index)
+{
+  if (pane == NULL || pane->math_spans == NULL || span_index >= pane->math_spans->len)
+    return FALSE;
+  const BtMathSpan *sp = &g_array_index(pane->math_spans, BtMathSpan, span_index);
+  return bt_editorpane_offset_has_tag_name(pane, sp->src_start, "bt-math-compiled");
+}
+
+guint bt_editorpane_compiled_math_count(const BtEditorPane *pane)
+{
+  if (pane == NULL || pane->math_spans == NULL)
+    return 0;
+  guint count = 0;
+  for (guint i = 0; i < pane->math_spans->len; i++) {
+    if (bt_editorpane_is_math_span_compiled(pane, i))
+      count++;
+  }
+  return count;
 }

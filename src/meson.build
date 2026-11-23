@@ -49,6 +49,7 @@ app_sources = files(
   'ui/graphcapture.c',
   'ui/filetree.c',
   'ui/editorpane.c',
+  'ui/mathrender.c',
   'ui/createpopover.c',
   'ui/chooserpopover.c',
   'ui/quickopen.c',
@@ -72,7 +73,7 @@ styles_abs = get_option('prefix') / styles_install_dir
 bt_exe = executable(
   'bt',
   app_sources + [bt_resources, bt_build_stamp_h],
-  dependencies: [bt_core_dep, gtk4_dep, adw_dep, epoxy_dep, gtksource_dep, m_dep] + font_deps,
+  dependencies: [bt_core_dep, gtk4_dep, adw_dep, epoxy_dep, gtksource_dep, freetype_dep, cairo_dep, m_dep] + font_deps,
   c_args: font_args + [
     '-DBT_LANGSPEC_DIR="@0@"'.format(langspec_abs),
     '-DBT_STYLES_DIR="@0@"'.format(styles_abs),

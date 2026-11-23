@@ -38,6 +38,8 @@ yaml_dep = dependency('yaml-0.1', include_type: 'system')
 sqlite_dep = dependency('sqlite3', include_type: 'system')
 md4c_dep = dependency('md4c', include_type: 'system')
 harfbuzz_dep = dependency('harfbuzz', version: '>= 4.0', include_type: 'system')
+freetype_dep = dependency('freetype2', include_type: 'system')
+cairo_dep = dependency('cairo', include_type: 'system')
 m_dep = cc.find_library('m', required: false)
 util_dep = is_windows ? [] : [cc.find_library('util', required: false)]
 cmocka_dep = dependency('cmocka', required: get_option('tests'), include_type: 'system')
@@ -51,6 +53,8 @@ install_data(
   'data/fonts/InterVariable.ttf',
   'data/fonts/JetBrainsMono-Regular.ttf',
   'data/fonts/JetBrainsMono-Bold.ttf',
+  'data/fonts/STIXTwoMath-Regular.otf',
+  'data/fonts/LICENSE-STIXTwoMath.txt',
   install_dir: fonts_install_dir,
 )
 
