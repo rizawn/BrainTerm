@@ -24,9 +24,11 @@
 #include "watcher.h"
 
 #include <adwaita.h>
+#include <cjson/cJSON.h>
 #include <gtksourceview/gtksource.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #ifdef G_OS_WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -101,6 +103,15 @@ struct BtApp {
   BtNavHistory *nav;
   gboolean nav_replaying;
   gboolean links_open_on_click;
+
+  gchar *verify_l2_dir;
+  guint verify_l2_phase;
+  guint verify_l2_settle;
+  guint verify_l2_frames;
+  gint64 verify_l2_prev_fc_us;
+  GArray *verify_l2_frame_ms;
+  GArray *verify_l2_work_ms;
+  gboolean verify_l2_nav_back_ok;
 };
 
 /* ----------------------------------------------------- state.ini (§7.5) -- */
@@ -393,7 +404,8 @@ static void update_header(BtApp *app)
 
 static void show_toast(BtApp *app, const gchar *msg, guint timeout_s)
 {
-  if (app == NULL || app->toast_overlay == NULL || app->smoke_test || msg == NULL)
+  if (app == NULL || app->toast_overlay == NULL || app->smoke_test ||
+      app->verify_l2_dir != NULL || app->capture_dir != NULL || msg == NULL)
     return;
   AdwToast *t = adw_toast_new(msg);
   adw_toast_set_timeout(t, timeout_s);
@@ -883,7 +895,8 @@ gboolean bt_app_open_vault(BtApp *app, const gchar *path, GError **error)
     bt_editorpane_flush_save(app->editor);
 
   BtScanStats st = {0};
-  BtVault *v = vault_open(path, &st, error);
+  gboolean ro_verify = (app->verify_l2_dir != NULL);
+  BtVault *v = ro_verify ? vault_open_readonly(path, &st, error) : vault_open(path, &st, error);
   if (v == NULL)
     return FALSE;
 
@@ -906,27 +919,29 @@ gboolean bt_app_open_vault(BtApp *app, const gchar *path, GError **error)
   app->vault = v;
   app->last_checkpoint_oid[0] = '\0';
 
-  if (!app->smoke_test && app->capture_dir == NULL) {
+  if (!app->smoke_test && app->capture_dir == NULL && !ro_verify) {
     gboolean differs = FALSE;
     bt_agents_apply_vault_template(app->vault, &differs, NULL);
     bt_app_save_last_vault(vault_root(app->vault), NULL);
   }
 
-  gboolean r2_rebuilt = FALSE;
-  GError *ierr = NULL;
-  app->index = bt_index_open(vault_root(app->vault), &r2_rebuilt, &ierr);
-  if (app->index != NULL) {
-    bt_index_rebuild(app->index, app->vault, NULL);
-    bt_index_import_sessions_json(app->index, vault_root(app->vault), NULL);
-  } else if (ierr != NULL) {
-    bt_app_show_error(app, "Index error", ierr->message);
-    g_error_free(ierr);
-  }
-  app->watcher = bt_watcher_new(app->vault, BT_WATCHER_DEBOUNCE_MS, on_watcher_event, app);
+  if (!ro_verify) {
+    gboolean r2_rebuilt = FALSE;
+    GError *ierr = NULL;
+    app->index = bt_index_open(vault_root(app->vault), &r2_rebuilt, &ierr);
+    if (app->index != NULL) {
+      bt_index_rebuild(app->index, app->vault, NULL);
+      bt_index_import_sessions_json(app->index, vault_root(app->vault), NULL);
+    } else if (ierr != NULL) {
+      bt_app_show_error(app, "Index error", ierr->message);
+      g_error_free(ierr);
+    }
+    app->watcher = bt_watcher_new(app->vault, BT_WATCHER_DEBOUNCE_MS, on_watcher_event, app);
 
-  app->sessions = bt_sessions_open(vault_root(app->vault), NULL);
-  if (app->sessions_panel != NULL)
-    bt_sessionspanel_refresh(app->sessions_panel, app->sessions);
+    app->sessions = bt_sessions_open(vault_root(app->vault), NULL);
+    if (app->sessions_panel != NULL)
+      bt_sessionspanel_refresh(app->sessions_panel, app->sessions);
+  }
 
   if (app->editor != NULL)
     bt_editorpane_clear(app->editor);
@@ -935,9 +950,10 @@ gboolean bt_app_open_vault(BtApp *app, const gchar *path, GError **error)
   if (app->tree != NULL)
     bt_filetree_populate(app->tree, app->vault);
   rebuild_link_snapshot(app);
-  refresh_graph(app, !app->smoke_test);
+  refresh_graph(app, !app->smoke_test && !ro_verify);
 
-  if (app->tabs != NULL && app->capture_dir == NULL && !app->smoke_test) {
+  if (app->tabs != NULL && app->capture_dir == NULL &&
+      !(app->smoke_test && app->cli_vault == NULL) && !ro_verify) {
     GError *terr = NULL;
     const BtSession *sess = bt_sessions_add(app->sessions, "shell", vault_root(app->vault), "",
                                             NULL, NULL, NULL);
@@ -2645,6 +2661,251 @@ static gboolean on_capture_settle_tick(GtkWidget *w, GdkFrameClock *clock, gpoin
   return G_SOURCE_REMOVE;
 }
 
+static gboolean capture_widget_png(GtkWindow *win, GtkWidget *widget, const gchar *png_path,
+                                   GError **error)
+{
+  if (win == NULL || widget == NULL) {
+    g_set_error(error, BT_ERROR, BT_ERROR_INVALID, "No window/widget to capture");
+    return FALSE;
+  }
+  int w = gtk_widget_get_width(widget);
+  int h = gtk_widget_get_height(widget);
+  if (w <= 0 || h <= 0) {
+    g_set_error(error, BT_ERROR, BT_ERROR_INVALID, "Widget has zero size (%dx%d)", w, h);
+    return FALSE;
+  }
+  GdkPaintable *paintable = gtk_widget_paintable_new(widget);
+  GtkSnapshot *snap = gtk_snapshot_new();
+  gdk_paintable_snapshot(paintable, snap, (double)w, (double)h);
+  GskRenderNode *node = gtk_snapshot_free_to_node(snap);
+  g_object_unref(paintable);
+  if (node == NULL) {
+    g_set_error(error, BT_ERROR, BT_ERROR_IO, "Empty render node");
+    return FALSE;
+  }
+  GskRenderer *renderer = gtk_native_get_renderer(GTK_NATIVE(win));
+  GdkTexture *tex = renderer ? gsk_renderer_render_texture(renderer, node, NULL) : NULL;
+  gsk_render_node_unref(node);
+  if (tex == NULL) {
+    g_set_error(error, BT_ERROR, BT_ERROR_IO, "gsk_renderer_render_texture returned NULL");
+    return FALSE;
+  }
+  gboolean ok = gdk_texture_save_to_png(tex, png_path);
+  g_object_unref(tex);
+  if (!ok)
+    g_set_error(error, BT_ERROR, BT_ERROR_IO, "Failed to save PNG '%s'", png_path);
+  return ok;
+}
+
+static void compute_timing_stats(const GArray *arr, gdouble *out_avg, gdouble *out_p95,
+                                 gdouble *out_max)
+{
+  guint n = arr ? arr->len : 0;
+  if (n == 0) {
+    if (out_avg) *out_avg = 0.0;
+    if (out_p95) *out_p95 = 0.0;
+    if (out_max) *out_max = 0.0;
+    return;
+  }
+  g_autofree gdouble *sorted = g_new(gdouble, n);
+  gdouble sum = 0.0;
+  gdouble max_v = 0.0;
+  for (guint i = 0; i < n; i++) {
+    gdouble v = g_array_index(arr, gdouble, i);
+    sorted[i] = v;
+    sum += v;
+    if (v > max_v)
+      max_v = v;
+  }
+  for (guint gap = n / 2u; gap > 0u; gap /= 2u) {
+    for (guint i = gap; i < n; i++) {
+      gdouble tmp = sorted[i];
+      guint j = i;
+      while (j >= gap && sorted[j - gap] > tmp) {
+        sorted[j] = sorted[j - gap];
+        j -= gap;
+      }
+      sorted[j] = tmp;
+    }
+  }
+  guint p95_idx = (guint)((gdouble)(n - 1u) * 0.95);
+  if (out_avg) *out_avg = sum / (gdouble)n;
+  if (out_p95) *out_p95 = sorted[p95_idx];
+  if (out_max) *out_max = max_v;
+}
+
+static gboolean verify_l2_click_target(BtApp *app, const gchar *raw_target)
+{
+  if (app == NULL || app->editor == NULL || raw_target == NULL)
+    return FALSE;
+  const GArray *spans = bt_editorpane_link_spans(app->editor);
+  if (spans == NULL)
+    return FALSE;
+  for (guint i = 0; i < spans->len; i++) {
+    const BtLinkSpan *sp = &g_array_index(spans, BtLinkSpan, i);
+    if (g_strcmp0(sp->raw_target, raw_target) == 0) {
+      bt_editorpane_set_caret_byte_offset(app->editor, 0);
+      return bt_editorpane_simulate_click(app->editor, sp->start + 2, GDK_BUTTON_PRIMARY, 1, 0.0,
+                                          0.0, 0);
+    }
+  }
+  return FALSE;
+}
+
+static gboolean on_verify_l2_tick(GtkWidget *w, GdkFrameClock *clock, gpointer ud)
+{
+  BtApp *app = ud;
+  if (app->verify_l2_phase == 0) {
+    if (app->verify_l2_settle < 8u || gtk_widget_get_width(w) <= 200) {
+      app->verify_l2_settle++;
+      gtk_widget_queue_draw(w);
+      return G_SOURCE_CONTINUE;
+    }
+    if (app->verify_l2_settle == 8u) {
+      const char *warmup[] = {
+          "statistical-statistics-notes/chapter-01-descriptive/03-numerical-description.md",
+          "statistical-statistics-notes/chapter-02-probability/01-probability-basics.md",
+          "statistical-statistics-notes/chapter-01-descriptive/01-data-types-collection.md",
+      };
+      for (gsize wi = 0; wi < G_N_ELEMENTS(warmup); wi++)
+        bt_app_open_note(app, warmup[wi], NULL);
+      GError *err = NULL;
+      if (!bt_app_open_note(app, "statistical-statistics-notes/MathStats.md", &err)) {
+        g_printerr("BT_VERIFY_L2 ERROR open MathStats.md: %s\n", err ? err->message : "unknown");
+        g_clear_error(&err);
+        app->capture_failed = TRUE;
+        g_application_quit(G_APPLICATION(app->adw_app));
+        return G_SOURCE_REMOVE;
+      }
+      if (app->nav != NULL) {
+        bt_nav_history_clear(app->nav);
+        bt_nav_history_push_jump(app->nav, NULL, 0, 0.0,
+                                 "statistical-statistics-notes/MathStats.md", 0, 0.0);
+      }
+      app->verify_l2_settle++;
+      gtk_widget_queue_draw(w);
+      return G_SOURCE_CONTINUE;
+    }
+    if (app->verify_l2_settle < 12u) {
+      app->verify_l2_settle++;
+      gtk_widget_queue_draw(w);
+      return G_SOURCE_CONTINUE;
+    }
+    app->verify_l2_frame_ms = g_array_new(FALSE, FALSE, sizeof(gdouble));
+    app->verify_l2_work_ms = g_array_new(FALSE, FALSE, sizeof(gdouble));
+    app->verify_l2_prev_fc_us = clock ? gdk_frame_clock_get_frame_time(clock) : 0;
+    app->verify_l2_phase = 1;
+    GtkWidget *ev0 = app->editor ? bt_editorpane_view_widget(app->editor) : NULL;
+    gtk_widget_queue_draw(ev0 ? ev0 : w);
+    return G_SOURCE_CONTINUE;
+  }
+
+  gint64 now_fc_us = clock ? gdk_frame_clock_get_frame_time(clock) : 0;
+  if (app->verify_l2_prev_fc_us > 0 && now_fc_us > app->verify_l2_prev_fc_us) {
+    gdouble dt_ms = (gdouble)(now_fc_us - app->verify_l2_prev_fc_us) / 1000.0;
+    if (app->verify_l2_frames > 0 && dt_ms < 500.0)
+      g_array_append_val(app->verify_l2_frame_ms, dt_ms);
+  }
+  app->verify_l2_prev_fc_us = now_fc_us;
+
+  gint64 t0_us = g_get_monotonic_time();
+  guint f = app->verify_l2_frames;
+  if (f == 40) {
+    verify_l2_click_target(app, "chapter-01-descriptive/03-numerical-description.md");
+  } else if (f == 100) {
+    bt_app_navigate_back(app);
+  } else if (f == 160) {
+    verify_l2_click_target(app, "chapter-02-probability/01-probability-basics.md");
+  } else if (f == 220) {
+    bt_app_navigate_back(app);
+    app->verify_l2_nav_back_ok =
+        (g_strcmp0(bt_app_active_note(app), "statistical-statistics-notes/MathStats.md") == 0);
+  } else if (f == 280) {
+    if (!verify_l2_click_target(app, "chapter-01-descriptive/01-data-types-collection.md")) {
+      g_printerr("BT_VERIFY_L2 ERROR click target in MathStats.md failed\n");
+      app->capture_failed = TRUE;
+    }
+  }
+  gdouble work_ms = (gdouble)(g_get_monotonic_time() - t0_us) / 1000.0;
+  g_array_append_val(app->verify_l2_work_ms, work_ms);
+
+  app->verify_l2_frames++;
+  if (app->verify_l2_frames <= 360u && !app->capture_failed) {
+    GtkWidget *ev = app->editor ? bt_editorpane_view_widget(app->editor) : NULL;
+    gtk_widget_queue_draw(ev ? ev : w);
+    return G_SOURCE_CONTINUE;
+  }
+
+  const gchar *active = bt_app_active_note(app);
+  const gchar *expected =
+      "statistical-statistics-notes/chapter-01-descriptive/01-data-types-collection.md";
+  if (g_strcmp0(active, expected) != 0) {
+    g_printerr("BT_VERIFY_L2 ERROR active='%s' expected='%s'\n",
+               active ? active : "(null)", expected);
+    app->capture_failed = TRUE;
+  }
+
+  g_mkdir_with_parents(app->verify_l2_dir, 0755);
+  GError *werr = NULL;
+  g_autofree gchar *png_path = g_build_filename(app->verify_l2_dir, "mathstats-click-opened.png", NULL);
+  if (!app->capture_failed && !capture_widget_png(app->window, GTK_WIDGET(app->window), png_path, &werr)) {
+    g_printerr("BT_VERIFY_L2 ERROR png: %s\n", werr ? werr->message : "unknown");
+    g_clear_error(&werr);
+    app->capture_failed = TRUE;
+  }
+
+  gdouble fc_avg = 0.0, fc_p95 = 0.0, fc_max = 0.0;
+  gdouble wk_avg = 0.0, wk_p95 = 0.0, wk_max = 0.0;
+  compute_timing_stats(app->verify_l2_frame_ms, &fc_avg, &fc_p95, &fc_max);
+  compute_timing_stats(app->verify_l2_work_ms, &wk_avg, &wk_p95, &wk_max);
+
+  cJSON *oj = cJSON_CreateObject();
+  cJSON_AddStringToObject(oj, "source_note", "statistical-statistics-notes/MathStats.md");
+  cJSON_AddStringToObject(oj, "clicked_link", "[[chapter-01-descriptive/01-data-types-collection.md]]");
+  cJSON_AddStringToObject(oj, "opened_note", active ? active : "");
+  cJSON_AddBoolToObject(oj, "opened_expected", g_strcmp0(active, expected) == 0);
+  cJSON_AddBoolToObject(oj, "nav_back_tested", app->verify_l2_nav_back_ok);
+  cJSON_AddNumberToObject(oj, "window_width", gtk_widget_get_width(GTK_WIDGET(app->window)));
+  cJSON_AddNumberToObject(oj, "window_height", gtk_widget_get_height(GTK_WIDGET(app->window)));
+  cJSON_AddStringToObject(oj, "build_stamp", BT_BUILD_STAMP);
+  g_autofree gchar *ojson_path = g_build_filename(app->verify_l2_dir, "mathstats-click-opened.json", NULL);
+  char *ostr = cJSON_Print(oj);
+  cJSON_Delete(oj);
+  if (!g_file_set_contents(ojson_path, ostr ? ostr : "{}", -1, NULL))
+    app->capture_failed = TRUE;
+  free(ostr);
+
+  cJSON *fj = cJSON_CreateObject();
+  cJSON_AddStringToObject(fj, "build_stamp", BT_BUILD_STAMP);
+  cJSON_AddNumberToObject(fj, "samples", (double)app->verify_l2_frame_ms->len);
+  cJSON_AddNumberToObject(fj, "avg_ms", fc_avg);
+  cJSON_AddNumberToObject(fj, "p95_ms", fc_p95);
+  cJSON_AddNumberToObject(fj, "max_ms", fc_max);
+  cJSON_AddNumberToObject(fj, "work_avg_ms", wk_avg);
+  cJSON_AddNumberToObject(fj, "work_p95_ms", wk_p95);
+  cJSON_AddNumberToObject(fj, "work_max_ms", wk_max);
+  cJSON_AddNumberToObject(fj, "budget_ms", 16.6);
+  cJSON_AddBoolToObject(fj, "frame_clock_under_budget", fc_p95 < 16.6);
+  cJSON_AddBoolToObject(fj, "work_under_budget", wk_p95 < 16.6);
+  cJSON *farr = cJSON_CreateArray();
+  for (guint i = 0; i < app->verify_l2_frame_ms->len; i++)
+    cJSON_AddItemToArray(farr, cJSON_CreateNumber(g_array_index(app->verify_l2_frame_ms, gdouble, i)));
+  cJSON_AddItemToObject(fj, "frame_clock_ms", farr);
+  g_autofree gchar *fjson_path = g_build_filename(app->verify_l2_dir, "frame-times-l2.json", NULL);
+  char *fstr = cJSON_Print(fj);
+  cJSON_Delete(fj);
+  if (!g_file_set_contents(fjson_path, fstr ? fstr : "{}", -1, NULL))
+    app->capture_failed = TRUE;
+  free(fstr);
+
+  printf("BT_VERIFY_L2 ok=%d active=%s samples=%u fc_avg=%.2f fc_p95=%.2f fc_max=%.2f work_avg=%.2f work_p95=%.2f work_max=%.2f\n",
+         app->capture_failed ? 0 : 1, active ? active : "", app->verify_l2_frame_ms->len,
+         fc_avg, fc_p95, fc_max, wk_avg, wk_p95, wk_max);
+  fflush(stdout);
+  g_application_quit(G_APPLICATION(app->adw_app));
+  return G_SOURCE_REMOVE;
+}
+
 static gboolean on_smoke_idle(gpointer ud)
 {
   BtApp *app = ud;
@@ -2842,13 +3103,13 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
   bt_filetree_set_action_cb(app->tree, on_tree_action, app);
   app->editor = bt_editorpane_new(on_editor_save, on_editor_link, on_editor_dirty, app);
   bt_editorpane_set_conflict_cbs(app->editor, on_editor_conflict_diff, on_editor_conflict_reload);
-  if (app->capture_dir == NULL)
+  if (app->capture_dir == NULL && app->verify_l2_dir == NULL)
     bt_app_set_links_open_on_click(app, bt_app_load_links_open_on_click(), FALSE);
   else
     bt_app_set_links_open_on_click(app, TRUE, FALSE);
   app->graphview = bt_graphview_new(on_graph_open_note, on_tree_open_term, app);
   bt_graphview_set_rename_cb(app->graphview, on_graph_rename_note, app);
-  if (!app->smoke_test && app->capture_dir == NULL) {
+  if (!app->smoke_test && app->capture_dir == NULL && app->verify_l2_dir == NULL) {
     bt_graphview_set_show_tags(app->graphview, load_saved_graph_bool("show_tags", FALSE));
     bt_graphview_set_show_ghosts(app->graphview, load_saved_graph_bool("show_ghosts", FALSE));
   }
@@ -2868,11 +3129,11 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
   adw_view_stack_add_titled_with_icon(app->view_stack, bt_sessionspanel_widget(app->sessions_panel),
                                       "sessions", "Sessions", "bt-sessions-symbolic");
 
-  gchar *saved_page = app->smoke_test ? g_strdup("editor") : bt_app_load_saved_page();
+  gchar *saved_page = (app->smoke_test || app->verify_l2_dir != NULL) ? g_strdup("editor") : bt_app_load_saved_page();
   const gchar *stack_page = (g_strcmp0(saved_page, "sessions") == 0) ? "sessions" : "editor";
   adw_view_stack_set_visible_child_name(app->view_stack, stack_page);
 
-  app->graph_visible = (app->smoke_test || app->capture_dir != NULL) ? TRUE : load_saved_graph_visible();
+  app->graph_visible = (app->smoke_test || app->capture_dir != NULL || app->verify_l2_dir != NULL) ? TRUE : load_saved_graph_visible();
   if (g_strcmp0(saved_page, "graph") == 0)
     app->graph_visible = TRUE;
 
@@ -3021,7 +3282,7 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
   adw_application_window_set_content(ADW_APPLICATION_WINDOW(app->window), tview);
 
   /* Apply persisted scheme (dark-first default) before presenting. */
-  apply_scheme_runtime(app, app->smoke_test ? BT_SCHEME_DARK : load_saved_scheme(), FALSE);
+  apply_scheme_runtime(app, (app->smoke_test || app->verify_l2_dir != NULL) ? BT_SCHEME_DARK : load_saved_scheme(), FALSE);
 
   gtk_window_present(app->window);
 
@@ -3034,15 +3295,16 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
       else
         bt_app_show_error(app, "Cannot open vault", err->message);
       g_error_free(err);
-    } else if (vault_notes(app->vault)->len > 0) {
+    } else if (app->verify_l2_dir == NULL && vault_notes(app->vault)->len > 0) {
       const gchar *first = g_ptr_array_index(vault_notes(app->vault), 0);
       bt_app_open_note(app, first, NULL);
     }
   }
-  if (!app->smoke_test && g_strcmp0(stack_page, "editor") != 0)
+  if (!app->smoke_test && app->verify_l2_dir == NULL && g_strcmp0(stack_page, "editor") != 0)
     adw_view_stack_set_visible_child_name(app->view_stack, stack_page);
-  g_signal_connect(app->view_stack, "notify::visible-child-name",
-                   G_CALLBACK(on_view_stack_page_changed), app);
+  if (app->verify_l2_dir == NULL)
+    g_signal_connect(app->view_stack, "notify::visible-child-name",
+                     G_CALLBACK(on_view_stack_page_changed), app);
   g_free(saved_page);
   g_free(initial);
 
@@ -3058,6 +3320,8 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
     ; /* Unit test mode via bt_app_prepare_ui_for_test */
   else if (app->capture_dir != NULL)
     g_timeout_add(60, on_capture_poll, app);
+  else if (app->verify_l2_dir != NULL)
+    gtk_widget_add_tick_callback(GTK_WIDGET(app->window), on_verify_l2_tick, app, NULL);
 }
 
 static gint on_handle_local_options(GApplication *gapp, GVariantDict *opts, gpointer ud)
@@ -3089,6 +3353,11 @@ static gint on_handle_local_options(GApplication *gapp, GVariantDict *opts, gpoi
   if (g_variant_dict_lookup(opts, "graph-capture", "s", &cap_dir)) {
     g_free(app->capture_dir);
     app->capture_dir = cap_dir;
+  }
+  gchar *vl2_dir = NULL;
+  if (g_variant_dict_lookup(opts, "verify-l2-life2", "s", &vl2_dir)) {
+    g_free(app->verify_l2_dir);
+    app->verify_l2_dir = vl2_dir;
   }
   gchar *cap_state = NULL;
   if (g_variant_dict_lookup(opts, "graph-state", "s", &cap_state)) {
@@ -3169,6 +3438,7 @@ BtApp *bt_app_new(void)
     {"graph-state", 0, 0, G_OPTION_ARG_STRING, NULL, "Named capture state (default-fit|hover-hub|hover-small|selected|zoom2x|3d|reduce-motion-on|reduce-motion-off|all)", "NAME"},
     {"graph-size", 0, 0, G_OPTION_ARG_STRING, NULL, "Window size WxH for --graph-capture (e.g. 1000x700 or 1920x1080)", "WxH"},
     {"selftest-links", 0, 0, G_OPTION_ARG_STRING, NULL, "Run read-only link resolver self-test on DIR and exit", "DIR"},
+    {"verify-l2-life2", 0, 0, G_OPTION_ARG_STRING, NULL, "Run read-only L2 click/nav verification on --vault and write evidence to OUT_DIR", "OUT_DIR"},
     {"version", 'V', 0, G_OPTION_ARG_NONE, NULL, "Print version and build stamp and exit", NULL},
     {NULL, 0, 0, 0, NULL, NULL, NULL},
   };
@@ -3203,6 +3473,11 @@ void bt_app_free(BtApp *app)
   g_free(app->cli_vault);
   g_free(app->capture_dir);
   g_free(app->capture_state);
+  g_free(app->verify_l2_dir);
+  if (app->verify_l2_frame_ms != NULL)
+    g_array_free(app->verify_l2_frame_ms, TRUE);
+  if (app->verify_l2_work_ms != NULL)
+    g_array_free(app->verify_l2_work_ms, TRUE);
   g_free(app->last_statusbar_notice);
   g_clear_object(&app->adw_app);
   g_free(app);

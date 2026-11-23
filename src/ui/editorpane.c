@@ -286,9 +286,12 @@ static void tag_inline_spans(BtEditorPane *p, const GtkTextIter *ls, const gchar
 {
   GtkTextBuffer *buf = GTK_TEXT_BUFFER(p->buffer);
   gint len = (gint)strlen(s);
-  BtMathScanOpts mopts = bt_math_scan_default_opts();
-  mopts.skip_frontmatter = FALSE;
-  GArray *mspans = bt_math_scan(s, (gsize)len, &mopts);
+  GArray *mspans = NULL;
+  if (strchr(s, '$') != NULL || strchr(s, '\\') != NULL) {
+    BtMathScanOpts mopts = bt_math_scan_default_opts();
+    mopts.skip_frontmatter = FALSE;
+    mspans = bt_math_scan(s, (gsize)len, &mopts);
+  }
   gint i = 0;
 
   while (i < len) {
@@ -361,7 +364,8 @@ static void tag_inline_spans(BtEditorPane *p, const GtkTextIter *ls, const gchar
     }
     i++;
   }
-  g_array_unref(mspans);
+  if (mspans != NULL)
+    g_array_unref(mspans);
 }
 
 typedef struct {
@@ -454,7 +458,8 @@ static void tag_single_line(BtEditorPane *p, gint ln, LineCtx *ctx)
 
   GtkTextIter clear_end = e;
   gtk_text_iter_forward_line(&clear_end);
-  clear_md_tags(p, &s, &clear_end);
+  if (!p->loading)
+    clear_md_tags(p, &s, &clear_end);
 
   g_autofree gchar *txt = gtk_text_buffer_get_text(buf, &s, &e, FALSE);
   const gchar *trim = txt;
@@ -794,7 +799,7 @@ static GtkTextTag *tag_for_span(const BtEditorPane *pane, const BtLinkSpan *sp,
     return NULL;
   }
   BtLinkOpenPolicy pol;
-  bt_link_check_open_policy(res, pane->vault, TRUE, &pol);
+  bt_link_check_open_policy(res, NULL, TRUE, &pol);
   GtkTextTag *tag = pane->t_wikilink;
   guint32 rgb = BT_COL_LINK;
   if (res->status == BT_LINK_BLOCKED || pol.action == BT_LINK_OPEN_BLOCKED) {
@@ -830,9 +835,11 @@ static void apply_link_tags_range(BtEditorPane *p, gsize byte_lo, gsize byte_hi)
   gtk_text_buffer_get_iter_at_offset(buf, &it_lo, c_lo);
   gtk_text_buffer_get_iter_at_offset(buf, &it_hi, c_hi);
 
-  gtk_text_buffer_remove_tag(buf, p->t_wikilink, &it_lo, &it_hi);
-  gtk_text_buffer_remove_tag(buf, p->t_link_broken, &it_lo, &it_hi);
-  gtk_text_buffer_remove_tag(buf, p->t_link_blocked, &it_lo, &it_hi);
+  if (!p->loading) {
+    gtk_text_buffer_remove_tag(buf, p->t_wikilink, &it_lo, &it_hi);
+    gtk_text_buffer_remove_tag(buf, p->t_link_broken, &it_lo, &it_hi);
+    gtk_text_buffer_remove_tag(buf, p->t_link_blocked, &it_lo, &it_hi);
+  }
 
   /* Binary search for first span overlapping [byte_lo, byte_hi). */
   guint lo = 0, hi = p->link_spans->len;

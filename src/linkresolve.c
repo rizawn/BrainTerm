@@ -902,6 +902,7 @@ typedef struct {
   gboolean is_note;
   gchar *title;
   GPtrArray *aliases;
+  gint8 vault_contained; /* 0 = unverified, 1 = contained, -1 = escapes */
 } SnapEntry;
 
 struct BtIndexSnapshot {
@@ -911,6 +912,7 @@ struct BtIndexSnapshot {
   GHashTable *by_stem;
   GHashTable *by_title;
   GHashTable *by_alias;
+  GHashTable *unresolved_escape_cache;
   gboolean case_sensitive;
   gboolean finalized;
   const BtVault *vault;
@@ -957,6 +959,7 @@ BtIndexSnapshot *bt_index_snapshot_new(void)
   s->by_stem = make_idx_map();
   s->by_title = make_idx_map();
   s->by_alias = make_idx_map();
+  s->unresolved_escape_cache = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
 #ifdef G_OS_WIN32
   s->case_sensitive = FALSE;
 #else
@@ -975,6 +978,8 @@ void bt_index_snapshot_free(BtIndexSnapshot *snap)
   g_hash_table_destroy(snap->by_stem);
   g_hash_table_destroy(snap->by_title);
   g_hash_table_destroy(snap->by_alias);
+  if (snap->unresolved_escape_cache != NULL)
+    g_hash_table_destroy(snap->unresolved_escape_cache);
   g_free(snap);
 }
 
@@ -989,6 +994,12 @@ void bt_index_snapshot_set_vault(BtIndexSnapshot *snap, const BtVault *vault)
 {
   g_return_if_fail(snap != NULL);
   snap->vault = vault;
+  if (snap->unresolved_escape_cache != NULL)
+    g_hash_table_remove_all(snap->unresolved_escape_cache);
+  for (guint i = 0; i < snap->entries->len; i++) {
+    SnapEntry *ce = g_ptr_array_index(snap->entries, i);
+    ce->vault_contained = 0;
+  }
 }
 
 void bt_index_snapshot_add_entry(BtIndexSnapshot *snap, const char *relpath, gboolean is_dir,
@@ -1571,22 +1582,37 @@ BtLinkResolution *bt_link_resolve(const BtIndexSnapshot *idx, const char *source
       collect_matches(idx, idx->by_alias, clean_target, TRUE, matches);
   }
 
-  /* Step 12: Symlink / junction escape check through vault_resolve() if vault attached. */
+  /* Step 12: Symlink / junction escape check through vault_resolve() if vault attached (cached). */
   if (idx->vault != NULL) {
     if (matches->len > 0) {
       for (guint i = 0; i < matches->len; i++) {
-        const SnapEntry *ce = g_ptr_array_index(idx->entries, g_array_index(matches, guint, i));
-        g_autofree gchar *real = vault_resolve(idx->vault, ce->relpath, NULL);
-        if (real == NULL) {
+        SnapEntry *ce = g_ptr_array_index(idx->entries, g_array_index(matches, guint, i));
+        if (ce->vault_contained == 0) {
+          g_autofree gchar *real = vault_resolve(idx->vault, ce->relpath, NULL);
+          ce->vault_contained = (real != NULL) ? 1 : -1;
+        }
+        if (ce->vault_contained < 0) {
           return make_blocked(BT_LINK_BLOCK_ESCAPES_VAULT, BT_LINK_KIND_FILE,
                               alias_part ? alias_part : clean_target, anchor, block_id);
         }
       }
     } else {
-      g_autoptr(GError) verr = NULL;
-      g_autofree gchar *chk = vault_resolve(idx->vault, clean_target, &verr);
-      if (chk == NULL && verr != NULL && verr->message != NULL &&
-          strstr(verr->message, "through a link") != NULL) {
+      gint cached = idx->unresolved_escape_cache
+                        ? GPOINTER_TO_INT(g_hash_table_lookup(idx->unresolved_escape_cache,
+                                                              clean_target))
+                        : 0;
+      if (cached == 0) {
+        g_autoptr(GError) verr = NULL;
+        g_autofree gchar *chk = vault_resolve(idx->vault, clean_target, &verr);
+        cached = (chk == NULL && verr != NULL && verr->message != NULL &&
+                  strstr(verr->message, "through a link") != NULL)
+                     ? -1
+                     : 1;
+        if (idx->unresolved_escape_cache != NULL)
+          g_hash_table_insert(idx->unresolved_escape_cache, g_strdup(clean_target),
+                              GINT_TO_POINTER(cached));
+      }
+      if (cached < 0) {
         return make_blocked(BT_LINK_BLOCK_ESCAPES_VAULT, BT_LINK_KIND_FILE,
                             alias_part ? alias_part : clean_target, anchor, block_id);
       }
