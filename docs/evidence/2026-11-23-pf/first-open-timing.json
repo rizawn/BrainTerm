@@ -1,0 +1,365 @@
+{
+  "benchmark": "PF-3 cold first-open vs warm second-open timing (life2 read-only)",
+  "machine": {
+    "os": {
+      "Caption": "Microsoft Windows 11 Home Single Language",
+      "Version": "10.0.26200",
+      "BuildNumber": "26200",
+      "OSArchitecture": "64-bit"
+    },
+    "cpu": {
+      "Name": "AMD Ryzen AI 7 350 w/ Radeon 860M              ",
+      "NumberOfCores": 8,
+      "NumberOfLogicalProcessors": 16
+    },
+    "memory_bytes": 16127709184,
+    "system": {
+      "TotalPhysicalMemory": 16127709184,
+      "Manufacturer": "HP",
+      "Model": "OMEN Gaming Laptop 16-ap0xxx"
+    },
+    "gpu": [
+      {
+        "Name": "MuMuPlayer Virtual Display Adapter",
+        "DriverVersion": "22.3.52.447",
+        "AdapterRAM": null
+      },
+      {
+        "Name": "AMD Radeon(TM) 860M Graphics",
+        "DriverVersion": "32.0.32029.2010",
+        "AdapterRAM": 536870912
+      },
+      {
+        "Name": "NVIDIA GeForce RTX 5060 Laptop GPU",
+        "DriverVersion": "32.0.16.1664",
+        "AdapterRAM": 4293918720
+      }
+    ]
+  },
+  "notes": {
+    "statistical-statistics-notes/MathStats.md": {
+      "runs": 5,
+      "build_stamp": "26d4e52-dirty \u00b7 2026-11-23 08:02",
+      "cold_open_call": {
+        "min_ms": 8.683,
+        "median_ms": 9.432,
+        "mean_ms": 9.518,
+        "max_ms": 10.458,
+        "samples": [
+          10.458,
+          9.432,
+          9.077,
+          8.683,
+          9.941
+        ]
+      },
+      "cold_first_frame_clock": {
+        "min_ms": 42.42,
+        "median_ms": 48.48,
+        "mean_ms": 52.116,
+        "max_ms": 72.72,
+        "samples": [
+          72.72,
+          48.48,
+          48.48,
+          42.42,
+          48.48
+        ]
+      },
+      "cold_first_frame_wall": {
+        "min_ms": 44.748,
+        "median_ms": 48.783,
+        "mean_ms": 52.737,
+        "max_ms": 74.118,
+        "samples": [
+          74.118,
+          45.769,
+          48.783,
+          44.748,
+          50.268
+        ]
+      },
+      "cold_subsequent_p95": {
+        "min_ms": 6.06,
+        "median_ms": 6.06,
+        "mean_ms": 6.06,
+        "max_ms": 6.06,
+        "samples": [
+          6.06,
+          6.06,
+          6.06,
+          6.06,
+          6.06
+        ]
+      },
+      "warm_open_call": {
+        "min_ms": 1.871,
+        "median_ms": 1.883,
+        "mean_ms": 1.954,
+        "max_ms": 2.257,
+        "samples": [
+          1.878,
+          2.257,
+          1.883,
+          1.871,
+          1.883
+        ]
+      },
+      "warm_first_frame_clock": {
+        "min_ms": 12.12,
+        "median_ms": 12.12,
+        "mean_ms": 13.332,
+        "max_ms": 18.18,
+        "samples": [
+          18.18,
+          12.12,
+          12.12,
+          12.12,
+          12.12
+        ]
+      },
+      "warm_first_frame_wall": {
+        "min_ms": 13.869,
+        "median_ms": 14.172,
+        "mean_ms": 14.341,
+        "max_ms": 14.975,
+        "samples": [
+          14.975,
+          14.172,
+          14.126,
+          13.869,
+          14.563
+        ]
+      },
+      "warm_subsequent_p95": {
+        "min_ms": 6.06,
+        "median_ms": 6.06,
+        "mean_ms": 6.06,
+        "max_ms": 6.06,
+        "samples": [
+          6.06,
+          6.06,
+          6.06,
+          6.06,
+          6.06
+        ]
+      }
+    },
+    "statistical-statistics-notes/chapter-13-empirical/02-bootstrap.md": {
+      "runs": 5,
+      "build_stamp": "26d4e52-dirty \u00b7 2026-11-23 08:02",
+      "cold_open_call": {
+        "min_ms": 4.976,
+        "median_ms": 5.354,
+        "mean_ms": 5.834,
+        "max_ms": 8.417,
+        "samples": [
+          8.417,
+          4.976,
+          5.058,
+          5.364,
+          5.354
+        ]
+      },
+      "cold_first_frame_clock": {
+        "min_ms": 30.3,
+        "median_ms": 30.3,
+        "mean_ms": 31.512,
+        "max_ms": 36.36,
+        "samples": [
+          36.36,
+          30.3,
+          30.3,
+          30.3,
+          30.3
+        ]
+      },
+      "cold_first_frame_wall": {
+        "min_ms": 27.1,
+        "median_ms": 27.546,
+        "mean_ms": 29.151,
+        "max_ms": 35.568,
+        "samples": [
+          35.568,
+          27.1,
+          27.516,
+          27.546,
+          28.026
+        ]
+      },
+      "cold_subsequent_p95": {
+        "min_ms": 6.06,
+        "median_ms": 6.06,
+        "mean_ms": 6.06,
+        "max_ms": 6.06,
+        "samples": [
+          6.06,
+          6.06,
+          6.06,
+          6.06,
+          6.06
+        ]
+      },
+      "warm_open_call": {
+        "min_ms": 1.184,
+        "median_ms": 1.232,
+        "mean_ms": 1.352,
+        "max_ms": 1.719,
+        "samples": [
+          1.719,
+          1.184,
+          1.405,
+          1.218,
+          1.232
+        ]
+      },
+      "warm_first_frame_clock": {
+        "min_ms": 12.12,
+        "median_ms": 12.12,
+        "mean_ms": 12.12,
+        "max_ms": 12.12,
+        "samples": [
+          12.12,
+          12.12,
+          12.12,
+          12.12,
+          12.12
+        ]
+      },
+      "warm_first_frame_wall": {
+        "min_ms": 8.983,
+        "median_ms": 9.958,
+        "mean_ms": 9.828,
+        "max_ms": 10.607,
+        "samples": [
+          10.607,
+          8.983,
+          10.459,
+          9.958,
+          9.135
+        ]
+      },
+      "warm_subsequent_p95": {
+        "min_ms": 6.06,
+        "median_ms": 6.06,
+        "mean_ms": 6.06,
+        "max_ms": 6.06,
+        "samples": [
+          6.06,
+          6.06,
+          6.06,
+          6.06,
+          6.06
+        ]
+      }
+    },
+    "Welcome.md": {
+      "runs": 5,
+      "build_stamp": "26d4e52-dirty \u00b7 2026-11-23 08:02",
+      "cold_open_call": {
+        "min_ms": 3.106,
+        "median_ms": 3.594,
+        "mean_ms": 3.834,
+        "max_ms": 4.7,
+        "samples": [
+          4.419,
+          3.351,
+          3.106,
+          3.594,
+          4.7
+        ]
+      },
+      "cold_first_frame_clock": {
+        "min_ms": 12.12,
+        "median_ms": 12.12,
+        "mean_ms": 14.544,
+        "max_ms": 18.18,
+        "samples": [
+          18.18,
+          12.12,
+          12.12,
+          12.12,
+          18.18
+        ]
+      },
+      "cold_first_frame_wall": {
+        "min_ms": 12.499,
+        "median_ms": 14.643,
+        "mean_ms": 14.473,
+        "max_ms": 16.946,
+        "samples": [
+          16.946,
+          12.611,
+          12.499,
+          14.643,
+          15.668
+        ]
+      },
+      "cold_subsequent_p95": {
+        "min_ms": 6.06,
+        "median_ms": 6.06,
+        "mean_ms": 6.06,
+        "max_ms": 6.06,
+        "samples": [
+          6.06,
+          6.06,
+          6.06,
+          6.06,
+          6.06
+        ]
+      },
+      "warm_open_call": {
+        "min_ms": 0.925,
+        "median_ms": 1.02,
+        "mean_ms": 1.023,
+        "max_ms": 1.101,
+        "samples": [
+          1.02,
+          0.984,
+          0.925,
+          1.085,
+          1.101
+        ]
+      },
+      "warm_first_frame_clock": {
+        "min_ms": 6.06,
+        "median_ms": 6.06,
+        "mean_ms": 6.06,
+        "max_ms": 6.06,
+        "samples": [
+          6.06,
+          6.06,
+          6.06,
+          6.06,
+          6.06
+        ]
+      },
+      "warm_first_frame_wall": {
+        "min_ms": 6.969,
+        "median_ms": 7.636,
+        "mean_ms": 7.561,
+        "max_ms": 7.887,
+        "samples": [
+          7.636,
+          7.737,
+          6.969,
+          7.887,
+          7.578
+        ]
+      },
+      "warm_subsequent_p95": {
+        "min_ms": 6.06,
+        "median_ms": 6.06,
+        "mean_ms": 6.06,
+        "max_ms": 6.06,
+        "samples": [
+          6.06,
+          6.06,
+          6.06,
+          6.06,
+          6.06
+        ]
+      }
+    }
+  }
+}

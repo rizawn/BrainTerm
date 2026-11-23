@@ -112,7 +112,28 @@ struct BtApp {
   GArray *verify_l2_frame_ms;
   GArray *verify_l2_work_ms;
   gboolean verify_l2_nav_back_ok;
+
+  gchar *bench_first_open_out;
+  gchar *bench_first_open_note;
+  guint bench_fo_phase;
+  guint bench_fo_settle;
+  guint bench_fo_frames;
+  gint64 bench_fo_prev_fc_us;
+  gint64 bench_fo_open_start_us;
+  gdouble bench_fo_cold_open_ms;
+  gdouble bench_fo_cold_first_frame_ms;
+  gdouble bench_fo_cold_wall_frame_ms;
+  GArray *bench_fo_cold_frames;
+  gdouble bench_fo_warm_open_ms;
+  gdouble bench_fo_warm_first_frame_ms;
+  gdouble bench_fo_warm_wall_frame_ms;
+  GArray *bench_fo_warm_frames;
 };
+
+static inline gboolean app_is_ro_bench(const BtApp *app)
+{
+  return app != NULL && (app->verify_l2_dir != NULL || app->bench_first_open_out != NULL);
+}
 
 /* ----------------------------------------------------- state.ini (§7.5) -- */
 
@@ -405,7 +426,7 @@ static void update_header(BtApp *app)
 static void show_toast(BtApp *app, const gchar *msg, guint timeout_s)
 {
   if (app == NULL || app->toast_overlay == NULL || app->smoke_test ||
-      app->verify_l2_dir != NULL || app->capture_dir != NULL || msg == NULL)
+      app_is_ro_bench(app) || app->capture_dir != NULL || msg == NULL)
     return;
   AdwToast *t = adw_toast_new(msg);
   adw_toast_set_timeout(t, timeout_s);
@@ -895,7 +916,7 @@ gboolean bt_app_open_vault(BtApp *app, const gchar *path, GError **error)
     bt_editorpane_flush_save(app->editor);
 
   BtScanStats st = {0};
-  gboolean ro_verify = (app->verify_l2_dir != NULL);
+  gboolean ro_verify = app_is_ro_bench(app);
   BtVault *v = ro_verify ? vault_open_readonly(path, &st, error) : vault_open(path, &st, error);
   if (v == NULL)
     return FALSE;
@@ -2906,6 +2927,159 @@ static gboolean on_verify_l2_tick(GtkWidget *w, GdkFrameClock *clock, gpointer u
   return G_SOURCE_REMOVE;
 }
 
+static gboolean on_bench_first_open_tick(GtkWidget *w, GdkFrameClock *clock, gpointer ud)
+{
+  BtApp *app = ud;
+  const gchar *target =
+      (app->bench_first_open_note != NULL && app->bench_first_open_note[0] != '\0')
+          ? app->bench_first_open_note
+          : "statistical-statistics-notes/MathStats.md";
+  GtkWidget *ev = app->editor ? bt_editorpane_view_widget(app->editor) : NULL;
+
+  if (app->bench_fo_phase == 0) {
+    if (app->bench_fo_settle < 8u || gtk_widget_get_width(w) <= 200) {
+      app->bench_fo_settle++;
+      gtk_widget_queue_draw(w);
+      return G_SOURCE_CONTINUE;
+    }
+    app->bench_fo_prev_fc_us = clock ? gdk_frame_clock_get_frame_time(clock) : 0;
+    app->bench_fo_open_start_us = g_get_monotonic_time();
+    GError *err = NULL;
+    if (!bt_app_open_note(app, target, &err)) {
+      g_printerr("BT_BENCH_FIRST_OPEN ERROR cold open '%s': %s\n", target,
+                 err ? err->message : "unknown");
+      g_clear_error(&err);
+      app->capture_failed = TRUE;
+      g_application_quit(G_APPLICATION(app->adw_app));
+      return G_SOURCE_REMOVE;
+    }
+    app->bench_fo_cold_open_ms =
+        (gdouble)(g_get_monotonic_time() - app->bench_fo_open_start_us) / 1000.0;
+    app->bench_fo_cold_frames = g_array_new(FALSE, FALSE, sizeof(gdouble));
+    app->bench_fo_warm_frames = g_array_new(FALSE, FALSE, sizeof(gdouble));
+    app->bench_fo_phase = 1;
+    app->bench_fo_frames = 0;
+    gtk_widget_queue_draw(ev ? ev : w);
+    return G_SOURCE_CONTINUE;
+  }
+
+  gint64 now_fc_us = clock ? gdk_frame_clock_get_frame_time(clock) : 0;
+  gdouble dt_ms = (app->bench_fo_prev_fc_us > 0 && now_fc_us > app->bench_fo_prev_fc_us)
+                      ? (gdouble)(now_fc_us - app->bench_fo_prev_fc_us) / 1000.0
+                      : 0.0;
+  app->bench_fo_prev_fc_us = now_fc_us;
+
+  if (app->bench_fo_phase == 1) {
+    if (app->bench_fo_frames == 0) {
+      app->bench_fo_cold_first_frame_ms = dt_ms;
+      app->bench_fo_cold_wall_frame_ms =
+          (gdouble)(g_get_monotonic_time() - app->bench_fo_open_start_us) / 1000.0;
+    } else if (dt_ms > 0.0 && dt_ms < 500.0) {
+      g_array_append_val(app->bench_fo_cold_frames, dt_ms);
+    }
+    app->bench_fo_frames++;
+    if (app->bench_fo_frames < 16u) {
+      gtk_widget_queue_draw(ev ? ev : w);
+      return G_SOURCE_CONTINUE;
+    }
+    const gchar *other = NULL;
+    const GPtrArray *notes = app->vault ? vault_notes(app->vault) : NULL;
+    if (notes != NULL) {
+      for (guint i = 0; i < notes->len; i++) {
+        const gchar *cand = g_ptr_array_index(notes, i);
+        if (g_strcmp0(cand, target) != 0) {
+          other = cand;
+          break;
+        }
+      }
+    }
+    if (other != NULL)
+      bt_app_open_note(app, other, NULL);
+    else if (app->editor != NULL)
+      bt_editorpane_clear(app->editor);
+    app->bench_fo_phase = 2;
+    app->bench_fo_settle = 0;
+    gtk_widget_queue_draw(ev ? ev : w);
+    return G_SOURCE_CONTINUE;
+  }
+
+  if (app->bench_fo_phase == 2) {
+    if (app->bench_fo_settle < 6u) {
+      app->bench_fo_settle++;
+      gtk_widget_queue_draw(ev ? ev : w);
+      return G_SOURCE_CONTINUE;
+    }
+    app->bench_fo_prev_fc_us = clock ? gdk_frame_clock_get_frame_time(clock) : 0;
+    app->bench_fo_open_start_us = g_get_monotonic_time();
+    GError *err = NULL;
+    if (!bt_app_open_note(app, target, &err)) {
+      g_printerr("BT_BENCH_FIRST_OPEN ERROR warm open '%s': %s\n", target,
+                 err ? err->message : "unknown");
+      g_clear_error(&err);
+      app->capture_failed = TRUE;
+      g_application_quit(G_APPLICATION(app->adw_app));
+      return G_SOURCE_REMOVE;
+    }
+    app->bench_fo_warm_open_ms =
+        (gdouble)(g_get_monotonic_time() - app->bench_fo_open_start_us) / 1000.0;
+    app->bench_fo_phase = 3;
+    app->bench_fo_frames = 0;
+    gtk_widget_queue_draw(ev ? ev : w);
+    return G_SOURCE_CONTINUE;
+  }
+
+  if (app->bench_fo_frames == 0) {
+    app->bench_fo_warm_first_frame_ms = dt_ms;
+    app->bench_fo_warm_wall_frame_ms =
+        (gdouble)(g_get_monotonic_time() - app->bench_fo_open_start_us) / 1000.0;
+  } else if (dt_ms > 0.0 && dt_ms < 500.0) {
+    g_array_append_val(app->bench_fo_warm_frames, dt_ms);
+  }
+  app->bench_fo_frames++;
+  if (app->bench_fo_frames < 16u) {
+    gtk_widget_queue_draw(ev ? ev : w);
+    return G_SOURCE_CONTINUE;
+  }
+
+  gdouble cold_avg = 0.0, cold_p95 = 0.0, cold_max = 0.0;
+  gdouble warm_avg = 0.0, warm_p95 = 0.0, warm_max = 0.0;
+  compute_timing_stats(app->bench_fo_cold_frames, &cold_avg, &cold_p95, &cold_max);
+  compute_timing_stats(app->bench_fo_warm_frames, &warm_avg, &warm_p95, &warm_max);
+
+  cJSON *root = cJSON_CreateObject();
+  cJSON_AddStringToObject(root, "build_stamp", BT_BUILD_STAMP);
+  cJSON_AddStringToObject(root, "note", target);
+  cJSON_AddNumberToObject(root, "cold_open_call_ms", app->bench_fo_cold_open_ms);
+  cJSON_AddNumberToObject(root, "cold_first_frame_clock_ms", app->bench_fo_cold_first_frame_ms);
+  cJSON_AddNumberToObject(root, "cold_first_frame_wall_ms", app->bench_fo_cold_wall_frame_ms);
+  cJSON_AddNumberToObject(root, "cold_subsequent_avg_ms", cold_avg);
+  cJSON_AddNumberToObject(root, "cold_subsequent_p95_ms", cold_p95);
+  cJSON_AddNumberToObject(root, "cold_subsequent_max_ms", cold_max);
+  cJSON_AddNumberToObject(root, "warm_open_call_ms", app->bench_fo_warm_open_ms);
+  cJSON_AddNumberToObject(root, "warm_first_frame_clock_ms", app->bench_fo_warm_first_frame_ms);
+  cJSON_AddNumberToObject(root, "warm_first_frame_wall_ms", app->bench_fo_warm_wall_frame_ms);
+  cJSON_AddNumberToObject(root, "warm_subsequent_avg_ms", warm_avg);
+  cJSON_AddNumberToObject(root, "warm_subsequent_p95_ms", warm_p95);
+  cJSON_AddNumberToObject(root, "warm_subsequent_max_ms", warm_max);
+  g_autofree gchar *dir = g_path_get_dirname(app->bench_first_open_out);
+  if (dir != NULL && dir[0] != '\0')
+    g_mkdir_with_parents(dir, 0755);
+  char *jstr = cJSON_Print(root);
+  cJSON_Delete(root);
+  if (!g_file_set_contents(app->bench_first_open_out, jstr ? jstr : "{}", -1, NULL))
+    app->capture_failed = TRUE;
+  free(jstr);
+
+  printf("BT_BENCH_FIRST_OPEN ok=%d note=%s cold_open=%.2f cold_ff=%.2f cold_wall=%.2f warm_open=%.2f warm_ff=%.2f warm_wall=%.2f\n",
+         app->capture_failed ? 0 : 1, target, app->bench_fo_cold_open_ms,
+         app->bench_fo_cold_first_frame_ms, app->bench_fo_cold_wall_frame_ms,
+         app->bench_fo_warm_open_ms, app->bench_fo_warm_first_frame_ms,
+         app->bench_fo_warm_wall_frame_ms);
+  fflush(stdout);
+  g_application_quit(G_APPLICATION(app->adw_app));
+  return G_SOURCE_REMOVE;
+}
+
 static gboolean on_smoke_idle(gpointer ud)
 {
   BtApp *app = ud;
@@ -3103,13 +3277,13 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
   bt_filetree_set_action_cb(app->tree, on_tree_action, app);
   app->editor = bt_editorpane_new(on_editor_save, on_editor_link, on_editor_dirty, app);
   bt_editorpane_set_conflict_cbs(app->editor, on_editor_conflict_diff, on_editor_conflict_reload);
-  if (app->capture_dir == NULL && app->verify_l2_dir == NULL)
+  if (app->capture_dir == NULL && !app_is_ro_bench(app))
     bt_app_set_links_open_on_click(app, bt_app_load_links_open_on_click(), FALSE);
   else
     bt_app_set_links_open_on_click(app, TRUE, FALSE);
   app->graphview = bt_graphview_new(on_graph_open_note, on_tree_open_term, app);
   bt_graphview_set_rename_cb(app->graphview, on_graph_rename_note, app);
-  if (!app->smoke_test && app->capture_dir == NULL && app->verify_l2_dir == NULL) {
+  if (!app->smoke_test && app->capture_dir == NULL && !app_is_ro_bench(app)) {
     bt_graphview_set_show_tags(app->graphview, load_saved_graph_bool("show_tags", FALSE));
     bt_graphview_set_show_ghosts(app->graphview, load_saved_graph_bool("show_ghosts", FALSE));
   }
@@ -3129,11 +3303,11 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
   adw_view_stack_add_titled_with_icon(app->view_stack, bt_sessionspanel_widget(app->sessions_panel),
                                       "sessions", "Sessions", "bt-sessions-symbolic");
 
-  gchar *saved_page = (app->smoke_test || app->verify_l2_dir != NULL) ? g_strdup("editor") : bt_app_load_saved_page();
+  gchar *saved_page = (app->smoke_test || app_is_ro_bench(app)) ? g_strdup("editor") : bt_app_load_saved_page();
   const gchar *stack_page = (g_strcmp0(saved_page, "sessions") == 0) ? "sessions" : "editor";
   adw_view_stack_set_visible_child_name(app->view_stack, stack_page);
 
-  app->graph_visible = (app->smoke_test || app->capture_dir != NULL || app->verify_l2_dir != NULL) ? TRUE : load_saved_graph_visible();
+  app->graph_visible = (app->smoke_test || app->capture_dir != NULL || app_is_ro_bench(app)) ? TRUE : load_saved_graph_visible();
   if (g_strcmp0(saved_page, "graph") == 0)
     app->graph_visible = TRUE;
 
@@ -3282,7 +3456,7 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
   adw_application_window_set_content(ADW_APPLICATION_WINDOW(app->window), tview);
 
   /* Apply persisted scheme (dark-first default) before presenting. */
-  apply_scheme_runtime(app, (app->smoke_test || app->verify_l2_dir != NULL) ? BT_SCHEME_DARK : load_saved_scheme(), FALSE);
+  apply_scheme_runtime(app, (app->smoke_test || app_is_ro_bench(app)) ? BT_SCHEME_DARK : load_saved_scheme(), FALSE);
 
   gtk_window_present(app->window);
 
@@ -3295,14 +3469,14 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
       else
         bt_app_show_error(app, "Cannot open vault", err->message);
       g_error_free(err);
-    } else if (app->verify_l2_dir == NULL && vault_notes(app->vault)->len > 0) {
+    } else if (!app_is_ro_bench(app) && vault_notes(app->vault)->len > 0) {
       const gchar *first = g_ptr_array_index(vault_notes(app->vault), 0);
       bt_app_open_note(app, first, NULL);
     }
   }
-  if (!app->smoke_test && app->verify_l2_dir == NULL && g_strcmp0(stack_page, "editor") != 0)
+  if (!app->smoke_test && !app_is_ro_bench(app) && g_strcmp0(stack_page, "editor") != 0)
     adw_view_stack_set_visible_child_name(app->view_stack, stack_page);
-  if (app->verify_l2_dir == NULL)
+  if (!app_is_ro_bench(app))
     g_signal_connect(app->view_stack, "notify::visible-child-name",
                      G_CALLBACK(on_view_stack_page_changed), app);
   g_free(saved_page);
@@ -3322,6 +3496,8 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
     g_timeout_add(60, on_capture_poll, app);
   else if (app->verify_l2_dir != NULL)
     gtk_widget_add_tick_callback(GTK_WIDGET(app->window), on_verify_l2_tick, app, NULL);
+  else if (app->bench_first_open_out != NULL)
+    gtk_widget_add_tick_callback(GTK_WIDGET(app->window), on_bench_first_open_tick, app, NULL);
 }
 
 static gint on_handle_local_options(GApplication *gapp, GVariantDict *opts, gpointer ud)
@@ -3358,6 +3534,16 @@ static gint on_handle_local_options(GApplication *gapp, GVariantDict *opts, gpoi
   if (g_variant_dict_lookup(opts, "verify-l2-life2", "s", &vl2_dir)) {
     g_free(app->verify_l2_dir);
     app->verify_l2_dir = vl2_dir;
+  }
+  gchar *bfo_out = NULL;
+  if (g_variant_dict_lookup(opts, "bench-first-open", "s", &bfo_out)) {
+    g_free(app->bench_first_open_out);
+    app->bench_first_open_out = bfo_out;
+  }
+  gchar *bfo_note = NULL;
+  if (g_variant_dict_lookup(opts, "bench-note", "s", &bfo_note)) {
+    g_free(app->bench_first_open_note);
+    app->bench_first_open_note = bfo_note;
   }
   gchar *cap_state = NULL;
   if (g_variant_dict_lookup(opts, "graph-state", "s", &cap_state)) {
@@ -3439,6 +3625,8 @@ BtApp *bt_app_new(void)
     {"graph-size", 0, 0, G_OPTION_ARG_STRING, NULL, "Window size WxH for --graph-capture (e.g. 1000x700 or 1920x1080)", "WxH"},
     {"selftest-links", 0, 0, G_OPTION_ARG_STRING, NULL, "Run read-only link resolver self-test on DIR and exit", "DIR"},
     {"verify-l2-life2", 0, 0, G_OPTION_ARG_STRING, NULL, "Run read-only L2 click/nav verification on --vault and write evidence to OUT_DIR", "OUT_DIR"},
+    {"bench-first-open", 0, 0, G_OPTION_ARG_STRING, NULL, "Measure read-only cold first-open & warm second-open frame timing on --vault and write JSON to OUT_FILE", "OUT_FILE"},
+    {"bench-note", 0, 0, G_OPTION_ARG_STRING, NULL, "Relative note path to benchmark with --bench-first-open", "RELPATH"},
     {"version", 'V', 0, G_OPTION_ARG_NONE, NULL, "Print version and build stamp and exit", NULL},
     {NULL, 0, 0, 0, NULL, NULL, NULL},
   };
@@ -3478,6 +3666,12 @@ void bt_app_free(BtApp *app)
     g_array_free(app->verify_l2_frame_ms, TRUE);
   if (app->verify_l2_work_ms != NULL)
     g_array_free(app->verify_l2_work_ms, TRUE);
+  g_free(app->bench_first_open_out);
+  g_free(app->bench_first_open_note);
+  if (app->bench_fo_cold_frames != NULL)
+    g_array_free(app->bench_fo_cold_frames, TRUE);
+  if (app->bench_fo_warm_frames != NULL)
+    g_array_free(app->bench_fo_warm_frames, TRUE);
   g_free(app->last_statusbar_notice);
   g_clear_object(&app->adw_app);
   g_free(app);
