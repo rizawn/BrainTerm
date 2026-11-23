@@ -190,6 +190,14 @@ t_linkresolve = executable(
 )
 test('linkresolve', t_linkresolve, suite: 'unit')
 
+t_createnote = executable(
+  'test_createnote',
+  'unit/test_createnote.c',
+  include_directories: test_inc,
+  dependencies: [bt_core_dep, cmocka_dep],
+)
+test('createnote', t_createnote, suite: 'unit')
+
 t_math_tok = executable(
   'test_math_tok',
   'unit/test_math_tok.c',

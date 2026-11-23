@@ -2077,3 +2077,67 @@ int bt_link_selftest_cli(const char *vault_dir)
   vault_free(vault);
   return 0;
 }
+
+gboolean bt_link_is_note_ext(const char *path)
+{
+  return is_note_ext(path);
+}
+
+gboolean bt_link_is_reserved_device_name(const char *seg)
+{
+  return is_reserved_device_name(seg);
+}
+
+gboolean bt_link_percent_decode_path(const char *in, gchar **out, gboolean *out_ctrl)
+{
+  return percent_decode_path(in, out, out_ctrl);
+}
+
+gboolean bt_index_snapshot_is_case_sensitive(const BtIndexSnapshot *snap)
+{
+  return snap ? snap->case_sensitive : TRUE;
+}
+
+gboolean bt_index_snapshot_find_relpath(const BtIndexSnapshot *snap, const char *relpath,
+                                        gboolean *out_is_dir, gchar **out_actual_relpath)
+{
+  if (snap == NULL || !snap->finalized || relpath == NULL || relpath[0] == '\0')
+    return FALSE;
+  g_autofree gchar *key = normalize_key(relpath, snap->case_sensitive);
+  GArray *arr = g_hash_table_lookup(snap->by_relpath, key);
+  if (arr == NULL || arr->len == 0)
+    return FALSE;
+  guint idx = g_array_index(arr, guint, 0);
+  const SnapEntry *e = g_ptr_array_index(snap->entries, idx);
+  if (out_is_dir)
+    *out_is_dir = e->is_dir;
+  if (out_actual_relpath)
+    *out_actual_relpath = g_strdup(e->relpath);
+  return TRUE;
+}
+
+gboolean bt_index_snapshot_has_other_basename(const BtIndexSnapshot *snap, const char *note_stem,
+                                            const char *exclude_relpath)
+{
+  if (snap == NULL || !snap->finalized || note_stem == NULL || note_stem[0] == '\0')
+    return FALSE;
+  g_autofree gchar *stem_key = normalize_key(note_stem, snap->case_sensitive);
+  GArray *arr = g_hash_table_lookup(snap->by_stem, stem_key);
+  if (arr == NULL || arr->len == 0)
+    return FALSE;
+  g_autofree gchar *excl_key =
+      exclude_relpath ? normalize_key(exclude_relpath, snap->case_sensitive) : NULL;
+  for (guint i = 0; i < arr->len; i++) {
+    guint idx = g_array_index(arr, guint, i);
+    const SnapEntry *e = g_ptr_array_index(snap->entries, idx);
+    if (!e->is_note)
+      continue;
+    if (excl_key != NULL) {
+      g_autofree gchar *ek = normalize_key(e->relpath, snap->case_sensitive);
+      if (strcmp(ek, excl_key) == 0)
+        continue;
+    }
+    return TRUE;
+  }
+  return FALSE;
+}

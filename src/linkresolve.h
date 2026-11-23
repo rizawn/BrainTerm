@@ -139,6 +139,16 @@ const char *bt_link_status_name(BtLinkStatus status);
 const char *bt_link_kind_name(BtLinkKind kind);
 const char *bt_link_block_reason_message(BtLinkBlockReason reason);
 
+/* Shared path/snapshot helpers used by core planner (libbt_core, GTK-free). */
+gboolean bt_link_is_note_ext(const char *path);
+gboolean bt_link_is_reserved_device_name(const char *seg);
+gboolean bt_link_percent_decode_path(const char *in, gchar **out, gboolean *out_ctrl);
+gboolean bt_index_snapshot_is_case_sensitive(const BtIndexSnapshot *snap);
+gboolean bt_index_snapshot_find_relpath(const BtIndexSnapshot *snap, const char *relpath,
+                                        gboolean *out_is_dir, gchar **out_actual_relpath);
+gboolean bt_index_snapshot_has_other_basename(const BtIndexSnapshot *snap, const char *note_stem,
+                                            const char *exclude_relpath);
+
 /* Runs headless, read-only link scan + resolve audit on vault_dir (A.15). */
 int bt_link_selftest_cli(const char *vault_dir);
 
