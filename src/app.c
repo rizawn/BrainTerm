@@ -1736,49 +1736,6 @@ BtNavHistory *bt_app_nav_history(const BtApp *app)
   return app ? app->nav : NULL;
 }
 
-static guint stub_writer_call_count = 0;
-
-guint bt_app_stub_writer_calls_for_test(void)
-{
-  return stub_writer_call_count;
-}
-
-void bt_app_reset_stub_writer_calls_for_test(void)
-{
-  stub_writer_call_count = 0;
-}
-
-gboolean bt_app_open_or_create_wikilink(BtApp *app, const gchar *target, GError **error)
-{
-  stub_writer_call_count++;
-  g_return_val_if_fail(app != NULL && target != NULL, FALSE);
-  if (app->vault == NULL)
-    return FALSE;
-
-  gchar *existing = bt_wikilink_find_note(vault_notes(app->vault), target);
-  if (existing != NULL) {
-    gboolean ok = bt_app_open_note(app, existing, error);
-    g_free(existing);
-    return ok;
-  }
-
-  gchar *rel = bt_wikilink_new_note_path(target);
-  if (rel == NULL) {
-    g_set_error(error, BT_ERROR, BT_ERROR_PATH_REJECTED, "Invalid wiki-link target: '%s'", target);
-    return FALSE;
-  }
-  gchar *stub = g_strdup_printf("# %s\n\n", target);
-  gboolean ok = vault_atomic_write(app->vault, rel, stub, strlen(stub), NULL, error);
-  g_free(stub);
-  if (ok) {
-    vault_rescan(app->vault, NULL, NULL);
-    bt_filetree_populate(app->tree, app->vault);
-    ok = bt_app_open_note(app, rel, error);
-  }
-  g_free(rel);
-  return ok;
-}
-
 gboolean bt_app_save_active(BtApp *app, GError **error)
 {
   g_return_val_if_fail(app != NULL, FALSE);

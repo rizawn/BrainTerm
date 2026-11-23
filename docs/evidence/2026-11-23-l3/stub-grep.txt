@@ -1,0 +1,6 @@
+﻿docs/links-and-math-plan.md:66:| 2 | Existing `bt_app_open_or_create_wikilink()` creates notes safely | `src/app.c:594-622` silently writes a bare `# target\n\n` stub without confirmation or BrainTerm YAML frontmatter. | Replace with A.11 confirm popover + standard YAML frontmatter template. |
+docs/briefs\go-2026-11-23.md:231:- The old stub writer `bt_app_open_or_create_wikilink()` in `src/app.c` (around lines 594 to 622) is still present but must not be reachable from the click path. L3 removes it.
+docs/briefs\go-2026-11-23.md:251:| G-1 | Where is `bt_app_open_or_create_wikilink()` defined and who calls it? | `src/app.c`, grep the whole repo |
+docs/briefs\go-2026-11-23.md:592:1. Use G-1 to list every caller of `bt_app_open_or_create_wikilink()`. Record the list in the recon file.
+docs/evidence\2026-11-23-l3\recon.md:29:| G-1 | Where is `bt_app_open_or_create_wikilink()` defined and called? | Declared in `src/app.h:42`, defined in `src/app.c:1243–1271`. Only caller in the entire repo: `on_graph_open_note()` (`src/app.c:1612–1624`, call on line `1616` when `is_ghost == TRUE`). Zero callers on editor link click paths. |
+docs/evidence\2026-11-23-l3\recon.md:48:| Brief G-1 / §1.2 ("near lines 594 to 622") | `bt_app_open_or_create_wikilink()` is at `src/app.c:1243–1271`, called only at `src/app.c:1616`. | Target actual line numbers. |

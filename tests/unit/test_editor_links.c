@@ -507,7 +507,6 @@ static void test_l2_8_unresolved_click_does_not_call_stub_writer(void **state)
     return;
   }
   adw_init();
-  bt_app_reset_stub_writer_calls_for_test();
 
   gchar *root = g_dir_make_tmp("bt-l28-XXXXXX", NULL);
   gchar *cfg = g_dir_make_tmp("bt-cfg28-XXXXXX", NULL);
@@ -555,7 +554,6 @@ static void test_l2_8_unresolved_click_does_not_call_stub_writer(void **state)
   assert_false(g_file_test(p1, G_FILE_TEST_EXISTS));
   assert_false(g_file_test(p2, G_FILE_TEST_EXISTS));
   assert_int_equal(count_files_recursive(root), files_before);
-  assert_int_equal(bt_app_stub_writer_calls_for_test(), 0);
 
   printf("BT_TEST_L2_8 unresolved_no_stub_create=1 files=%u\n", files_before);
   GtkWindow *win = bt_app_window(app);
@@ -958,7 +956,6 @@ static void test_l3_1e_unresolved_click_create_flow(void **state)
     return;
   }
   adw_init();
-  bt_app_reset_stub_writer_calls_for_test();
 
   gchar *root = g_dir_make_tmp("bt-l31e-XXXXXX", NULL);
   gchar *cfg = g_dir_make_tmp("bt-cfg31e-XXXXXX", NULL);
@@ -1024,7 +1021,6 @@ static void test_l3_1e_unresolved_click_create_flow(void **state)
   assert_int_equal(count_vault_user_files(root), user_files_before + 1);
   g_autofree gchar *created_disk = g_build_filename(root, "newly-minted.md", NULL);
   assert_true(g_file_test(created_disk, G_FILE_TEST_IS_REGULAR));
-  assert_int_equal(bt_app_stub_writer_calls_for_test(), 0);
 
   /* Source note file on disk is 100% unmodified. */
   g_autofree gchar *src_disk = NULL;
