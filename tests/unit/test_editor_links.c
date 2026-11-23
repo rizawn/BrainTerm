@@ -1776,6 +1776,104 @@ static void test_l3_4_confirm_external_urls_settings(void **state)
   g_free(cfg);
 }
 
+static void test_l3_6a_links_demo_template(void **state)
+{
+  (void)state;
+  if (!gtk_init_check()) {
+    skip();
+    return;
+  }
+  adw_init();
+
+  const gchar *src_root = g_getenv("BT_SOURCE_ROOT");
+  g_autofree gchar *tpl_dir = src_root
+                                  ? g_build_filename(src_root, "vault-template", NULL)
+                                  : g_strdup("vault-template");
+  if (!g_file_test(tpl_dir, G_FILE_TEST_IS_DIR)) {
+    skip();
+    return;
+  }
+
+  /* Copy vault-template/examples into a temporary vault so tests never write to source tree. */
+  gchar *root = g_dir_make_tmp("bt-l36a-XXXXXX", NULL);
+  gchar *cfg = g_dir_make_tmp("bt-cfg36a-XXXXXX", NULL);
+  g_setenv("BT_CONFIG_DIR", cfg, TRUE);
+
+  const gchar *rel_files[] = {
+    "examples/links-demo.md",
+    "examples/link-target.md",
+    "examples/spaced note.md",
+    "examples/topic-a/duplicate.md",
+    "examples/topic-b/duplicate.md",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS(rel_files); i++) {
+    g_autofree gchar *src_f = g_build_filename(tpl_dir, rel_files[i], NULL);
+    g_autofree gchar *raw = NULL;
+    assert_true(g_file_get_contents(src_f, &raw, NULL, NULL));
+    bt_test_put(root, rel_files[i], raw);
+  }
+
+  BtApp *app = bt_app_new();
+  bt_app_prepare_ui_for_test(app);
+  assert_true(bt_app_open_vault(app, root, NULL));
+  assert_true(bt_app_open_note(app, "examples/links-demo.md", NULL));
+
+  BtEditorPane *ed = (BtEditorPane *)bt_app_editor(app);
+  assert_non_null(ed);
+
+  /* CX10: All 10 links in links-demo.md scan and classify cleanly with zero parse errors. */
+  const GArray *spans = bt_editorpane_link_spans(ed);
+  assert_non_null(spans);
+  assert_true(spans->len >= 10);
+
+  BtIndexSnapshot *snap = bt_index_snapshot_from_vault(bt_app_vault(app));
+  assert_non_null(snap);
+  guint n_resolved = 0, n_unresolved = 0, n_ambig = 0, n_ext = 0, n_blocked = 0, n_placeholder = 0;
+  gsize placeholder_off = 0;
+  for (guint i = 0; i < spans->len; i++) {
+    const BtLinkSpan *sp = &g_array_index(spans, BtLinkSpan, i);
+    BtLinkResolution *res = bt_link_resolve(snap, "examples/links-demo.md", sp->raw_target);
+    assert_non_null(res);
+    switch (res->status) {
+      case BT_LINK_RESOLVED: n_resolved++; break;
+      case BT_LINK_UNRESOLVED: n_unresolved++; break;
+      case BT_LINK_AMBIGUOUS: n_ambig++; break;
+      case BT_LINK_EXTERNAL: n_ext++; break;
+      case BT_LINK_BLOCKED: n_blocked++; break;
+      case BT_LINK_PLACEHOLDER:
+        n_placeholder++;
+        placeholder_off = sp->start + 2;
+        break;
+    }
+    bt_link_resolution_free(res);
+  }
+  bt_index_snapshot_free(snap);
+  assert_true(n_resolved >= 4);
+  assert_int_equal(n_unresolved, 1);
+  assert_int_equal(n_ambig, 1);
+  assert_int_equal(n_ext, 2);
+  assert_int_equal(n_blocked, 1);
+  assert_int_equal(n_placeholder, 1);
+
+  /* CX09: Placeholder in links-demo.md is plain text, no tooltip, no popover. */
+  g_autofree gchar *tip_ph = bt_editorpane_tooltip_for_offset(ed, placeholder_off);
+  assert_null(tip_ph);
+  bt_editorpane_set_caret_byte_offset(ed, 0);
+  assert_false(bt_editorpane_simulate_click(ed, placeholder_off, 1, 1, 0.0, 0.0, 0));
+  assert_null(bt_app_create_popover_for_test(app));
+  assert_null(bt_app_chooser_popover_for_test(app));
+  assert_null(bt_app_active_confirm_popover_for_test(app));
+
+  printf("BT_TEST_L3_6A cx09_placeholder_plain=ok cx10_demo_spans=%u\n", spans->len);
+  GtkWindow *w = bt_app_window(app);
+  if (w) gtk_window_destroy(w);
+  bt_app_free(app);
+  bt_test_rm_rf(root);
+  bt_test_rm_rf(cfg);
+  g_free(root);
+  g_free(cfg);
+}
+
 static guint ui_log_warnings = 0;
 
 static void on_ui_test_log(const gchar *domain, GLogLevelFlags level, const gchar *msg, gpointer ud)
@@ -1816,6 +1914,7 @@ int main(void)
     cmocka_unit_test(test_ck11_alt_left_right_still_navigate_history),
     cmocka_unit_test(test_ck12_shortcut_audit_no_unresolved_conflict),
     cmocka_unit_test(test_l3_4_confirm_external_urls_settings),
+    cmocka_unit_test(test_l3_6a_links_demo_template),
   };
   int rc = cmocka_run_group_tests(tests, NULL, NULL);
   if (ui_log_warnings > 0)
