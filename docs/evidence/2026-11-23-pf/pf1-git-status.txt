@@ -1,0 +1,83 @@
+﻿=== BEFORE ===
+ M docs/DECISIONS.md
+?? docs/bench/
+?? docs/evidence/
+?? docs/links-and-math-plan.md
+?? docs/logseq-parity.md
+?? docs/review/
+?? skill/
+
+=== AFTER (STAGED) ===
+M  docs/DECISIONS.md
+A  docs/bench/2026-11-23.json
+A  docs/evidence/2026-11-23-l1m1/life2-after.txt
+A  docs/evidence/2026-11-23-l1m1/life2-before.txt
+A  docs/evidence/2026-11-23-l1m1/life2-diff.txt
+A  docs/evidence/2026-11-23-l1m1/selftest-links-life2.txt
+A  docs/evidence/2026-11-23-l2/ambiguity-ranking.txt
+A  docs/evidence/2026-11-23-l2/frame-times-l2.json
+A  docs/evidence/2026-11-23-l2/life2-after.txt
+A  docs/evidence/2026-11-23-l2/life2-before.txt
+A  docs/evidence/2026-11-23-l2/life2-diff.txt
+A  docs/evidence/2026-11-23-l2/mathstats-click-opened.json
+A  docs/evidence/2026-11-23-l2/mathstats-click-opened.png
+A  docs/evidence/2026-11-23-l2/selftest-links-life2.txt
+A  docs/evidence/2026-11-23-l2/selftest-timings.txt
+A  docs/evidence/2026-11-23-l2/skip-audit.txt
+A  docs/evidence/2026-11-23-l2/unresolved-categories.txt
+A  docs/evidence/2026-11-23-pf/pf1-git-status.txt
+A  docs/evidence/2026-11-23/1000x700/3d.json
+A  docs/evidence/2026-11-23/1000x700/3d.png
+A  docs/evidence/2026-11-23/1000x700/default-fit.json
+A  docs/evidence/2026-11-23/1000x700/default-fit.png
+A  docs/evidence/2026-11-23/1000x700/hover-hub.json
+A  docs/evidence/2026-11-23/1000x700/hover-hub.png
+A  docs/evidence/2026-11-23/1000x700/hover-small.json
+A  docs/evidence/2026-11-23/1000x700/hover-small.png
+A  docs/evidence/2026-11-23/1000x700/reduce-motion-off.json
+A  docs/evidence/2026-11-23/1000x700/reduce-motion-off.png
+A  docs/evidence/2026-11-23/1000x700/reduce-motion-on.json
+A  docs/evidence/2026-11-23/1000x700/reduce-motion-on.png
+A  docs/evidence/2026-11-23/1000x700/selected.json
+A  docs/evidence/2026-11-23/1000x700/selected.png
+A  docs/evidence/2026-11-23/1000x700/zoom2x.json
+A  docs/evidence/2026-11-23/1000x700/zoom2x.png
+A  docs/evidence/2026-11-23/1920x1080/3d.json
+A  docs/evidence/2026-11-23/1920x1080/3d.png
+A  docs/evidence/2026-11-23/1920x1080/default-fit.json
+A  docs/evidence/2026-11-23/1920x1080/default-fit.png
+A  docs/evidence/2026-11-23/1920x1080/hover-hub.json
+A  docs/evidence/2026-11-23/1920x1080/hover-hub.png
+A  docs/evidence/2026-11-23/1920x1080/hover-small.json
+A  docs/evidence/2026-11-23/1920x1080/hover-small.png
+A  docs/evidence/2026-11-23/1920x1080/reduce-motion-off.json
+A  docs/evidence/2026-11-23/1920x1080/reduce-motion-off.png
+A  docs/evidence/2026-11-23/1920x1080/reduce-motion-on.json
+A  docs/evidence/2026-11-23/1920x1080/reduce-motion-on.png
+A  docs/evidence/2026-11-23/1920x1080/selected.json
+A  docs/evidence/2026-11-23/1920x1080/selected.png
+A  docs/evidence/2026-11-23/1920x1080/zoom2x.json
+A  docs/evidence/2026-11-23/1920x1080/zoom2x.png
+A  docs/evidence/2026-11-23/bench.json
+A  docs/links-and-math-plan.md
+A  docs/logseq-parity.md
+A  docs/review/graph-2026-11-22-after/a_default_fit.png
+A  docs/review/graph-2026-11-22-after/b_hover_largest_hub.png
+A  docs/review/graph-2026-11-22-after/c_hover_small_note.png
+A  docs/review/graph-2026-11-22-after/d_selected_node.png
+A  docs/review/graph-2026-11-22-after/e_zoom2x_densest.png
+A  docs/review/graph-2026-11-22-after/f_3d_mode.png
+A  docs/review/graph-2026-11-22-after/g_reduce_motion_off.png
+A  docs/review/graph-2026-11-22-after/g_reduce_motion_on.png
+A  docs/review/graph-2026-11-22/a_default_fit.png
+A  docs/review/graph-2026-11-22/b_hover_largest_hub.png
+A  docs/review/graph-2026-11-22/c_hover_small_note.png
+A  docs/review/graph-2026-11-22/d_selected_node.png
+A  docs/review/graph-2026-11-22/e_zoom2x_densest.png
+A  docs/review/graph-2026-11-22/f_3d_mode.png
+A  docs/review/graph-2026-11-22/g_reduce_motion_off.png
+A  docs/review/graph-2026-11-22/g_reduce_motion_on.png
+
+=== COMMITTED STATUS ===
+clean (git status --porcelain empty after commit)
+

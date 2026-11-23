@@ -1,0 +1,5 @@
+﻿# P-5 --selftest-links timings on life2 (310 notes, 831 links)
+# Note: unprivileged Windows 11 cannot purge the kernel Standby File Cache (requires SeProfileSingleProcessPrivilege); Run 1 reflects fresh process launch after build, Runs 2-3 reflect back-to-back warm OS file cache.
+Run 1 (fresh process / initial): notes=310 notes_with_links=155 total_links=831 total_ms=147.07 ms_per_1000_links=176.98
+Run 2 (back-to-back warm 1):   notes=310 notes_with_links=155 total_links=831 total_ms=158.87 ms_per_1000_links=191.18
+Run 3 (back-to-back warm 2):   notes=310 notes_with_links=155 total_links=831 total_ms=150.75 ms_per_1000_links=181.40

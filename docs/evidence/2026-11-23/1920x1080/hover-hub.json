@@ -1,0 +1,22 @@
+{
+	"state":	"hover-hub",
+	"build_stamp":	"937dab6-dirty · 2026-11-23 00:13",
+	"window_width":	1920,
+	"window_height":	1080,
+	"graph_width":	1044,
+	"graph_height":	458,
+	"scale_factor":	1,
+	"backend":	"gl",
+	"gl_renderer":	"NVIDIA GeForce RTX 5060 Laptop GPU/PCIe/SSE2",
+	"gl_version":	"4.6.0 NVIDIA 616.64",
+	"quality":	"high",
+	"mode":	"2d",
+	"reduce_motion":	false,
+	"nodes_total":	761,
+	"nodes_visible":	314,
+	"edges_total":	877,
+	"edges_visible":	293,
+	"drawn_labels":	6,
+	"overlap_count":	0,
+	"settle_frames":	12
+}

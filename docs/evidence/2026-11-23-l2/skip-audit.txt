@@ -1,0 +1,124 @@
+# P-1 Wikilink Skip Audit (life2 read-only)
+# Total P0 regex matches skipped by bt_link_scan(): 428
+# Exclusion breakdown: {'INLINE_CODE_SPAN': 107, 'FRONTMATTER_NON_LINKS': 210, 'FENCED_CODE_BLOCK': 110, 'IMAGE_EMBED_![[...]]': 1}
+# Unknown/body exclusions (potential parser bugs): 0
+
+## Sample 1: claude-obsidian/WIKI.md:322
+Token: [[Data Flow]]
+Reason excluded: INLINE_CODE_SPAN
+Context (3 lines before/after):
+       319: 
+       320: Frontmatter for modules/: `path`, `status` (active|deprecated|experimental|planned), `language`, `purpose`, `maintainer`, `depends_on`, `used_by`, `linked_issues`
+       321: 
+  >>>  322: Key pages: `[[Architecture Overview]]`, `[[Data Flow]]`, `[[Tech Stack]]`, `[[Dependency Graph]]`, `[[Key Decisions]]`
+       323: 
+       324: ---
+       325: 
+
+## Sample 2: claude-obsidian/wiki/index.md:18
+Token: [[LLM Wiki Pattern]]
+Reason excluded: FRONTMATTER_NON_LINKS
+Context (3 lines before/after):
+        15:   - "[[concepts/_index]]"
+        16:   - "[[entities/_index]]"
+        17:   - "[[sources/_index]]"
+  >>>   18:   - "[[LLM Wiki Pattern]]"
+        19:   - "[[Hot Cache]]"
+        20:   - "[[Compounding Knowledge]]"
+        21:   - "[[Andrej Karpathy]]"
+
+## Sample 3: claude-obsidian/wiki/meta/claude-obsidian-v1.2.0-release-session.md:16
+Token: [[LLM Wiki Pattern]]
+Reason excluded: FRONTMATTER_NON_LINKS
+Context (3 lines before/after):
+        13:   - "[[getting-started]]"
+        14:   - "[[index]]"
+        15:   - "[[overview]]"
+  >>>   16:   - "[[LLM Wiki Pattern]]"
+        17: ---
+        18: 
+        19: # claude-obsidian v1.2.0 Release Session
+
+## Sample 4: claude-obsidian/wiki/entities/kepano-obsidian-skills.md:13
+Token: [[LLM Wiki Pattern]]
+Reason excluded: FRONTMATTER_NON_LINKS
+Context (3 lines before/after):
+        10:   - obsidian-creator
+        11: status: current
+        12: related:
+  >>>   13:   - "[[LLM Wiki Pattern]]"
+        14:   - "[[cherry-picks]]"
+        15:   - "[[claude-obsidian-ecosystem]]"
+        16: sources:
+
+## Sample 5: claude-obsidian/skills/wiki/references/modes.md:211
+Token: [[Open Questions]]
+Reason excluded: INLINE_CODE_SPAN
+Context (3 lines before/after):
+       208: ---
+       209: ```
+       210: 
+  >>>  211: Key wiki pages to create: `[[Research Overview]]`, `[[Key Claims Map]]`, `[[Open Questions]]`, `[[Methodology Comparison]]`
+       212: 
+       213: ---
+       214: 
+
+## Sample 6: claude-obsidian/skills/wiki/SKILL.md:85
+Token: [[New Page 1]]
+Reason excluded: FENCED_CODE_BLOCK
+Context (3 lines before/after):
+        82: - [Second most important]
+        83: 
+        84: ## Recent Changes
+  >>>   85: - Created: [[New Page 1]], [[New Page 2]]
+        86: - Updated: [[Existing Page]] (added section on X)
+        87: - Flagged: Contradiction between [[Page A]] and [[Page B]] on Y
+        88: 
+
+## Sample 7: claude-obsidian/WIKI.md:515
+Token: [[Question Title]]
+Reason excluded: FENCED_CODE_BLOCK
+Context (3 lines before/after):
+       512: - [[Source Title]] — author, date, type
+       513: 
+       514: ## Questions
+  >>>  515: - [[Question Title]] — answer summary
+       516: ```
+       517: 
+       518: ### Domain Sub-Indexes
+
+## Sample 8: claude-obsidian/wiki/index.md:10
+Token: [[overview]]
+Reason excluded: FRONTMATTER_NON_LINKS
+Context (3 lines before/after):
+         7:   - index
+         8: status: evergreen
+         9: related:
+  >>>   10:   - "[[overview]]"
+        11:   - "[[log]]"
+        12:   - "[[hot]]"
+        13:   - "[[dashboard]]"
+
+## Sample 9: claude-obsidian/skills/obsidian-markdown/SKILL.md:43
+Token: [[document.pdf]]
+Reason excluded: INLINE_CODE_SPAN
+Context (3 lines before/after):
+        40: | `![[Note Name#Heading]]` | Embed a section |
+        41: | `![[image.png]]` | Embed an image |
+        42: | `![[image.png\|300]]` | Embed image with width 300px |
+  >>>   43: | `![[document.pdf]]` | Embed a PDF (Obsidian renders natively) |
+        44: | `![[audio.mp3]]` | Embed audio |
+        45: 
+        46: ---
+
+## Sample 10: claude-obsidian/wiki/getting-started.md:11
+Token: [[overview]]
+Reason excluded: FRONTMATTER_NON_LINKS
+Context (3 lines before/after):
+         8: status: evergreen
+         9: related:
+        10:   - "[[index]]"
+  >>>   11:   - "[[overview]]"
+        12:   - "[[LLM Wiki Pattern]]"
+        13:   - "[[Wiki vs RAG]]"
+        14:   - "[[Wiki Map]]"

@@ -148,3 +148,69 @@ Replaces `data/bt-ink.css` and the grayscale-only `test_ink_theme` gate with a c
 
 ### 20. Font bundling & symbolic icons (`src/ui/themeload.c`, `scripts/gen_icons.py`)
 Bundled OFL-licensed `InterVariable.ttf` and `JetBrainsMono-{Regular,Bold}.ttf` under `data/fonts/` (registered via `AddFontResourceExW(..., FR_PRIVATE, 0)` on Windows and `FcConfigAppFontAddFile` + `PangoFc` on Linux/Unix, with CSS/Pango fallback to `Segoe UI Variable` / `Cascadia Mono` / `Consolas`), plus 16 Lucide-style filled-outline symbolic SVGs compiled into `brainterm.gresource.xml`.
+
+---
+
+## Logseq-Style Knowledge Management (Clean-Room) — 2026-11-22
+
+See `docs/logseq-parity.md` for full scope and clean-room rules (Logseq is AGPL-3.0; zero Logseq code or assets are used; file-format interop only).
+
+### ADR-010 — Journal file naming & template (`journals/YYYY-MM-DD.md`)
+**Decision.** Daily journals live at `journals/YYYY-MM-DD.md` (ISO-8601 date, local calendar day), auto-created on first open or quick capture from `templates/journal.md` (if present in the vault) or a minimal built-in template with standard BrainTerm YAML frontmatter (`id: bt-journal-YYYYMMDD`, `title: "YYYY-MM-DD"`, `created`, `updated`, `source: human`, `tags: [journal]`).
+**Rationale.** ISO-8601 sorts chronologically in every file tree and CLI tool, matches BrainTerm's existing RFC-3339 timestamps and `inbox/` filenames, and is Windows-safe. Logseq's `YYYY_MM_DD.md` naming is converted on import (P8) rather than adopted as a second live convention.
+
+### ADR-011 — Task markers, scheduling, priority & surgical toggle
+**Decision.** Recognize both Logseq-style keyword markers (`TODO`, `DOING`, `DONE`, `LATER`, `WAITING`, `CANCELED`; `NOW` normalized to `DOING` on read) at the start of a line or list item AND standard GFM checkboxes (`- [ ]` → `TODO`, `- [x]` / `- [X]` → `DONE`). Optional priority tokens (`[#A]`, `[#B]`, `[#C]`) immediately follow the marker; optional `SCHEDULED: <YYYY-MM-DD ...>` and `DEADLINE: <YYYY-MM-DD ...>` dates are accepted inline or on immediately following indented lines of the same item.
+**Rationale.** Plain Markdown notes stay readable in GitHub, VS Code, Obsidian, and CLI agents. Toggling a task from the Tasks panel or editor performs a surgical in-place replacement of the marker span only, preserving the item's original style (GFM vs keyword), indentation, and CRLF/LF line endings via `vault_atomic_write()`.
+
+### ADR-012 — Inline properties (`key:: value`) & parameterized query syntax (`{{query ...}}`)
+**Decision.** Index inline `key:: value` lines (outside fenced code blocks) into a derived SQLite `properties` table alongside YAML frontmatter; YAML frontmatter remains canonical for BrainTerm's reserved page keys (`id`, `title`, `created`, `updated`, `source`, `agent`, `tags`, `tags_ai`, `links`). Query blocks use a small, closed s-expression syntax `{{query <expr>}}` supporting `(and ...)`, `(or ...)`, `(not ...)`, `[[page]]`, `#tag`, `(task ...)`, `(property key [val])`, `(priority A|B|C)`, `(between <from> <to>)`, `(path <prefix>)`, and `"fts phrase"`.
+**Rationale.** Compiles deterministically to parameterized SQLite prepared statements (zero string-interpolated SQL), runs exclusively on `bt-db-writer` with a 250 ms `sqlite3_progress_handler` timeout and hard result cap (default 200, max 1,000), and avoids embedding a Clojure/Datalog runtime (`#+BEGIN_QUERY` is intentionally skipped).
+
+### ADR-013 — Lazy block IDs (`id:: <uuid>`), references `((id))` & read-only embeds
+**Decision.** Block IDs use lowercase UUIDv4 written on an indented child line (`  id:: <uuid>`) immediately below the referenced bullet/paragraph and are inserted **lazily** only when the user creates a reference or embed to that block. References `((uuid))` render with hover preview and Ctrl+Click jump to source; `{{embed ((uuid))}}` and `{{embed [[page]]}}` render inline as read-only preview cards with a jump-to-source link (cycle-checked, max depth 3).
+**Rationale.** Prevents polluting ordinary Markdown notes with UUID noise until needed, preserves clean `git diff`s for humans and agents, and eliminates multi-buffer conflict hazards by keeping embeds read-only.
+
+### ADR-014 — Link occurrences & backlinks index (`migrations/0002_backlinks.sql`)
+**Decision.** Preserve the §7.2 `edges` table unchanged and add `link_refs(id, src_note_id, dst_raw, dst_note_id, line_no, col_no, context)` in `migrations/0002_backlinks.sql` (`PRAGMA user_version = 2`), storing every wiki-link occurrence's 1-based line number, byte column, and trimmed line context (capped at 240 chars) plus resolved `dst_note_id` (case-insensitive match by id, path, stem, or title). Unlinked references are computed asynchronously via `notes_fts` phrase search excluding already-linked notes, self, and titles shorter than 3 characters.
+**Rationale.** Keeps existing graph and organizer queries backward-compatible while giving P1 Backlinks O(log N) lookup with exact line jump and context snippets, fully rebuildable from L0 files (P5).
+
+### ADR-015 — Single Shared Link Resolver (`src/linkresolve.c/.h`)
+- **Decision:** Centralize all link scanning and resolution in GTK-free `libbt_core` (`bt_link_scan`, `BtIndexSnapshot`, `bt_link_resolve`) and route editor clicks, tooltips, index storage (`0002_links_resolution.sql`), and `bt_graph_build()` ghost-node creation through it.
+- **Rationale:** Guarantees a link is a ghost node in Brain Graph iff it is `BT_LINK_UNRESOLVED` in the editor, resolves relative subfolder wikilinks (`chapter-01-descriptive/...`), and keeps snapshot rebuilds under 20 ms for 3,000 notes off the GTK main thread.
+
+### ADR-016 — Default Single-Click Links & Caret-Inside Rule
+- **Decision:** Single-click (`n_press == 1`, within GTK drag threshold, empty selection, Alt not held) opens links by default (`[editor] links_open_on_click = true`), except when the caret is already inside the clicked link span (which edits the link instead). `Alt+Click` always places the caret; `Ctrl+Click` works in both modes and is required when `links_open_on_click = false`.
+- **Rationale:** Matches user expectation from browser/Obsidian while preserving effortless in-place editing of link targets without extra modes.
+
+### ADR-017 — Untrusted Link Open-Target Security Policy
+- **Decision:** Enforce a pure-C policy check before any external open: hard-block 32 executable/script/shortcut extensions (after case-folding and stripping trailing dots/spaces), auto-allow only safe document/media extensions inside the vault (`vault_resolve()` symlink/junction checked), prompt via confirm popover for unknown extensions and directories, allow only `http`/`https`/`mailto` URLs (≤ 2,048 bytes, strip & warn on `user:pass@`, one-time per-session confirm popover), and invoke OS handlers strictly via async `GtkFileLauncher` / `GtkUriLauncher` (zero shell execution).
+- **Rationale:** Notes may contain AI-generated or imported content; defense-in-depth prevents arbitrary code execution or vault escape.
+
+### ADR-018 — Pandoc-Style Math Delimiters & Dual Emphasis Fix
+- **Decision:** Scan math spans (`$...$` with non-space inner boundaries and non-digit follower; `$$...$$` up to 200 lines / 16 KB; `\(...\)`, `\[...\]`, top-level environments) before links and emphasis, and enforce exclusion in both `data/language-specs/bt-markdown.lang` (math contexts placed ahead of `markdown:markdown`) and `editorpane.c`'s live-preview tag pass.
+- **Rationale:** Eliminates false positives on currency (`$5 and $10`) while completely fixing the italic-inside-math bug visible in `02-bootstrap.md`.
+
+### ADR-019 — Math Engine: Clean-Room C17 `libbt_math` on HarfBuzz OpenType MATH
+- **Decision:** Build **Option 1** — a clean-room C17 static library `libbt_math` depending only on HarfBuzz (`<hb-ot.h>`), paired with Cairo-FT (`cairo-ft.h`) rendering in the UI layer.
+- **Alternatives evaluated:**
+
+| Option | Verdict | Reason |
+|---|---|---|
+| **1. Own C17 engine on HarfBuzz OpenType MATH + Cairo-FT** | **Selected** | Single native C exe, 0 extra runtime deps, offline, fits Dusk/GTK4/Cairo, P0 spike succeeded on first try (HarfBuzz 14.2.1 + Cairo-FT 1.18.4). |
+| 2. MicroTeX (C++) | Fallback | Introduces C++ toolchain/ABI, larger binary, upstream maintenance & subset risks; keep as documented fallback if M3 hits a blocker. |
+| 3. KaTeX / MathJax in WebView | Rejected | Heavy browser engine dependency, startup latency, non-native widget integration on Windows GTK4. |
+| 4. External LaTeX (`tectonic`/`pdflatex`) | Rejected | External install burden, high per-formula latency, breaks single-folder offline packaging. |
+| 5. Unicode substitution only | Rejected | Cannot render fractions, integrals, matrices, or radicals. |
+
+### ADR-020 — Bundled Math Font: STIX Two Math (SIL OFL 1.1)
+- **Decision:** Bundle `STIXTwoMath-Regular.otf` (v2.13 from `stipub/stixfonts`, SIL Open Font License 1.1) inside `data/fonts/` and compile into `brainterm.gresource.xml` alongside `data/fonts/LICENSE-STIXTwoMath.txt`. Verify `hb_ot_math_has_data()` at startup with raw-source fallback on failure.
+- **Rationale:** Comprehensive Unicode math alphanumeric & symbol coverage for statistics/ML, complete OpenType MATH table (variants, assemblies, kerning, accent attachments), permissive OFL 1.1 redistribution license matching BrainTerm's bundled Inter and JetBrains Mono fonts.
+
+### ADR-021 — Editor Math Integration (Pending M5 Spike)
+- **Decision (provisional):** Ship **E4** (live rendered preview popover on caret/hover) at STOP 2, then run the mandatory M5 spike comparing **E1** (invisible source + inline `GdkPaintable` with irreversible-action undo guard + save/copy stripping), **E2** (`GtkTextView::snapshot_layer` overlay), and **E4** against all 8 hard criteria (B.12.2). Adopt E1 or E2 only if all 8 criteria pass with 10,000-op randomized file-integrity proof; otherwise retain E4.
+- **Note on inline display math (`$$...$$` mid-paragraph):** When display math appears mid-paragraph, render it on its own visual display block (or split visually in E1/E2) without modifying buffer newlines.
+
+### ADR-022 — Math Caching, Idle Budgets & Resource Limits
+- **Decision:** Lay out formulas in DPI-independent `em` units into immutable flat `BtMathLayout` draw lists cached in a 2,000-entry LRU (`(hash, mode)`), and rasterize device-pixel `GdkTexture`s into a 32 MB LRU (`(hash, mode, px_size, scale, rgba)`). Schedule off-screen/visible-range work in idle callbacks capped at 4 ms/tick and enforce all B.17 untrusted-input ceilings (4 KB inline / 16 KB display, depth 64, 5k AST nodes, 20×20 matrix, 20k draw ops, 50 ms soft layout cap).
+- **Rationale:** Guarantees zero per-frame allocations, crisp HiDPI rendering, bounded RSS, and 60 FPS scrolling on 300-formula notes.

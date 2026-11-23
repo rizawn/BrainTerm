@@ -1,0 +1,24 @@
+# P-4 Stage-4 Ambiguity Ranking Check (life2)
+
+Target: `[[claude-obsidian-ecosystem-research]]` (Stage 4 basename/stem match)
+
+Occurrences (3):
+1. `claude-obsidian/wiki/index.md:65` (`source_dir = "claude-obsidian/wiki"`)
+2. `claude-obsidian/wiki/log.md:195` (`source_dir = "claude-obsidian/wiki"`)
+3. `claude-obsidian/wiki/overview.md:45` (`source_dir = "claude-obsidian/wiki"`)
+
+Full Stage-4 Candidate List (2 files in vault matching stem):
+- `claude-obsidian/.raw/claude-obsidian-ecosystem-research.md` (`cdir = "claude-obsidian/.raw"`, `depth = 2`, `same_dir = false`, `in_source_subtree = false`, `has_dot_segment = true`)
+- `claude-obsidian/wiki/sources/claude-obsidian-ecosystem-research.md` (`cdir = "claude-obsidian/wiki/sources"`, `depth = 3`, `same_dir = false`, `in_source_subtree = true`, `has_dot_segment = false`)
+
+## Before Fix (L1 `cmp_ranked_cand`)
+Rank order was `(same_dir desc, depth asc, lexical asc)`:
+- Candidate 0 (default): `claude-obsidian/.raw/claude-obsidian-ecosystem-research.md` (`same_dir=0, depth=2`)
+- Candidate 1: `claude-obsidian/wiki/sources/claude-obsidian-ecosystem-research.md` (`same_dir=0, depth=3`)
+Verdict: **NOT INTENDED** — `.raw/` is raw source material in a hidden dot-directory outside `claude-obsidian/wiki/`, whereas `wiki/sources/` is the curated wiki note inside the source note's own `claude-obsidian/wiki/` subtree.
+
+## After Fix (`cmp_ranked_cand` P-4)
+Updated ranking key: `(same_dir desc, in_source_subtree desc, has_dot_segment asc, depth asc, lexical asc)`:
+- Candidate 0 (default): `claude-obsidian/wiki/sources/claude-obsidian-ecosystem-research.md` (`same_dir=0, in_source_subtree=1, has_dot_segment=0, depth=3`)
+- Candidate 1: `claude-obsidian/.raw/claude-obsidian-ecosystem-research.md` (`same_dir=0, in_source_subtree=0, has_dot_segment=1, depth=2`)
+Verdict: Curated wiki source inside the source note's subtree now ranks first across all 3 occurrences, while preserving R07 and R08 behavior.

@@ -1,0 +1,61 @@
+BT_SELFTEST_LINKS vault="C:\Users\Riza Wahyu Nugraha\Documents\coolyeah\persemester\sem 1-2\life2"
+notes=310 notes_with_links=155 total_links=831 total_ms=216.26 ms_per_1000_links=260.24
+by_syntax: wikilink=459 markdown=261 bare_url=111 frontmatter=0
+by_status: RESOLVED=546 AMBIGUOUS=3 UNRESOLVED=83 EXTERNAL=198 BLOCKED=1
+by_kind: note=552 file=1 dir=35 url=198 same_note=45
+math_tok: notes_with_math=62 inline=883 display=191 total=1074
+--- UNRESOLVED (first 50 of 83) ---
+UNRESOLVED Welcome.md:3 create a link
+UNRESOLVED claude-obsidian/ATTRIBUTION.md:46 LICENSE
+UNRESOLVED claude-obsidian/CONTRIBUTING.md:156 LICENSE
+UNRESOLVED claude-obsidian/README.md:9 LICENSE
+UNRESOLVED claude-obsidian/README.md:567 scripts/wiki-lock.sh
+UNRESOLVED claude-obsidian/README.md:639 .github/
+UNRESOLVED claude-obsidian/README.md:664 LICENSE
+UNRESOLVED claude-obsidian/docs/audits/v1.7.1-fixes-plan.md:29 ../../scripts/contextual-prefix.py
+UNRESOLVED claude-obsidian/docs/audits/v1.7.1-fixes-plan.md:30 ../../scripts/tiling-check.py
+UNRESOLVED claude-obsidian/docs/audits/v1.7.1-fixes-plan.md:168 ../../bin/setup-retrieve.sh
+UNRESOLVED claude-obsidian/docs/audits/v1.7.1-fixes-plan.md:225 ../../Makefile
+UNRESOLVED claude-obsidian/docs/audits/v1.7.1-fixes-plan.md:272 ../../hooks/hooks.json
+UNRESOLVED claude-obsidian/docs/audits/v1.7.1-fixes-plan.md:330 ../../scripts/detect-transport.sh
+UNRESOLVED claude-obsidian/docs/audits/v1.7.1-fixes-plan.md:506 ../../.claude-plugin/plugin.json
+UNRESOLVED claude-obsidian/docs/audits/v1.7.1-fixes-plan.md:506 ../../.claude-plugin/marketplace.json
+UNRESOLVED claude-obsidian/docs/audits/v1.7.2-sss-plus-plan.md:245 wikilink-cluster
+UNRESOLVED claude-obsidian/docs/audits/v1.8.0-pre-push-audit-2026-05-18.md:6 ../../.claude/plans/read-in-full-the-hidden-sun.md
+UNRESOLVED claude-obsidian/docs/audits/v1.8.0-pre-push-audit-2026-05-18.md:256 ../../.claude/plans/read-in-full-the-hidden-sun.md
+UNRESOLVED claude-obsidian/docs/audits/v1.8.0-pre-push-audit-2026-05-18.md:296 ../../.claude/plans/read-in-full-the-hidden-sun.md
+UNRESOLVED claude-obsidian/docs/compound-vault-guide.md:199 ../scripts/wiki-lock.sh
+UNRESOLVED claude-obsidian/docs/methodology-modes-guide.md:230 ../scripts/wiki-mode.py
+UNRESOLVED claude-obsidian/docs/methodology-modes-guide.md:231 ../bin/setup-mode.sh
+UNRESOLVED claude-obsidian/docs/methodology-modes-guide.md:232 ../tests/test_wiki_mode.py
+UNRESOLVED claude-obsidian/skills/save/SKILL.md:106 Note Title
+UNRESOLVED claude-obsidian/skills/wiki-cli/SKILL.md:159 ../../scripts/detect-transport.sh
+UNRESOLVED claude-obsidian/skills/wiki-fold/SKILL.md:130 Entry
+UNRESOLVED claude-obsidian/skills/wiki-ingest/SKILL.md:223 skills/wiki/references/css-snippets.md
+UNRESOLVED claude-obsidian/skills/wiki-mode/templates/lyt/atomic-template.md:17 {{source-1}}
+UNRESOLVED claude-obsidian/skills/wiki-mode/templates/lyt/atomic-template.md:22 {{related-note}}
+UNRESOLVED claude-obsidian/skills/wiki-mode/templates/lyt/moc-template.md:20 note-1
+UNRESOLVED claude-obsidian/skills/wiki-mode/templates/lyt/moc-template.md:21 note-2
+UNRESOLVED claude-obsidian/skills/wiki-mode/templates/lyt/moc-template.md:22 note-3
+UNRESOLVED claude-obsidian/skills/wiki-mode/templates/lyt/moc-template.md:26 adjacent-moc-1
+UNRESOLVED claude-obsidian/skills/wiki-mode/templates/para/area-template.md:23 {{project-1}}
+UNRESOLVED claude-obsidian/skills/wiki-mode/templates/para/area-template.md:24 {{project-2}}
+UNRESOLVED claude-obsidian/skills/wiki-mode/templates/para/area-template.md:28 {{resource-1}}
+UNRESOLVED claude-obsidian/skills/wiki-mode/templates/para/project-template.md:31 {{related-area}}
+UNRESOLVED claude-obsidian/skills/wiki-mode/templates/para/project-template.md:32 {{related-resource}}
+UNRESOLVED claude-obsidian/skills/wiki-mode/templates/para/resource-template.md:27 {{area-1}}
+UNRESOLVED claude-obsidian/skills/wiki-mode/templates/para/resource-template.md:28 {{project-1}}
+UNRESOLVED claude-obsidian/skills/wiki-mode/templates/zettel/atomic-template.md:24 {{parent-id}}
+UNRESOLVED claude-obsidian/skills/wiki-mode/templates/zettel/atomic-template.md:29 {{related-zettel-1}}
+UNRESOLVED claude-obsidian/skills/wiki-mode/templates/zettel/atomic-template.md:30 {{related-zettel-2}}
+UNRESOLVED claude-obsidian/wiki/concepts/_index.md:25 entities/_index|Entities
+UNRESOLVED claude-obsidian/wiki/concepts/_index.md:25 sources/_index|Sources
+UNRESOLVED claude-obsidian/wiki/entities/_index.md:19 concepts/_index|Concepts
+UNRESOLVED claude-obsidian/wiki/entities/_index.md:19 sources/_index|Sources
+UNRESOLVED claude-obsidian/wiki/folds/fold-k3-from-2026-04-23-to-2026-04-24-n8.md:78 wiki-fold
+UNRESOLVED claude-obsidian/wiki/folds/fold-k3-from-2026-04-23-to-2026-04-24-n8.md:108 wiki-fold
+UNRESOLVED claude-obsidian/wiki/getting-started.md:91 Wiki Map
+--- AMBIGUOUS (3) ---
+AMBIGUOUS claude-obsidian/wiki/index.md:65 claude-obsidian-ecosystem-research -> claude-obsidian/.raw/claude-obsidian-ecosystem-research.md, claude-obsidian/wiki/sources/claude-obsidian-ecosystem-research.md
+AMBIGUOUS claude-obsidian/wiki/log.md:195 claude-obsidian-ecosystem-research -> claude-obsidian/.raw/claude-obsidian-ecosystem-research.md, claude-obsidian/wiki/sources/claude-obsidian-ecosystem-research.md
+AMBIGUOUS claude-obsidian/wiki/overview.md:45 claude-obsidian-ecosystem-research -> claude-obsidian/.raw/claude-obsidian-ecosystem-research.md, claude-obsidian/wiki/sources/claude-obsidian-ecosystem-research.md

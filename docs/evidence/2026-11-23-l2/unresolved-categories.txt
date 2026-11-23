@@ -1,0 +1,104 @@
+# P-2 Categorization of all 83 UNRESOLVED links in life2
+# Source: --selftest-links (life2, 310 notes, 831 links, 83 UNRESOLVED pre-P-3)
+
+## Summary Counts
+- a) TEMPLATE_PLACEHOLDER: 16
+- b) OUTSIDE_VAULT_OR_REPO_FILE: 23
+- c) PROSE_NOT_LINK: 6
+- d) REAL_BROKEN: 38
+- TOTAL: 83
+
+## Parser Audit Note for Category (c) PROSE_NOT_LINK
+Inspected all 6 occurrences in category (c) directly in life2:
+- Welcome.md:3 -> literally `[[create a link]]` in body text (starter Obsidian note).
+- claude-obsidian/skills/save/SKILL.md:106 -> literally `[[Note Title]]` inside quotes outside fences.
+- claude-obsidian/skills/wiki-fold/SKILL.md:130 -> literally `[[Entry]]` inside quotes outside fences.
+- claude-obsidian/docs/audits/v1.7.2-sss-plus-plan.md:245 -> literally `[[wikilink-cluster]]` in body list item.
+- claude-obsidian/wiki/getting-started.md:91 & index.md:28 -> literally `[[Wiki Map]]` (target `Wiki Map.canvas` exists as a .canvas file, not .md).
+Conclusion: 0 parser bugs in category (c); every item is genuinely delimited `[[...]]` outside code fences/spans.
+
+## Full List (83 links)
+# idx | category | file:line | syntax | raw_target | reason
+ 1 | c) PROSE_NOT_LINK | Welcome.md:3 | wikilink | create a link | prose placeholder/title (literal un-backticked [[...]] in prose/example)
+ 2 | b) OUTSIDE_VAULT_OR_REPO_FILE | claude-obsidian/ATTRIBUTION.md:46 | markdown | LICENSE | references external repo file or non-existent repo-relative path outside vault
+ 3 | b) OUTSIDE_VAULT_OR_REPO_FILE | claude-obsidian/CONTRIBUTING.md:156 | markdown | LICENSE | references external repo file or non-existent repo-relative path outside vault
+ 4 | b) OUTSIDE_VAULT_OR_REPO_FILE | claude-obsidian/README.md:9 | markdown | LICENSE | references external repo file or non-existent repo-relative path outside vault
+ 5 | b) OUTSIDE_VAULT_OR_REPO_FILE | claude-obsidian/README.md:567 | markdown | scripts/wiki-lock.sh | references external repo file or non-existent repo-relative path outside vault
+ 6 | b) OUTSIDE_VAULT_OR_REPO_FILE | claude-obsidian/README.md:639 | markdown | .github/ | references external repo file or non-existent repo-relative path outside vault
+ 7 | b) OUTSIDE_VAULT_OR_REPO_FILE | claude-obsidian/README.md:664 | markdown | LICENSE | references external repo file or non-existent repo-relative path outside vault
+ 8 | b) OUTSIDE_VAULT_OR_REPO_FILE | claude-obsidian/docs/audits/v1.7.1-fixes-plan.md:29 | markdown | ../../scripts/contextual-prefix.py | references external repo file or non-existent repo-relative path outside vault
+ 9 | b) OUTSIDE_VAULT_OR_REPO_FILE | claude-obsidian/docs/audits/v1.7.1-fixes-plan.md:30 | markdown | ../../scripts/tiling-check.py | references external repo file or non-existent repo-relative path outside vault
+10 | b) OUTSIDE_VAULT_OR_REPO_FILE | claude-obsidian/docs/audits/v1.7.1-fixes-plan.md:168 | markdown | ../../bin/setup-retrieve.sh | references external repo file or non-existent repo-relative path outside vault
+11 | b) OUTSIDE_VAULT_OR_REPO_FILE | claude-obsidian/docs/audits/v1.7.1-fixes-plan.md:225 | markdown | ../../Makefile | references external repo file or non-existent repo-relative path outside vault
+12 | b) OUTSIDE_VAULT_OR_REPO_FILE | claude-obsidian/docs/audits/v1.7.1-fixes-plan.md:272 | markdown | ../../hooks/hooks.json | references external repo file or non-existent repo-relative path outside vault
+13 | b) OUTSIDE_VAULT_OR_REPO_FILE | claude-obsidian/docs/audits/v1.7.1-fixes-plan.md:330 | markdown | ../../scripts/detect-transport.sh | references external repo file or non-existent repo-relative path outside vault
+14 | b) OUTSIDE_VAULT_OR_REPO_FILE | claude-obsidian/docs/audits/v1.7.1-fixes-plan.md:506 | markdown | ../../.claude-plugin/plugin.json | references external repo file or non-existent repo-relative path outside vault
+15 | b) OUTSIDE_VAULT_OR_REPO_FILE | claude-obsidian/docs/audits/v1.7.1-fixes-plan.md:506 | markdown | ../../.claude-plugin/marketplace.json | references external repo file or non-existent repo-relative path outside vault
+16 | c) PROSE_NOT_LINK | claude-obsidian/docs/audits/v1.7.2-sss-plus-plan.md:245 | wikilink | wikilink-cluster | prose placeholder/title (literal un-backticked [[...]] in prose/example)
+17 | b) OUTSIDE_VAULT_OR_REPO_FILE | claude-obsidian/docs/audits/v1.8.0-pre-push-audit-2026-05-18.md:6 | markdown | ../../.claude/plans/read-in-full-the-hidden-sun.md | references external repo file or non-existent repo-relative path outside vault
+18 | b) OUTSIDE_VAULT_OR_REPO_FILE | claude-obsidian/docs/audits/v1.8.0-pre-push-audit-2026-05-18.md:256 | markdown | ../../.claude/plans/read-in-full-the-hidden-sun.md | references external repo file or non-existent repo-relative path outside vault
+19 | b) OUTSIDE_VAULT_OR_REPO_FILE | claude-obsidian/docs/audits/v1.8.0-pre-push-audit-2026-05-18.md:296 | markdown | ../../.claude/plans/read-in-full-the-hidden-sun.md | references external repo file or non-existent repo-relative path outside vault
+20 | b) OUTSIDE_VAULT_OR_REPO_FILE | claude-obsidian/docs/compound-vault-guide.md:199 | markdown | ../scripts/wiki-lock.sh | references external repo file or non-existent repo-relative path outside vault
+21 | b) OUTSIDE_VAULT_OR_REPO_FILE | claude-obsidian/docs/methodology-modes-guide.md:230 | markdown | ../scripts/wiki-mode.py | references external repo file or non-existent repo-relative path outside vault
+22 | b) OUTSIDE_VAULT_OR_REPO_FILE | claude-obsidian/docs/methodology-modes-guide.md:231 | markdown | ../bin/setup-mode.sh | references external repo file or non-existent repo-relative path outside vault
+23 | b) OUTSIDE_VAULT_OR_REPO_FILE | claude-obsidian/docs/methodology-modes-guide.md:232 | markdown | ../tests/test_wiki_mode.py | references external repo file or non-existent repo-relative path outside vault
+24 | c) PROSE_NOT_LINK | claude-obsidian/skills/save/SKILL.md:106 | wikilink | Note Title | prose placeholder/title (literal un-backticked [[...]] in prose/example)
+25 | b) OUTSIDE_VAULT_OR_REPO_FILE | claude-obsidian/skills/wiki-cli/SKILL.md:159 | markdown | ../../scripts/detect-transport.sh | references external repo file or non-existent repo-relative path outside vault
+26 | c) PROSE_NOT_LINK | claude-obsidian/skills/wiki-fold/SKILL.md:130 | wikilink | Entry | prose placeholder/title (literal un-backticked [[...]] in prose/example)
+27 | d) REAL_BROKEN | claude-obsidian/skills/wiki-ingest/SKILL.md:223 | wikilink | skills/wiki/references/css-snippets.md | genuine broken link target (missing note or non-.md canvas/subfolder-root path)
+28 | a) TEMPLATE_PLACEHOLDER | claude-obsidian/skills/wiki-mode/templates/lyt/atomic-template.md:17 | wikilink | {{source-1}} | matches {{...}} placeholder
+29 | a) TEMPLATE_PLACEHOLDER | claude-obsidian/skills/wiki-mode/templates/lyt/atomic-template.md:22 | wikilink | {{related-note}} | matches {{...}} placeholder
+30 | a) TEMPLATE_PLACEHOLDER | claude-obsidian/skills/wiki-mode/templates/lyt/moc-template.md:20 | wikilink | note-1 | template placeholder token in wiki-mode template
+31 | a) TEMPLATE_PLACEHOLDER | claude-obsidian/skills/wiki-mode/templates/lyt/moc-template.md:21 | wikilink | note-2 | template placeholder token in wiki-mode template
+32 | a) TEMPLATE_PLACEHOLDER | claude-obsidian/skills/wiki-mode/templates/lyt/moc-template.md:22 | wikilink | note-3 | template placeholder token in wiki-mode template
+33 | a) TEMPLATE_PLACEHOLDER | claude-obsidian/skills/wiki-mode/templates/lyt/moc-template.md:26 | wikilink | adjacent-moc-1 | template placeholder token in wiki-mode template
+34 | a) TEMPLATE_PLACEHOLDER | claude-obsidian/skills/wiki-mode/templates/para/area-template.md:23 | wikilink | {{project-1}} | matches {{...}} placeholder
+35 | a) TEMPLATE_PLACEHOLDER | claude-obsidian/skills/wiki-mode/templates/para/area-template.md:24 | wikilink | {{project-2}} | matches {{...}} placeholder
+36 | a) TEMPLATE_PLACEHOLDER | claude-obsidian/skills/wiki-mode/templates/para/area-template.md:28 | wikilink | {{resource-1}} | matches {{...}} placeholder
+37 | a) TEMPLATE_PLACEHOLDER | claude-obsidian/skills/wiki-mode/templates/para/project-template.md:31 | wikilink | {{related-area}} | matches {{...}} placeholder
+38 | a) TEMPLATE_PLACEHOLDER | claude-obsidian/skills/wiki-mode/templates/para/project-template.md:32 | wikilink | {{related-resource}} | matches {{...}} placeholder
+39 | a) TEMPLATE_PLACEHOLDER | claude-obsidian/skills/wiki-mode/templates/para/resource-template.md:27 | wikilink | {{area-1}} | matches {{...}} placeholder
+40 | a) TEMPLATE_PLACEHOLDER | claude-obsidian/skills/wiki-mode/templates/para/resource-template.md:28 | wikilink | {{project-1}} | matches {{...}} placeholder
+41 | a) TEMPLATE_PLACEHOLDER | claude-obsidian/skills/wiki-mode/templates/zettel/atomic-template.md:24 | wikilink | {{parent-id}} | matches {{...}} placeholder
+42 | a) TEMPLATE_PLACEHOLDER | claude-obsidian/skills/wiki-mode/templates/zettel/atomic-template.md:29 | wikilink | {{related-zettel-1}} | matches {{...}} placeholder
+43 | a) TEMPLATE_PLACEHOLDER | claude-obsidian/skills/wiki-mode/templates/zettel/atomic-template.md:30 | wikilink | {{related-zettel-2}} | matches {{...}} placeholder
+44 | d) REAL_BROKEN | claude-obsidian/wiki/concepts/_index.md:25 | wikilink | entities/_index|Entities | genuine broken link target (missing note or non-.md canvas/subfolder-root path)
+45 | d) REAL_BROKEN | claude-obsidian/wiki/concepts/_index.md:25 | wikilink | sources/_index|Sources | genuine broken link target (missing note or non-.md canvas/subfolder-root path)
+46 | d) REAL_BROKEN | claude-obsidian/wiki/entities/_index.md:19 | wikilink | concepts/_index|Concepts | genuine broken link target (missing note or non-.md canvas/subfolder-root path)
+47 | d) REAL_BROKEN | claude-obsidian/wiki/entities/_index.md:19 | wikilink | sources/_index|Sources | genuine broken link target (missing note or non-.md canvas/subfolder-root path)
+48 | d) REAL_BROKEN | claude-obsidian/wiki/folds/fold-k3-from-2026-04-23-to-2026-04-24-n8.md:78 | wikilink | wiki-fold | genuine broken link target (missing note or non-.md canvas/subfolder-root path)
+49 | d) REAL_BROKEN | claude-obsidian/wiki/folds/fold-k3-from-2026-04-23-to-2026-04-24-n8.md:108 | wikilink | wiki-fold | genuine broken link target (missing note or non-.md canvas/subfolder-root path)
+50 | c) PROSE_NOT_LINK | claude-obsidian/wiki/getting-started.md:91 | wikilink | Wiki Map | prose placeholder/title (actually points to .canvas file Wiki Map.canvas; classified under c per P-2 prompt guidance)
+51 | c) PROSE_NOT_LINK | claude-obsidian/wiki/index.md:28 | wikilink | Wiki Map | prose placeholder/title (actually points to .canvas file Wiki Map.canvas; classified under c per P-2 prompt guidance)
+52 | d) REAL_BROKEN | claude-obsidian/wiki/overview.md:59 | wikilink | claude-obsidian-presentation | genuine broken link target (missing note or non-.md canvas/subfolder-root path)
+53 | d) REAL_BROKEN | claude-obsidian/wiki/overview.md:60 | wikilink | AI Marketing Hub Cover Images Canvas | genuine broken link target (missing note or non-.md canvas/subfolder-root path)
+54 | b) OUTSIDE_VAULT_OR_REPO_FILE | claude-obsidian/wiki/references/transport-fallback.md:104 | markdown | ../../scripts/detect-transport.sh | references external repo file or non-existent repo-relative path outside vault
+55 | d) REAL_BROKEN | claude-obsidian/wiki/sources/_index.md:19 | wikilink | concepts/_index|Concepts | genuine broken link target (missing note or non-.md canvas/subfolder-root path)
+56 | d) REAL_BROKEN | claude-obsidian/wiki/sources/_index.md:19 | wikilink | entities/_index|Entities | genuine broken link target (missing note or non-.md canvas/subfolder-root path)
+57 | d) REAL_BROKEN | statistical-statistics-notes/MathStats.md:14 | wikilink | chapter-01-descriptive/02-graphical-representation.md | genuine broken link target (missing note or non-.md canvas/subfolder-root path)
+58 | d) REAL_BROKEN | statistical-statistics-notes/MathStats.md:22 | wikilink | chapter-02-probability/02-conditional-probability.md | genuine broken link target (missing note or non-.md canvas/subfolder-root path)
+59 | d) REAL_BROKEN | statistical-statistics-notes/MathStats.md:24 | wikilink | chapter-02-probability/04-moments.md | genuine broken link target (missing note or non-.md canvas/subfolder-root path)
+60 | d) REAL_BROKEN | statistical-statistics-notes/MathStats.md:32 | wikilink | chapter-03-distributions/03-joint-distributions.md | genuine broken link target (missing note or non-.md canvas/subfolder-root path)
+61 | d) REAL_BROKEN | statistical-statistics-notes/MathStats.md:33 | wikilink | chapter-03-distributions/04-functions-of-rvs.md | genuine broken link target (missing note or non-.md canvas/subfolder-root path)
+62 | d) REAL_BROKEN | statistical-statistics-notes/MathStats.md:42 | wikilink | chapter-04-sampling/03-order-statistics.md | genuine broken link target (missing note or non-.md canvas/subfolder-root path)
+63 | d) REAL_BROKEN | statistical-statistics-notes/MathStats.md:51 | wikilink | chapter-05-point-estimation/03-estimator-properties.md | genuine broken link target (missing note or non-.md canvas/subfolder-root path)
+64 | d) REAL_BROKEN | statistical-statistics-notes/MathStats.md:52 | wikilink | chapter-05-point-estimation/04-rao-blackwell.md | genuine broken link target (missing note or non-.md canvas/subfolder-root path)
+65 | d) REAL_BROKEN | statistical-statistics-notes/MathStats.md:59 | wikilink | chapter-06-interval-estimation/02-ci-one-sample.md | genuine broken link target (missing note or non-.md canvas/subfolder-root path)
+66 | d) REAL_BROKEN | statistical-statistics-notes/MathStats.md:60 | wikilink | chapter-06-interval-estimation/03-ci-two-samples.md | genuine broken link target (missing note or non-.md canvas/subfolder-root path)
+67 | d) REAL_BROKEN | statistical-statistics-notes/MathStats.md:67 | wikilink | chapter-07-hypothesis-testing/02-neyman-pearson.md | genuine broken link target (missing note or non-.md canvas/subfolder-root path)
+68 | d) REAL_BROKEN | statistical-statistics-notes/MathStats.md:68 | wikilink | chapter-07-hypothesis-testing/03-likelihood-ratio.md | genuine broken link target (missing note or non-.md canvas/subfolder-root path)
+69 | d) REAL_BROKEN | statistical-statistics-notes/MathStats.md:69 | wikilink | chapter-07-hypothesis-testing/04-one-two-sample-tests.md | genuine broken link target (missing note or non-.md canvas/subfolder-root path)
+70 | d) REAL_BROKEN | statistical-statistics-notes/MathStats.md:70 | wikilink | chapter-07-hypothesis-testing/05-chi-square-tests.md | genuine broken link target (missing note or non-.md canvas/subfolder-root path)
+71 | d) REAL_BROKEN | statistical-statistics-notes/MathStats.md:77 | wikilink | chapter-08-regression/02-multiple-regression.md | genuine broken link target (missing note or non-.md canvas/subfolder-root path)
+72 | d) REAL_BROKEN | statistical-statistics-notes/MathStats.md:78 | wikilink | chapter-08-regression/03-regression-diagnostics.md | genuine broken link target (missing note or non-.md canvas/subfolder-root path)
+73 | d) REAL_BROKEN | statistical-statistics-notes/MathStats.md:84 | wikilink | chapter-09-doe/01-doe-basics.md | genuine broken link target (missing note or non-.md canvas/subfolder-root path)
+74 | d) REAL_BROKEN | statistical-statistics-notes/MathStats.md:85 | wikilink | chapter-09-doe/02-factorial-designs.md | genuine broken link target (missing note or non-.md canvas/subfolder-root path)
+75 | d) REAL_BROKEN | statistical-statistics-notes/MathStats.md:92 | wikilink | chapter-10-anova/02-two-way-anova.md | genuine broken link target (missing note or non-.md canvas/subfolder-root path)
+76 | d) REAL_BROKEN | statistical-statistics-notes/MathStats.md:93 | wikilink | chapter-10-anova/03-multiple-comparisons.md | genuine broken link target (missing note or non-.md canvas/subfolder-root path)
+77 | d) REAL_BROKEN | statistical-statistics-notes/MathStats.md:100 | wikilink | chapter-11-bayesian/02-bayesian-interval-hypothesis.md | genuine broken link target (missing note or non-.md canvas/subfolder-root path)
+78 | d) REAL_BROKEN | statistical-statistics-notes/MathStats.md:101 | wikilink | chapter-11-bayesian/03-decision-theory.md | genuine broken link target (missing note or non-.md canvas/subfolder-root path)
+79 | d) REAL_BROKEN | statistical-statistics-notes/MathStats.md:107 | wikilink | chapter-12-nonparametric/01-nonparametric-ci.md | genuine broken link target (missing note or non-.md canvas/subfolder-root path)
+80 | d) REAL_BROKEN | statistical-statistics-notes/MathStats.md:109 | wikilink | chapter-12-nonparametric/03-two-sample-tests.md | genuine broken link target (missing note or non-.md canvas/subfolder-root path)
+81 | d) REAL_BROKEN | statistical-statistics-notes/MathStats.md:110 | wikilink | chapter-12-nonparametric/04-k-sample-tests.md | genuine broken link target (missing note or non-.md canvas/subfolder-root path)
+82 | d) REAL_BROKEN | statistical-statistics-notes/MathStats.md:118 | wikilink | chapter-13-empirical/03-em-algorithm.md | genuine broken link target (missing note or non-.md canvas/subfolder-root path)
+83 | d) REAL_BROKEN | statistical-statistics-notes/MathStats.md:119 | wikilink | chapter-13-empirical/04-mcmc.md | genuine broken link target (missing note or non-.md canvas/subfolder-root path)
