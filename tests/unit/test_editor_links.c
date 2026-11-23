@@ -13,9 +13,11 @@
 #include <string.h>
 
 #include "app.h"
+#include "createnote.h"
 #include "linkresolve.h"
 #include "navhistory.h"
 #include "testutil.h"
+#include "ui/createpopover.h"
 #include "ui/editorpane.h"
 #include "vault.h"
 
@@ -788,8 +790,139 @@ static void test_l2_7_settings_persistence(void **state)
   g_free(cfg);
 }
 
+typedef struct {
+  guint confirm_count;
+  guint cancel_count;
+  gchar *last_path;
+} CreatePopProbe;
+
+static void on_cp_probe_confirm(const BtCreatePlan *plan, gpointer ud)
+{
+  CreatePopProbe *p = ud;
+  p->confirm_count++;
+  g_free(p->last_path);
+  p->last_path = g_strdup(plan->target_relpath);
+}
+
+static void on_cp_probe_cancel(gpointer ud)
+{
+  CreatePopProbe *p = ud;
+  p->cancel_count++;
+}
+
+static void test_l3_1d_create_popover_state_machine(void **state)
+{
+  (void)state;
+  if (!gtk_init_check()) {
+    skip();
+    return;
+  }
+  adw_init();
+
+  gchar *root = g_dir_make_tmp("bt-l31d-XXXXXX", NULL);
+  bt_test_put(root, "welcome.md", "# Welcome\n");
+  bt_test_put(root, "projects/conpty.md", "# Existing\n");
+  BtVault *v = vault_open(root, NULL, NULL);
+  BtIndexSnapshot *snap = bt_index_snapshot_from_vault(v);
+
+  GtkWidget *win = gtk_window_new();
+  GtkWidget *anchor = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+  gtk_window_set_child(GTK_WINDOW(win), anchor);
+  gtk_window_present(GTK_WINDOW(win));
+
+  CreatePopProbe probe = {0};
+  BtCreatePopover *cp = bt_createpopover_new(on_cp_probe_confirm, on_cp_probe_cancel, &probe);
+  GdkRectangle rect = {10, 10, 8, 18};
+
+  /* Non-OK planner results NEVER open popover. */
+  const char *non_ok[] = { "welcome", "assets/paper.pdf", "CON", "../../escape", "{{tpl}}", "" };
+  for (gsize i = 0; i < G_N_ELEMENTS(non_ok); i++) {
+    BtCreatePlan *bp = bt_createnote_plan(v, snap, "welcome.md", non_ok[i]);
+    assert_int_not_equal(bp->result, BT_CREATE_PLAN_OK);
+    assert_false(bt_createpopover_show(cp, anchor, &rect, bp));
+    assert_int_equal(bt_createpopover_state(cp), BT_CREATE_POPOVER_CLOSED);
+    bt_createnote_plan_free(bp);
+  }
+
+  /* Show next-to-note PLAN_OK with Appendix A exact copy & warning when basename collides (CR12). */
+  BtCreatePlan *p_same = bt_createnote_plan(v, snap, "welcome.md", "conpty");
+  assert_int_equal(p_same->result, BT_CREATE_PLAN_OK);
+  assert_true(bt_createpopover_show(cp, anchor, &rect, p_same));
+  assert_int_equal(bt_createpopover_state(cp), BT_CREATE_POPOVER_SHOWN);
+  assert_string_equal(bt_createpopover_title_text(cp), "Create \"conpty\"?");
+  assert_string_equal(bt_createpopover_path_text(cp), "conpty.md");
+  assert_string_equal(bt_createpopover_location_hint_text(cp), "Created next to this note");
+  assert_string_equal(bt_createpopover_warning_text(cp), "Other notes named conpty exist");
+  assert_string_equal(bt_createpopover_create_button_label(cp), "Create");
+
+  /* CK14: Tab order in create popover: Create then Cancel, and Tab cycles cleanly. */
+  GtkWidget *c_btn = bt_createpopover_create_button(cp);
+  GtkWidget *x_btn = bt_createpopover_cancel_button(cp);
+  assert_ptr_equal(gtk_widget_get_next_sibling(c_btn), x_btn);
+  assert_ptr_equal(bt_createpopover_focused_button(cp), c_btn);
+  assert_true(bt_createpopover_handle_key(cp, GDK_KEY_Tab, 0));
+  assert_ptr_equal(bt_createpopover_focused_button(cp), x_btn);
+  assert_true(bt_createpopover_handle_key(cp, GDK_KEY_Tab, 0));
+  assert_ptr_equal(bt_createpopover_focused_button(cp), c_btn);
+
+  /* Shown -> Esc closes and notifies cancel without writing files. */
+  assert_true(bt_createpopover_handle_key(cp, GDK_KEY_Escape, 0));
+  assert_int_equal(bt_createpopover_state(cp), BT_CREATE_POPOVER_CLOSED);
+  assert_int_equal(probe.cancel_count, 1);
+  assert_int_equal(probe.confirm_count, 0);
+  bt_createnote_plan_free(p_same);
+
+  /* Folder hint when target uses folder + Busy state protects against Esc & double-press (§14.1). */
+  BtCreatePlan *p_dir = bt_createnote_plan(v, snap, "welcome.md", "brand/new/idea");
+  assert_true(bt_createpopover_show(cp, anchor, &rect, p_dir));
+  assert_string_equal(bt_createpopover_location_hint_text(cp), "Folder will be created if missing");
+  assert_null(bt_createpopover_warning_text(cp));
+  assert_true(bt_createpopover_handle_key(cp, GDK_KEY_Return, 0));
+  assert_int_equal(bt_createpopover_state(cp), BT_CREATE_POPOVER_BUSY);
+  assert_string_equal(bt_createpopover_create_button_label(cp), "Creating...");
+  assert_false(gtk_widget_get_sensitive(c_btn));
+  assert_int_equal(probe.confirm_count, 1);
+
+  /* Esc and second Create press while Busy are ignored (§14.1, §6.1.8). */
+  assert_true(bt_createpopover_handle_key(cp, GDK_KEY_Escape, 0));
+  bt_createpopover_activate_create(cp);
+  assert_int_equal(bt_createpopover_state(cp), BT_CREATE_POPOVER_BUSY);
+  assert_int_equal(probe.confirm_count, 1);
+  assert_int_equal(probe.cancel_count, 1);
+
+  bt_createpopover_close(cp);
+  assert_int_equal(bt_createpopover_state(cp), BT_CREATE_POPOVER_CLOSED);
+
+  /* Ensure zero files written by popover UI itself. */
+  g_autofree gchar *not_written = g_build_filename(root, "brand", "new", "idea.md", NULL);
+  assert_false(g_file_test(not_written, G_FILE_TEST_EXISTS));
+
+  bt_createnote_plan_free(p_dir);
+  bt_createpopover_free(cp);
+  gtk_window_destroy(GTK_WINDOW(win));
+  bt_index_snapshot_free(snap);
+  vault_free(v);
+  bt_test_rm_rf(root);
+  g_free(probe.last_path);
+  g_free(root);
+  printf("BT_TEST_L3_1D create_popover state_machine=ok ck14_tab_order=ok\n");
+}
+
+static guint ui_log_warnings = 0;
+
+static void on_ui_test_log(const gchar *domain, GLogLevelFlags level, const gchar *msg, gpointer ud)
+{
+  (void)level;
+  (void)ud;
+  ui_log_warnings++;
+  g_printerr("Unexpected UI warning (%s): %s\n", domain ? domain : "", msg);
+}
+
 int main(void)
 {
+  g_log_set_handler("Gtk", G_LOG_LEVEL_WARNING | G_LOG_LEVEL_CRITICAL, on_ui_test_log, NULL);
+  g_log_set_handler("Adwaita", G_LOG_LEVEL_WARNING | G_LOG_LEVEL_CRITICAL, on_ui_test_log, NULL);
+  g_log_set_handler("GtkSourceView", G_LOG_LEVEL_WARNING | G_LOG_LEVEL_CRITICAL, on_ui_test_log, NULL);
   const struct CMUnitTest tests[] = {
     cmocka_unit_test(test_l2_1_incremental_500_seeded_edits),
     cmocka_unit_test(test_l2_2_click_and_gesture_rules),
@@ -799,6 +932,10 @@ int main(void)
     cmocka_unit_test(test_l2_8_unresolved_click_does_not_call_stub_writer),
     cmocka_unit_test(test_l2_6_nav_history_5_jumps_and_deleted_skip),
     cmocka_unit_test(test_l2_7_settings_persistence),
+    cmocka_unit_test(test_l3_1d_create_popover_state_machine),
   };
-  return cmocka_run_group_tests(tests, NULL, NULL);
+  int rc = cmocka_run_group_tests(tests, NULL, NULL);
+  if (ui_log_warnings > 0)
+    return 1;
+  return rc;
 }

@@ -48,6 +48,7 @@ app_sources = files(
   'ui/graphcapture.c',
   'ui/filetree.c',
   'ui/editorpane.c',
+  'ui/createpopover.c',
   'ui/quickopen.c',
   'ui/termtabs.c',
   'ui/sessionspanel.c',
