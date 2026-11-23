@@ -16,6 +16,7 @@
 #include "sessions.h"
 #include "theme.h"
 #include "ui/askbar.h"
+#include "ui/chooserpopover.h"
 #include "ui/createpopover.h"
 #include "ui/editorpane.h"
 #include "ui/filetree.h"
@@ -107,6 +108,9 @@ struct BtApp {
   gboolean links_open_on_click;
 
   BtCreatePopover *create_popover;
+  BtChooserPopover *chooser_popover;
+  gchar *pending_chooser_anchor;
+  gchar *last_copied_link;
   guint status_notice_timer_id;
   guint deferred_graph_idle_id;
   gboolean create_busy;
@@ -736,6 +740,98 @@ gpointer bt_app_create_popover_for_test(const BtApp *app)
   return app ? app->create_popover : NULL;
 }
 
+static gchar *chooser_display_target(const gchar *raw_target)
+{
+  if (raw_target == NULL)
+    return g_strdup("");
+  const gchar *pipe = strchr(raw_target, '|');
+  gsize len = pipe ? (gsize)(pipe - raw_target) : strlen(raw_target);
+  const gchar *hash = memchr(raw_target, '#', len);
+  if (hash != NULL)
+    len = (gsize)(hash - raw_target);
+  const gchar *caret = memchr(raw_target, '^', len);
+  if (caret != NULL)
+    len = (gsize)(caret - raw_target);
+  while (len > 0 && g_ascii_isspace(raw_target[len - 1]))
+    len--;
+  return g_strndup(raw_target, len);
+}
+
+static void on_chooser_open(const gchar *relpath, gpointer ud)
+{
+  BtApp *app = ud;
+  if (app == NULL || app->vault == NULL || relpath == NULL)
+    return;
+
+  g_autofree gchar *missing_msg = NULL;
+  if (!bt_chooser_candidate_exists(app->vault, relpath, &missing_msg)) {
+    set_statusbar_notice_timed(app,
+                               missing_msg ? missing_msg : "That note no longer exists", 6u);
+    if (app->index != NULL)
+      bt_index_delete_path(app->index, relpath, NULL);
+    vault_rescan(app->vault, NULL, NULL);
+    if (app->tree != NULL)
+      bt_filetree_populate(app->tree, app->vault);
+    rebuild_link_snapshot(app);
+    schedule_graph_refresh_idle(app);
+    g_clear_pointer(&app->pending_chooser_anchor, g_free);
+    return;
+  }
+
+  g_autofree gchar *anchor = g_strdup(app->pending_chooser_anchor);
+  g_clear_pointer(&app->pending_chooser_anchor, g_free);
+
+  g_autoptr(GError) nerr = NULL;
+  if (!bt_app_open_note(app, relpath, &nerr)) {
+    set_statusbar_notice_timed(app, nerr ? nerr->message : "Cannot open note", 6u);
+    return;
+  }
+  if (anchor != NULL && app->editor != NULL) {
+    gdouble ty = 0.0;
+    if (bt_editorpane_scroll_to_anchor(app->editor, anchor, &ty) &&
+        !app->nav_replaying && app->nav != NULL) {
+      bt_nav_history_update_current(app->nav, relpath,
+                                    bt_editorpane_caret_byte_offset(app->editor), ty);
+    }
+  }
+  set_statusbar_notice_timed(app, "", 0u);
+}
+
+static void on_chooser_copy(const gchar *link_text, const gchar *status_msg, gpointer ud)
+{
+  BtApp *app = ud;
+  if (app == NULL || link_text == NULL)
+    return;
+  g_free(app->last_copied_link);
+  app->last_copied_link = g_strdup(link_text);
+
+  GtkWidget *w = app->editor ? bt_editorpane_view_widget(app->editor)
+                             : (app->window ? GTK_WIDGET(app->window) : NULL);
+  GdkDisplay *dpy = w ? gtk_widget_get_display(w) : gdk_display_get_default();
+  GdkClipboard *cb = dpy ? gdk_display_get_clipboard(dpy) : NULL;
+  if (cb != NULL)
+    gdk_clipboard_set_text(cb, link_text);
+
+  set_statusbar_notice_timed(app, status_msg ? status_msg : "Copied link", 3u);
+}
+
+static void on_chooser_cancel(gpointer ud)
+{
+  BtApp *app = ud;
+  if (app != NULL)
+    g_clear_pointer(&app->pending_chooser_anchor, g_free);
+}
+
+gpointer bt_app_chooser_popover_for_test(const BtApp *app)
+{
+  return app ? app->chooser_popover : NULL;
+}
+
+const gchar *bt_app_last_copied_link_for_test(const BtApp *app)
+{
+  return app ? app->last_copied_link : NULL;
+}
+
 typedef struct {
   BtApp *app;
   gchar *target;
@@ -1078,13 +1174,52 @@ gboolean bt_app_activate_link(BtApp *app, const gchar *raw_target)
   }
 
   if (res->status == BT_LINK_AMBIGUOUS) {
-    guint cnt = 0;
-    while (res->candidates != NULL && res->candidates[cnt] != NULL)
-      cnt++;
-    g_autofree gchar *msg = g_strdup_printf("%u notes match. Click to choose.", cnt);
-    bt_app_set_statusbar_notice(app, msg);
+    BtChooserOpenAction act = bt_chooser_decide_open((const gchar *const *)res->candidates);
+    gboolean handled = FALSE;
+    if (act == BT_CHOOSER_OPEN_NONE_MATCH) {
+      if (app->chooser_popover != NULL)
+        bt_chooserpopover_close(app->chooser_popover);
+      set_statusbar_notice_timed(app, "No matching notes now", 6u);
+    } else if (act == BT_CHOOSER_OPEN_DIRECT) {
+      g_autoptr(GError) nerr = NULL;
+      handled = bt_app_open_note(app, res->candidates[0], &nerr);
+      if (!handled) {
+        set_statusbar_notice_timed(app, nerr ? nerr->message : "Cannot open note", 6u);
+      } else {
+        if (res->anchor != NULL && app->editor != NULL) {
+          gdouble ty = 0.0;
+          if (bt_editorpane_scroll_to_anchor(app->editor, res->anchor, &ty) &&
+              !app->nav_replaying && app->nav != NULL) {
+            bt_nav_history_update_current(app->nav, res->candidates[0],
+                                          bt_editorpane_caret_byte_offset(app->editor), ty);
+          }
+        }
+        set_statusbar_notice_timed(app, "", 0u);
+      }
+    } else {
+      clear_active_confirm(app);
+      if (app->create_popover != NULL &&
+          bt_createpopover_state(app->create_popover) != BT_CREATE_POPOVER_BUSY) {
+        bt_createpopover_close(app->create_popover);
+      }
+      g_free(app->pending_chooser_anchor);
+      app->pending_chooser_anchor = g_strdup(res->anchor);
+
+      if (app->chooser_popover == NULL)
+        app->chooser_popover = bt_chooserpopover_new(on_chooser_open, on_chooser_copy,
+                                                     on_chooser_cancel, app);
+      GtkWidget *anchor_w = app->editor ? bt_editorpane_view_widget(app->editor) : NULL;
+      if (anchor_w != NULL) {
+        GdkRectangle rect = {40, 40, 8, 18};
+        bt_editorpane_link_popover_rect(app->editor, &rect);
+        g_autofree gchar *tgt = chooser_display_target(raw_target);
+        bt_chooserpopover_show(app->chooser_popover, anchor_w, &rect, tgt,
+                               (const gchar *const *)res->candidates);
+      }
+      set_statusbar_notice_timed(app, "", 0u);
+    }
     bt_link_resolution_free(res);
-    return FALSE;
+    return handled;
   }
 
   gboolean need_url_confirm = app->confirm_external_urls && !app->session_external_confirmed;
@@ -1516,8 +1651,21 @@ BtNavHistory *bt_app_nav_history(const BtApp *app)
   return app ? app->nav : NULL;
 }
 
+static guint stub_writer_call_count = 0;
+
+guint bt_app_stub_writer_calls_for_test(void)
+{
+  return stub_writer_call_count;
+}
+
+void bt_app_reset_stub_writer_calls_for_test(void)
+{
+  stub_writer_call_count = 0;
+}
+
 gboolean bt_app_open_or_create_wikilink(BtApp *app, const gchar *target, GError **error)
 {
+  stub_writer_call_count++;
   g_return_val_if_fail(app != NULL && target != NULL, FALSE);
   if (app->vault == NULL)
     return FALSE;
@@ -3933,6 +4081,9 @@ void bt_app_free(BtApp *app)
     app->deferred_graph_idle_id = 0;
   }
   g_clear_pointer(&app->create_popover, bt_createpopover_free);
+  g_clear_pointer(&app->chooser_popover, bt_chooserpopover_free);
+  g_free(app->pending_chooser_anchor);
+  g_free(app->last_copied_link);
   clear_active_confirm(app);
   g_clear_pointer(&app->nav, bt_nav_history_free);
   if (app->editor != NULL)

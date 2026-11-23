@@ -17,6 +17,7 @@
 #include "linkresolve.h"
 #include "navhistory.h"
 #include "testutil.h"
+#include "ui/chooserpopover.h"
 #include "ui/createpopover.h"
 #include "ui/editorpane.h"
 #include "vault.h"
@@ -506,6 +507,7 @@ static void test_l2_8_unresolved_click_does_not_call_stub_writer(void **state)
     return;
   }
   adw_init();
+  bt_app_reset_stub_writer_calls_for_test();
 
   gchar *root = g_dir_make_tmp("bt-l28-XXXXXX", NULL);
   gchar *cfg = g_dir_make_tmp("bt-cfg28-XXXXXX", NULL);
@@ -553,6 +555,7 @@ static void test_l2_8_unresolved_click_does_not_call_stub_writer(void **state)
   assert_false(g_file_test(p1, G_FILE_TEST_EXISTS));
   assert_false(g_file_test(p2, G_FILE_TEST_EXISTS));
   assert_int_equal(count_files_recursive(root), files_before);
+  assert_int_equal(bt_app_stub_writer_calls_for_test(), 0);
 
   printf("BT_TEST_L2_8 unresolved_no_stub_create=1 files=%u\n", files_before);
   GtkWindow *win = bt_app_window(app);
@@ -927,6 +930,26 @@ static void pump_until_create_closed(BtCreatePopover *cp)
     g_main_context_iteration(NULL, FALSE);
 }
 
+static guint count_vault_user_files(const gchar *dir_path)
+{
+  guint total = 0;
+  GDir *dir = g_dir_open(dir_path, 0, NULL);
+  if (dir == NULL)
+    return 0;
+  const gchar *name;
+  while ((name = g_dir_read_name(dir)) != NULL) {
+    if (g_strcmp0(name, ".bt") == 0 || g_strcmp0(name, ".git") == 0)
+      continue;
+    g_autofree gchar *full = g_build_filename(dir_path, name, NULL);
+    if (g_file_test(full, G_FILE_TEST_IS_DIR))
+      total += count_vault_user_files(full);
+    else
+      total++;
+  }
+  g_dir_close(dir);
+  return total;
+}
+
 static void test_l3_1e_unresolved_click_create_flow(void **state)
 {
   (void)state;
@@ -935,6 +958,7 @@ static void test_l3_1e_unresolved_click_create_flow(void **state)
     return;
   }
   adw_init();
+  bt_app_reset_stub_writer_calls_for_test();
 
   gchar *root = g_dir_make_tmp("bt-l31e-XXXXXX", NULL);
   gchar *cfg = g_dir_make_tmp("bt-cfg31e-XXXXXX", NULL);
@@ -952,6 +976,7 @@ static void test_l3_1e_unresolved_click_create_flow(void **state)
   assert_true(bt_app_open_note(app, "source.md", NULL));
 
   guint files_before = count_files_recursive(root);
+  guint user_files_before = count_vault_user_files(root);
   BtEditorPane *ed = (BtEditorPane *)bt_app_editor(app);
   assert_non_null(ed);
 
@@ -996,7 +1021,10 @@ static void test_l3_1e_unresolved_click_create_flow(void **state)
 
   assert_string_equal(bt_app_active_note(app), "newly-minted.md");
   assert_string_equal(bt_app_last_statusbar_notice(app), "Created newly-minted.md");
-  assert_int_equal(count_files_recursive(root), files_before + 1);
+  assert_int_equal(count_vault_user_files(root), user_files_before + 1);
+  g_autofree gchar *created_disk = g_build_filename(root, "newly-minted.md", NULL);
+  assert_true(g_file_test(created_disk, G_FILE_TEST_IS_REGULAR));
+  assert_int_equal(bt_app_stub_writer_calls_for_test(), 0);
 
   /* Source note file on disk is 100% unmodified. */
   g_autofree gchar *src_disk = NULL;
@@ -1018,6 +1046,126 @@ static void test_l3_1e_unresolved_click_create_flow(void **state)
   assert_int_equal(bt_createpopover_state(cp), BT_CREATE_POPOVER_CLOSED);
 
   printf("BT_TEST_L3_1E cx03_nav_back=ok cx08_no_write_before_create=ok\n");
+  GtkWindow *win = bt_app_window(app);
+  if (win) gtk_window_destroy(win);
+  bt_app_free(app);
+  bt_test_rm_rf(root);
+  bt_test_rm_rf(cfg);
+  g_free(root);
+  g_free(cfg);
+}
+
+static void test_l3_2b_ambiguity_chooser_ui(void **state)
+{
+  (void)state;
+  if (!gtk_init_check()) {
+    skip();
+    return;
+  }
+  adw_init();
+
+  gchar *root = g_dir_make_tmp("bt-l32b-XXXXXX", NULL);
+  gchar *cfg = g_dir_make_tmp("bt-cfg32b-XXXXXX", NULL);
+  g_setenv("BT_CONFIG_DIR", cfg, TRUE);
+
+  const char *src_body =
+      "---\n"
+      "id: bt-20261123-000200\n"
+      "title: \"Chooser Source\"\n"
+      "created: 2026-11-23T00:00:00Z\n"
+      "source: human\n"
+      "---\n"
+      "Ambiguous [[conpty]] link here.\n";
+  bt_test_put(root, "source.md", src_body);
+  bt_test_put(root, "projects/conpty.md", "# Projects ConPTY\n");
+  bt_test_put(root, "archive/conpty.md", "# Archive ConPTY\n");
+  g_autofree gchar *src_sha_before = g_compute_checksum_for_string(G_CHECKSUM_SHA256, src_body, -1);
+
+  BtApp *app = bt_app_new();
+  bt_app_prepare_ui_for_test(app);
+  assert_true(bt_app_open_vault(app, root, NULL));
+  assert_true(bt_app_open_note(app, "source.md", NULL));
+
+  BtEditorPane *ed = (BtEditorPane *)bt_app_editor(app);
+  assert_non_null(ed);
+  const char *off_amb = strstr(src_body, "conpty");
+  assert_non_null(off_amb);
+  gsize off = (gsize)(off_amb - src_body);
+
+  /* Click ambiguous link -> chooser popover opens with 2 candidates, index 0 preselected. */
+  bt_editorpane_set_caret_byte_offset(ed, 0);
+  assert_true(bt_editorpane_simulate_click(ed, off, 1, 1, 0.0, 0.0, 0));
+  BtChooserPopover *cp = (BtChooserPopover *)bt_app_chooser_popover_for_test(app);
+  assert_non_null(cp);
+  assert_true(bt_chooserpopover_is_open(cp));
+  assert_int_equal(bt_chooserpopover_candidate_count(cp), 2);
+  assert_int_equal(bt_chooserpopover_selected_index(cp), 0);
+  assert_string_equal(bt_chooserpopover_title_text(cp), "2 notes match \"conpty\"");
+
+  /* CK13: Escape closes chooser without navigating or changing source. */
+  assert_true(bt_chooserpopover_handle_key(cp, GDK_KEY_Escape, 0));
+  assert_false(bt_chooserpopover_is_open(cp));
+  assert_string_equal(bt_app_active_note(app), "source.md");
+
+  /* Re-open chooser, press Ctrl+C -> copies full path link & stays open! */
+  assert_true(bt_editorpane_simulate_click(ed, off, 1, 1, 0.0, 0.0, 0));
+  assert_true(bt_chooserpopover_is_open(cp));
+  assert_true(bt_chooserpopover_handle_key(cp, GDK_KEY_Down, 0));
+  assert_int_equal(bt_chooserpopover_selected_index(cp), 1);
+  assert_true(bt_chooserpopover_handle_key(cp, GDK_KEY_c, GDK_CONTROL_MASK));
+  assert_true(bt_chooserpopover_is_open(cp));
+  assert_non_null(bt_app_last_copied_link_for_test(app));
+  assert_true(strcmp(bt_app_last_copied_link_for_test(app), "[[archive/conpty]]") == 0 ||
+              strcmp(bt_app_last_copied_link_for_test(app), "[[projects/conpty]]") == 0);
+  assert_string_equal(bt_app_last_statusbar_notice(app), "Copied link for conpty");
+
+  /* Record which note is candidate 2 (selected index 1), then press Enter -> opens candidate 2 (CX07). */
+  g_autofree gchar *cand2_rel = NULL;
+  {
+    const gchar *copied = bt_app_last_copied_link_for_test(app);
+    cand2_rel = (strcmp(copied, "[[archive/conpty]]") == 0)
+                    ? g_strdup("archive/conpty.md")
+                    : g_strdup("projects/conpty.md");
+  }
+  assert_true(bt_chooserpopover_handle_key(cp, GDK_KEY_Return, 0));
+  assert_false(bt_chooserpopover_is_open(cp));
+  assert_string_equal(bt_app_active_note(app), cand2_rel);
+
+  /* Nav back to source.md, verify source unchanged on disk. */
+  assert_true(bt_app_navigate_back(app));
+  assert_string_equal(bt_app_active_note(app), "source.md");
+  g_autofree gchar *disk_src = NULL;
+  gsize dlen = 0;
+  assert_true(vault_read(bt_app_vault(app), "source.md", &disk_src, &dlen, NULL));
+  g_autofree gchar *src_sha_after = g_compute_checksum_for_string(G_CHECKSUM_SHA256, disk_src, (gssize)dlen);
+  assert_string_equal(src_sha_before, src_sha_after);
+
+  /* Re-open chooser, delete candidate 1 externally on disk while chooser is open, press Open -> status & refresh. */
+  assert_true(bt_editorpane_simulate_click(ed, off, 1, 1, 0.0, 0.0, 0));
+  assert_true(bt_chooserpopover_is_open(cp));
+  assert_true(bt_chooserpopover_handle_key(cp, GDK_KEY_Down, 0));
+  bt_chooserpopover_activate_copy(cp);
+  const gchar *victim_rel = (strcmp(bt_app_last_copied_link_for_test(app), "[[archive/conpty]]") == 0)
+                                ? "archive/conpty.md"
+                                : "projects/conpty.md";
+  g_autofree gchar *victim_abs = g_build_filename(root, victim_rel, NULL);
+  assert_int_equal(g_remove(victim_abs), 0);
+  bt_chooserpopover_activate_open(cp);
+  assert_false(bt_chooserpopover_is_open(cp));
+  assert_string_equal(bt_app_last_statusbar_notice(app), "That note no longer exists");
+  assert_string_equal(bt_app_active_note(app), "source.md");
+
+  /* Wait for idle refresh if queued. */
+  while (g_main_context_pending(NULL))
+    g_main_context_iteration(NULL, FALSE);
+
+  /* Now only 1 candidate remains -> clicking opens remaining note directly with no chooser (CH10). */
+  bt_editorpane_set_caret_byte_offset(ed, 0);
+  assert_true(bt_editorpane_simulate_click(ed, off, 1, 1, 0.0, 0.0, 0));
+  assert_false(bt_chooserpopover_is_open(cp));
+  assert_true(strcmp(bt_app_active_note(app), "source.md") != 0);
+
+  printf("BT_TEST_L3_2B ck13_esc=ok cx07_cand2=ok copy_stays_open=ok missing_refresh=ok\n");
   GtkWindow *win = bt_app_window(app);
   if (win) gtk_window_destroy(win);
   bt_app_free(app);
@@ -1053,6 +1201,7 @@ int main(void)
     cmocka_unit_test(test_l2_7_settings_persistence),
     cmocka_unit_test(test_l3_1d_create_popover_state_machine),
     cmocka_unit_test(test_l3_1e_unresolved_click_create_flow),
+    cmocka_unit_test(test_l3_2b_ambiguity_chooser_ui),
   };
   int rc = cmocka_run_group_tests(tests, NULL, NULL);
   if (ui_log_warnings > 0)
