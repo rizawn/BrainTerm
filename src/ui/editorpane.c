@@ -2,6 +2,7 @@
  * incremental per-paragraph live-preview Markdown GtkTextTags, visual-only
  * blockquote / ## AI draft accents, 1s debounced autosave, and Ctrl+Click wiki-links. */
 #include "editorpane.h"
+#include "createnote.h"
 #include "frontmatter.h"
 #include "linkresolve.h"
 #include "math/mathtok.h"
@@ -24,6 +25,8 @@ struct BtEditorPane {
   GtkWidget *placeholder;
   GtkWidget *overlay;
   GtkWidget *scrolled;
+  GtkAdjustment *hadj;
+  GtkAdjustment *vadj;
   GtkWidget *decor_area;
   GtkSourceView *view;
   GtkSourceBuffer *buffer;
@@ -1011,7 +1014,8 @@ static void on_delete_range_after(GtkTextBuffer *buf, GtkTextIter *start, GtkTex
 
 static void update_column_margins(BtEditorPane *p)
 {
-  if (p->scrolled == NULL || p->view == NULL)
+  if (p == NULL || p->scrolled == NULL || p->view == NULL ||
+      gtk_widget_in_destruction(GTK_WIDGET(p->view)))
     return;
   gint m = BT_COLUMN_MIN_PAD;
   if (!gtk_source_view_get_show_line_numbers(p->view)) {
@@ -1586,8 +1590,11 @@ gchar *bt_editorpane_tooltip_for_offset(const BtEditorPane *pane, gsize byte_off
     bt_link_check_open_policy(res, pane->vault, TRUE, &pol);
 
     if (res->status == BT_LINK_BLOCKED || pol.action == BT_LINK_OPEN_BLOCKED) {
-      tip = g_strdup(pol.reason_msg ? pol.reason_msg
-                                    : bt_link_block_reason_message(res->block_reason));
+      if (res->block_reason == BT_LINK_BLOCK_ESCAPES_VAULT)
+        tip = g_strdup("Not in vault");
+      else
+        tip = g_strdup(pol.reason_msg ? pol.reason_msg
+                                      : bt_link_block_reason_message(res->block_reason));
     } else if (res->status == BT_LINK_EXTERNAL) {
       if (pol.has_userinfo) {
         tip = g_strdup_printf("%s (Warning: embedded credentials stripped)",
@@ -1601,7 +1608,15 @@ gchar *bt_editorpane_tooltip_for_offset(const BtEditorPane *pane, gsize byte_off
         cnt++;
       tip = g_strdup_printf("%u notes match. Click to choose.", cnt);
     } else if (res->status == BT_LINK_UNRESOLVED) {
-      tip = g_strdup("Note not found");
+      BtCreatePlan *p = bt_createnote_plan_with_syntax(pane->vault, pane->snapshot, pane->relpath,
+                                                       sp.raw_target, sp.syntax);
+      if (p != NULL && (p->result == BT_CREATE_PLAN_NOT_A_NOTE ||
+                        p->result == BT_CREATE_PLAN_OUTSIDE_VAULT)) {
+        tip = g_strdup("Not in vault");
+      } else {
+        tip = g_strdup("Note not found");
+      }
+      bt_createnote_plan_free(p);
     } else if (res->kind == BT_LINK_KIND_SAME_NOTE) {
       tip = res->anchor ? g_strdup_printf("#%s", res->anchor) : g_strdup("(current note)");
     } else if (res->kind == BT_LINK_KIND_FILE) {
@@ -1871,16 +1886,20 @@ BtEditorPane *bt_editorpane_new(BtEditorSaveFn on_save, BtEditorLinkFn on_link,
   gtk_widget_set_vexpand(pane->scrolled, TRUE);
   gtk_widget_set_hexpand(pane->scrolled, TRUE);
 
-  GtkAdjustment *hadj = gtk_scrolled_window_get_hadjustment(GTK_SCROLLED_WINDOW(pane->scrolled));
-  if (hadj != NULL)
-    g_signal_connect(hadj, "notify::page-size", G_CALLBACK(on_scrolled_page_size), pane);
-  GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(pane->scrolled));
-  if (vadj != NULL) {
-    g_signal_connect(vadj, "value-changed", G_CALLBACK(on_vscroll_changed), pane);
-    g_signal_connect(vadj, "changed", G_CALLBACK(on_vadj_changed), pane);
+  pane->hadj = gtk_scrolled_window_get_hadjustment(GTK_SCROLLED_WINDOW(pane->scrolled));
+  if (pane->hadj != NULL) {
+    g_object_add_weak_pointer(G_OBJECT(pane->hadj), (gpointer *)&pane->hadj);
+    g_signal_connect(pane->hadj, "notify::page-size", G_CALLBACK(on_scrolled_page_size), pane);
+  }
+  pane->vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(pane->scrolled));
+  if (pane->vadj != NULL) {
+    g_object_add_weak_pointer(G_OBJECT(pane->vadj), (gpointer *)&pane->vadj);
+    g_signal_connect(pane->vadj, "value-changed", G_CALLBACK(on_vscroll_changed), pane);
+    g_signal_connect(pane->vadj, "changed", G_CALLBACK(on_vadj_changed), pane);
   }
 
   pane->decor_area = gtk_drawing_area_new();
+  g_object_add_weak_pointer(G_OBJECT(pane->decor_area), (gpointer *)&pane->decor_area);
   gtk_widget_set_can_target(pane->decor_area, FALSE);
   gtk_widget_set_focusable(pane->decor_area, FALSE);
   gtk_widget_set_hexpand(pane->decor_area, TRUE);
@@ -2189,10 +2208,32 @@ void bt_editorpane_free(BtEditorPane *pane)
 {
   if (pane == NULL)
     return;
-  if (pane->view != NULL)
+  if (pane->hadj != NULL) {
+    g_signal_handlers_disconnect_by_data(pane->hadj, pane);
+    g_object_remove_weak_pointer(G_OBJECT(pane->hadj), (gpointer *)&pane->hadj);
+    pane->hadj = NULL;
+  }
+  if (pane->vadj != NULL) {
+    g_signal_handlers_disconnect_by_data(pane->vadj, pane);
+    g_object_remove_weak_pointer(G_OBJECT(pane->vadj), (gpointer *)&pane->vadj);
+    pane->vadj = NULL;
+  }
+  if (pane->decor_area != NULL) {
+    gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(pane->decor_area), NULL, NULL, NULL);
+    g_object_remove_weak_pointer(G_OBJECT(pane->decor_area), (gpointer *)&pane->decor_area);
+    pane->decor_area = NULL;
+  }
+  if (pane->view != NULL) {
+    g_signal_handlers_disconnect_by_data(pane->view, pane);
     g_object_remove_weak_pointer(G_OBJECT(pane->view), (gpointer *)&pane->view);
-  if (pane->scrolled != NULL)
+    pane->view = NULL;
+  }
+  if (pane->scrolled != NULL) {
     g_object_remove_weak_pointer(G_OBJECT(pane->scrolled), (gpointer *)&pane->scrolled);
+    pane->scrolled = NULL;
+  }
+  if (pane->buffer != NULL)
+    g_signal_handlers_disconnect_by_data(pane->buffer, pane);
   clear_anchor_flash(pane);
   clear_hover_state(pane);
   cancel_autosave(pane);

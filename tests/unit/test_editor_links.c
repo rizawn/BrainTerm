@@ -506,6 +506,7 @@ static void test_l2_8_unresolved_click_does_not_call_stub_writer(void **state)
     return;
   }
   adw_init();
+  bt_app_reset_stub_writer_calls_for_test();
 
   gchar *root = g_dir_make_tmp("bt-l28-XXXXXX", NULL);
   gchar *cfg = g_dir_make_tmp("bt-cfg28-XXXXXX", NULL);
@@ -531,14 +532,21 @@ static void test_l2_8_unresolved_click_does_not_call_stub_writer(void **state)
 
   assert_true(bt_editorpane_simulate_click(ed, target_off, 1, 1, 0.0, 0.0, 0));
   assert_string_equal(bt_app_active_note(app), "a.md");
-  assert_string_equal(bt_app_last_statusbar_notice(app), "Note not found");
+  BtCreatePopover *cp = (BtCreatePopover *)bt_app_create_popover_for_test(app);
+  assert_non_null(cp);
+  assert_int_equal(bt_createpopover_state(cp), BT_CREATE_POPOVER_SHOWN);
+  assert_string_equal(bt_createpopover_path_text(cp), "missing-note.md");
   assert_null(bt_app_active_confirm_popover_for_test(app));
+  assert_int_equal(count_files_recursive(root), files_before);
+  bt_createpopover_activate_cancel(cp);
+  assert_int_equal(bt_createpopover_state(cp), BT_CREATE_POPOVER_CLOSED);
 
-  /* Also verify nested path target via bt_app_activate_link directly. */
+  /* Also verify nested path target via bt_app_activate_link opens popover and writes 0 files. */
   bt_app_set_statusbar_notice(app, NULL);
   assert_false(bt_app_activate_link(app, "folder/missing-two"));
   assert_string_equal(bt_app_active_note(app), "a.md");
-  assert_string_equal(bt_app_last_statusbar_notice(app), "Note not found");
+  assert_int_equal(bt_createpopover_state(cp), BT_CREATE_POPOVER_SHOWN);
+  assert_string_equal(bt_createpopover_path_text(cp), "folder/missing-two.md");
   assert_null(bt_app_active_confirm_popover_for_test(app));
 
   g_autofree gchar *p1 = g_build_filename(root, "missing-note.md", NULL);
@@ -546,6 +554,7 @@ static void test_l2_8_unresolved_click_does_not_call_stub_writer(void **state)
   assert_false(g_file_test(p1, G_FILE_TEST_EXISTS));
   assert_false(g_file_test(p2, G_FILE_TEST_EXISTS));
   assert_int_equal(count_files_recursive(root), files_before);
+  assert_int_equal(bt_app_stub_writer_calls_for_test(), 0);
 
   printf("BT_TEST_L2_8 unresolved_no_stub_create=1 files=%u\n", files_before);
   GtkWindow *win = bt_app_window(app);
@@ -908,6 +917,143 @@ static void test_l3_1d_create_popover_state_machine(void **state)
   printf("BT_TEST_L3_1D create_popover state_machine=ok ck14_tab_order=ok\n");
 }
 
+static void pump_until_create_closed(BtCreatePopover *cp)
+{
+  gint64 deadline = g_get_monotonic_time() + 5 * G_USEC_PER_SEC;
+  while (bt_createpopover_state(cp) != BT_CREATE_POPOVER_CLOSED &&
+         g_get_monotonic_time() < deadline) {
+    g_main_context_iteration(NULL, FALSE);
+  }
+  /* Drain any remaining idle ticks (graph refresh). */
+  while (g_main_context_pending(NULL))
+    g_main_context_iteration(NULL, FALSE);
+}
+
+static guint count_vault_user_files(const gchar *dir_path)
+{
+  guint total = 0;
+  GDir *dir = g_dir_open(dir_path, 0, NULL);
+  if (dir == NULL)
+    return 0;
+  const gchar *name;
+  while ((name = g_dir_read_name(dir)) != NULL) {
+    if (g_strcmp0(name, ".bt") == 0 || g_strcmp0(name, ".git") == 0)
+      continue;
+    g_autofree gchar *full = g_build_filename(dir_path, name, NULL);
+    if (g_file_test(full, G_FILE_TEST_IS_DIR))
+      total += count_vault_user_files(full);
+    else
+      total++;
+  }
+  g_dir_close(dir);
+  return total;
+}
+
+static void test_l3_1e_unresolved_click_create_flow(void **state)
+{
+  (void)state;
+  if (!gtk_init_check()) {
+    skip();
+    return;
+  }
+  adw_init();
+  bt_app_reset_stub_writer_calls_for_test();
+
+  gchar *root = g_dir_make_tmp("bt-l31e-XXXXXX", NULL);
+  gchar *cfg = g_dir_make_tmp("bt-cfg31e-XXXXXX", NULL);
+  g_setenv("BT_CONFIG_DIR", cfg, TRUE);
+
+  const char *src_body =
+      "---\nid: bt-20261123-000010\ntitle: \"Source\"\ncreated: 2026-11-23T00:00:00Z\nsource: human\n---\n"
+      "Click [[newly-minted]] or [[folder/deep-note]] or non-note [[missing.png]] or [[../../escape]].\n";
+  bt_test_put(root, "source.md", src_body);
+  g_autofree gchar *src_sha_before = g_compute_checksum_for_string(G_CHECKSUM_SHA256, src_body, -1);
+
+  BtApp *app = bt_app_new();
+  bt_app_prepare_ui_for_test(app);
+  assert_true(bt_app_open_vault(app, root, NULL));
+  assert_true(bt_app_open_note(app, "source.md", NULL));
+
+  guint files_before = count_files_recursive(root);
+  guint user_files_before = count_vault_user_files(root);
+  BtEditorPane *ed = (BtEditorPane *)bt_app_editor(app);
+  assert_non_null(ed);
+
+  /* D-L3-05: Non-note target shows "Not in vault" tooltip and never opens create popover. */
+  const char *off_png = strstr(src_body, "missing.png");
+  assert_non_null(off_png);
+  g_autofree gchar *tip_png = bt_editorpane_tooltip_for_offset(ed, (gsize)(off_png - src_body));
+  assert_string_equal(tip_png, "Not in vault");
+  const char *off_esc = strstr(src_body, "../../escape");
+  g_autofree gchar *tip_esc = bt_editorpane_tooltip_for_offset(ed, (gsize)(off_esc - src_body));
+  assert_string_equal(tip_esc, "Not in vault");
+
+  bt_editorpane_set_caret_byte_offset(ed, 0);
+  assert_true(bt_editorpane_simulate_click(ed, (gsize)(off_png - src_body), 1, 1, 0.0, 0.0, 0));
+  assert_null(bt_app_create_popover_for_test(app));
+  assert_non_null(strstr(bt_app_last_statusbar_notice(app), "Not a note"));
+  assert_int_equal(count_files_recursive(root), files_before);
+
+  /* CX08: Clicking UNRESOLVED note opens popover with 0 files created before Create is pressed. */
+  const char *off_new = strstr(src_body, "newly-minted");
+  assert_non_null(off_new);
+  bt_editorpane_set_caret_byte_offset(ed, 0);
+  assert_true(bt_editorpane_simulate_click(ed, (gsize)(off_new - src_body), 1, 1, 0.0, 0.0, 0));
+  BtCreatePopover *cp = (BtCreatePopover *)bt_app_create_popover_for_test(app);
+  assert_non_null(cp);
+  assert_int_equal(bt_createpopover_state(cp), BT_CREATE_POPOVER_SHOWN);
+  assert_string_equal(bt_createpopover_path_text(cp), "newly-minted.md");
+  assert_int_equal(count_files_recursive(root), files_before);
+
+  /* Cancel writes 0 files and keeps caret at 0. */
+  bt_createpopover_activate_cancel(cp);
+  assert_int_equal(bt_createpopover_state(cp), BT_CREATE_POPOVER_CLOSED);
+  assert_int_equal(count_files_recursive(root), files_before);
+  assert_int_equal(bt_editorpane_caret_byte_offset(ed), 0);
+
+  /* Re-click and press Create -> async GTask creates note, updates index & styles, opens it, pushes nav. */
+  assert_true(bt_editorpane_simulate_click(ed, (gsize)(off_new - src_body), 1, 1, 0.0, 0.0, 0));
+  assert_int_equal(bt_createpopover_state(cp), BT_CREATE_POPOVER_SHOWN);
+  bt_createpopover_activate_create(cp);
+  pump_until_create_closed(cp);
+  assert_int_equal(bt_createpopover_state(cp), BT_CREATE_POPOVER_CLOSED);
+
+  assert_string_equal(bt_app_active_note(app), "newly-minted.md");
+  assert_string_equal(bt_app_last_statusbar_notice(app), "Created newly-minted.md");
+  assert_int_equal(count_vault_user_files(root), user_files_before + 1);
+  g_autofree gchar *created_disk = g_build_filename(root, "newly-minted.md", NULL);
+  assert_true(g_file_test(created_disk, G_FILE_TEST_IS_REGULAR));
+  assert_int_equal(bt_app_stub_writer_calls_for_test(), 0);
+
+  /* Source note file on disk is 100% unmodified. */
+  g_autofree gchar *src_disk = NULL;
+  gsize src_dlen = 0;
+  assert_true(vault_read(bt_app_vault(app), "source.md", &src_disk, &src_dlen, NULL));
+  g_autofree gchar *src_sha_after = g_compute_checksum_for_string(G_CHECKSUM_SHA256, src_disk, (gssize)src_dlen);
+  assert_string_equal(src_sha_before, src_sha_after);
+
+  /* CX03: Alt+Left navigates back to source.md, and [[newly-minted]] now has resolved style. */
+  assert_true(bt_app_navigate_back(app));
+  assert_string_equal(bt_app_active_note(app), "source.md");
+  assert_true(bt_editorpane_offset_has_tag_name(ed, (gsize)(off_new - src_body), "bt-wikilink"));
+  assert_false(bt_editorpane_offset_has_tag_name(ed, (gsize)(off_new - src_body), "bt-link-broken"));
+
+  /* Second click on same link now opens directly with no create popover (§6.1.8). */
+  bt_editorpane_set_caret_byte_offset(ed, 0);
+  assert_true(bt_editorpane_simulate_click(ed, (gsize)(off_new - src_body), 1, 1, 0.0, 0.0, 0));
+  assert_string_equal(bt_app_active_note(app), "newly-minted.md");
+  assert_int_equal(bt_createpopover_state(cp), BT_CREATE_POPOVER_CLOSED);
+
+  printf("BT_TEST_L3_1E cx03_nav_back=ok cx08_no_write_before_create=ok\n");
+  GtkWindow *win = bt_app_window(app);
+  if (win) gtk_window_destroy(win);
+  bt_app_free(app);
+  bt_test_rm_rf(root);
+  bt_test_rm_rf(cfg);
+  g_free(root);
+  g_free(cfg);
+}
+
 static guint ui_log_warnings = 0;
 
 static void on_ui_test_log(const gchar *domain, GLogLevelFlags level, const gchar *msg, gpointer ud)
@@ -933,6 +1079,7 @@ int main(void)
     cmocka_unit_test(test_l2_6_nav_history_5_jumps_and_deleted_skip),
     cmocka_unit_test(test_l2_7_settings_persistence),
     cmocka_unit_test(test_l3_1d_create_popover_state_machine),
+    cmocka_unit_test(test_l3_1e_unresolved_click_create_flow),
   };
   int rc = cmocka_run_group_tests(tests, NULL, NULL);
   if (ui_log_warnings > 0)

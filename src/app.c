@@ -4,6 +4,7 @@
 #include "agents.h"
 #include "bt_build_stamp.h"
 #include "checkpoint.h"
+#include "createnote.h"
 #include "frontmatter.h"
 #include "graph.h"
 #include "graphview.h"
@@ -15,6 +16,7 @@
 #include "sessions.h"
 #include "theme.h"
 #include "ui/askbar.h"
+#include "ui/createpopover.h"
 #include "ui/editorpane.h"
 #include "ui/filetree.h"
 #include "ui/quickopen.h"
@@ -103,6 +105,12 @@ struct BtApp {
   BtNavHistory *nav;
   gboolean nav_replaying;
   gboolean links_open_on_click;
+
+  BtCreatePopover *create_popover;
+  guint status_notice_timer_id;
+  guint deferred_graph_idle_id;
+  gboolean create_busy;
+  struct BtAppRef *self_ref;
 
   gchar *verify_l2_dir;
   guint verify_l2_phase;
@@ -442,6 +450,10 @@ void bt_app_set_statusbar_notice(BtApp *app, const gchar *message)
 {
   if (app == NULL)
     return;
+  if (app->status_notice_timer_id != 0) {
+    g_source_remove(app->status_notice_timer_id);
+    app->status_notice_timer_id = 0;
+  }
   g_free(app->last_statusbar_notice);
   app->last_statusbar_notice = g_strdup(message ? message : "");
   if (app->status_notice_lbl != NULL) {
@@ -453,6 +465,21 @@ void bt_app_set_statusbar_notice(BtApp *app, const gchar *message)
       gtk_widget_set_visible(app->status_notice_lbl, FALSE);
     }
   }
+}
+
+static gboolean on_status_notice_clear_cb(gpointer ud)
+{
+  BtApp *app = ud;
+  app->status_notice_timer_id = 0;
+  bt_app_set_statusbar_notice(app, "");
+  return G_SOURCE_REMOVE;
+}
+
+static void set_statusbar_notice_timed(BtApp *app, const gchar *message, guint timeout_s)
+{
+  bt_app_set_statusbar_notice(app, message);
+  if (app != NULL && message != NULL && message[0] != '\0' && timeout_s > 0u)
+    app->status_notice_timer_id = g_timeout_add_seconds(timeout_s, on_status_notice_clear_cb, app);
 }
 
 const gchar *bt_app_last_statusbar_notice(const BtApp *app)
@@ -506,6 +533,207 @@ static void clear_active_confirm(BtApp *app)
   }
   g_clear_pointer(&app->active_confirm_detail, g_free);
   g_clear_pointer(&app->pending_confirm_res, bt_link_resolution_free);
+}
+
+typedef struct BtAppRef {
+  gint ref_count;
+  BtApp *app;
+} BtAppRef;
+
+static BtAppRef *bt_app_ref_new(BtApp *app)
+{
+  BtAppRef *r = g_new0(BtAppRef, 1);
+  r->ref_count = 1;
+  r->app = app;
+  return r;
+}
+
+static BtAppRef *bt_app_ref_acquire(BtAppRef *r)
+{
+  if (r != NULL)
+    g_atomic_int_inc(&r->ref_count);
+  return r;
+}
+
+static void bt_app_ref_release(BtAppRef *r)
+{
+  if (r != NULL && g_atomic_int_dec_and_test(&r->ref_count))
+    g_free(r);
+}
+
+static void refresh_graph(BtApp *app, gboolean animate);
+
+static gboolean on_deferred_graph_idle(gpointer ud)
+{
+  BtApp *app = ud;
+  app->deferred_graph_idle_id = 0;
+  refresh_graph(app, FALSE);
+  return G_SOURCE_REMOVE;
+}
+
+static void schedule_graph_refresh_idle(BtApp *app)
+{
+  if (app == NULL || app->graphview == NULL || app->deferred_graph_idle_id != 0)
+    return;
+  app->deferred_graph_idle_id = g_idle_add(on_deferred_graph_idle, app);
+}
+
+static BtCreatePlan *clone_create_plan(const BtCreatePlan *src)
+{
+  if (src == NULL)
+    return NULL;
+  BtCreatePlan *c = g_new0(BtCreatePlan, 1);
+  c->result = src->result;
+  c->target_relpath = g_strdup(src->target_relpath);
+  c->note_name = g_strdup(src->note_name);
+  c->display = g_strdup(src->display);
+  c->anchor = g_strdup(src->anchor);
+  c->block_id = g_strdup(src->block_id);
+  c->reason = g_strdup(src->reason);
+  c->missing_folders = g_ptr_array_new_with_free_func(g_free);
+  if (src->missing_folders != NULL) {
+    for (guint i = 0; i < src->missing_folders->len; i++)
+      g_ptr_array_add(c->missing_folders,
+                      g_strdup((const gchar *)g_ptr_array_index(src->missing_folders, i)));
+  }
+  c->has_folder_prefix = src->has_folder_prefix;
+  c->needs_folder_create = src->needs_folder_create;
+  c->has_other_same_basename = src->has_other_same_basename;
+  c->stale_index = src->stale_index;
+  return c;
+}
+
+typedef struct {
+  BtAppRef *app_ref;
+  const BtVault *vault;
+  BtCreatePlan *plan;
+  gchar *source_note;
+  gchar *anchor;
+  BtCreateCommitResult commit_res;
+  gchar *committed_relpath;
+  gchar *committed_id;
+  gchar *message;
+} CreateTaskCtx;
+
+static void create_task_ctx_free(gpointer p)
+{
+  CreateTaskCtx *ctx = p;
+  if (ctx == NULL)
+    return;
+  bt_app_ref_release(ctx->app_ref);
+  bt_createnote_plan_free(ctx->plan);
+  g_free(ctx->source_note);
+  g_free(ctx->anchor);
+  g_free(ctx->committed_relpath);
+  g_free(ctx->committed_id);
+  g_free(ctx->message);
+  g_free(ctx);
+}
+
+static void create_note_worker(GTask *task, gpointer source_obj, gpointer task_data,
+                               GCancellable *cancellable)
+{
+  (void)source_obj; (void)cancellable;
+  CreateTaskCtx *ctx = task_data;
+  GError *err = NULL;
+  ctx->commit_res = bt_createnote_commit(ctx->vault, ctx->plan, &ctx->committed_relpath,
+                                         &ctx->committed_id, &ctx->message, &err);
+  if (err != NULL) {
+    if (ctx->message == NULL)
+      ctx->message = g_strdup_printf("Create failed: %s", err->message);
+    g_clear_error(&err);
+  }
+  g_task_return_boolean(task, ctx->commit_res == BT_CREATE_COMMIT_OK);
+}
+
+static void on_create_note_task_done(GObject *src, GAsyncResult *res, gpointer ud)
+{
+  (void)src; (void)res;
+  GTask *task = G_TASK(res);
+  CreateTaskCtx *ctx = g_task_get_task_data(task);
+  (void)ud;
+  if (ctx == NULL || ctx->app_ref == NULL || ctx->app_ref->app == NULL)
+    return;
+
+  BtApp *app = ctx->app_ref->app;
+  app->create_busy = FALSE;
+  if (app->create_popover != NULL)
+    bt_createpopover_close(app->create_popover);
+
+  const gchar *cur_active = bt_app_active_note(app);
+  gboolean still_on_source = (g_strcmp0(cur_active, ctx->source_note) == 0);
+
+  if (ctx->commit_res == BT_CREATE_COMMIT_OK) {
+    if (app->vault != NULL)
+      vault_rescan(app->vault, NULL, NULL);
+    if (app->tree != NULL && app->vault != NULL)
+      bt_filetree_populate(app->tree, app->vault);
+    if (app->index != NULL && app->vault != NULL && ctx->committed_relpath != NULL)
+      bt_index_upsert_after_create(app->index, app->vault, ctx->committed_relpath, NULL);
+    rebuild_link_snapshot(app);
+    schedule_graph_refresh_idle(app);
+
+    if (still_on_source && ctx->committed_relpath != NULL) {
+      if (bt_app_open_note(app, ctx->committed_relpath, NULL)) {
+        if (ctx->anchor != NULL && app->editor != NULL) {
+          gdouble ty = 0.0;
+          if (bt_editorpane_scroll_to_anchor(app->editor, ctx->anchor, &ty) &&
+              !app->nav_replaying && app->nav != NULL) {
+            bt_nav_history_update_current(app->nav, ctx->committed_relpath,
+                                          bt_editorpane_caret_byte_offset(app->editor), ty);
+          }
+        }
+      }
+    }
+    set_statusbar_notice_timed(app,
+                               ctx->message ? ctx->message : "Created note", 4u);
+  } else if (ctx->commit_res == BT_CREATE_COMMIT_EXISTS) {
+    if (app->vault != NULL)
+      vault_rescan(app->vault, NULL, NULL);
+    if (app->index != NULL && app->vault != NULL && ctx->committed_relpath != NULL)
+      bt_index_upsert_after_create(app->index, app->vault, ctx->committed_relpath, NULL);
+    rebuild_link_snapshot(app);
+    if (still_on_source && ctx->committed_relpath != NULL)
+      bt_app_open_note(app, ctx->committed_relpath, NULL);
+    set_statusbar_notice_timed(app,
+                               ctx->message ? ctx->message : "Note already existed, opened it", 6u);
+  } else {
+    set_statusbar_notice_timed(app,
+                               ctx->message ? ctx->message : "Create failed", 6u);
+  }
+}
+
+static void on_create_popover_confirm(const BtCreatePlan *plan, gpointer ud)
+{
+  BtApp *app = ud;
+  if (app == NULL || app->vault == NULL || plan == NULL || app->create_busy)
+    return;
+  app->create_busy = TRUE;
+
+  CreateTaskCtx *ctx = g_new0(CreateTaskCtx, 1);
+  ctx->app_ref = bt_app_ref_acquire(app->self_ref);
+  ctx->vault = app->vault;
+  ctx->plan = clone_create_plan(plan);
+  ctx->source_note = g_strdup(bt_app_active_note(app));
+  ctx->anchor = g_strdup(plan->anchor);
+
+  GTask *task = g_task_new(NULL, NULL, on_create_note_task_done, NULL);
+  g_task_set_task_data(task, ctx, create_task_ctx_free);
+  g_task_run_in_thread(task, create_note_worker);
+  g_object_unref(task);
+}
+
+static void on_create_popover_cancel(gpointer ud)
+{
+  BtApp *app = ud;
+  if (app == NULL)
+    return;
+  app->create_busy = FALSE;
+}
+
+gpointer bt_app_create_popover_for_test(const BtApp *app)
+{
+  return app ? app->create_popover : NULL;
 }
 
 typedef struct {
@@ -796,9 +1024,57 @@ gboolean bt_app_activate_link(BtApp *app, const gchar *raw_target)
   }
 
   if (res->status == BT_LINK_UNRESOLVED) {
-    bt_app_set_statusbar_notice(app, "Note not found");
+    clear_active_confirm(app);
+    if (app->create_popover != NULL &&
+        bt_createpopover_state(app->create_popover) == BT_CREATE_POPOVER_BUSY) {
+      bt_link_resolution_free(res);
+      return FALSE;
+    }
+    if (app->create_popover != NULL)
+      bt_createpopover_close(app->create_popover);
+
+    BtCreatePlan *plan = bt_createnote_plan(app->vault, app->link_snap, src, raw_target);
+    gboolean handled = FALSE;
+    if (plan->result == BT_CREATE_PLAN_OK) {
+      if (app->create_popover == NULL)
+        app->create_popover = bt_createpopover_new(on_create_popover_confirm,
+                                                   on_create_popover_cancel, app);
+      GtkWidget *anchor_w = app->editor ? bt_editorpane_view_widget(app->editor) : NULL;
+      if (anchor_w != NULL) {
+        GdkRectangle rect = {40, 40, 8, 18};
+        bt_editorpane_link_popover_rect(app->editor, &rect);
+        bt_createpopover_show(app->create_popover, anchor_w, &rect, plan);
+      }
+      set_statusbar_notice_timed(app, "", 0);
+    } else if (plan->result == BT_CREATE_PLAN_EXISTS) {
+      gboolean stale = plan->stale_index;
+      if (stale) {
+        if (app->vault != NULL)
+          vault_rescan(app->vault, NULL, NULL);
+        if (app->index != NULL && app->vault != NULL && plan->target_relpath != NULL)
+          bt_index_upsert_after_create(app->index, app->vault, plan->target_relpath, NULL);
+        rebuild_link_snapshot(app);
+        schedule_graph_refresh_idle(app);
+      }
+      if (plan->target_relpath != NULL && bt_app_open_note(app, plan->target_relpath, NULL)) {
+        if (plan->anchor != NULL && app->editor != NULL) {
+          gdouble ty = 0.0;
+          bt_editorpane_scroll_to_anchor(app->editor, plan->anchor, &ty);
+        }
+        handled = TRUE;
+      }
+      if (stale)
+        set_statusbar_notice_timed(app, "Index refreshed", 4u);
+    } else if (plan->result == BT_CREATE_PLAN_PLACEHOLDER) {
+      handled = TRUE;
+    } else {
+      g_autofree gchar *smsg = bt_createnote_plan_status_message(plan);
+      if (smsg != NULL)
+        set_statusbar_notice_timed(app, smsg, 6u);
+    }
+    bt_createnote_plan_free(plan);
     bt_link_resolution_free(res);
-    return FALSE;
+    return handled;
   }
 
   if (res->status == BT_LINK_AMBIGUOUS) {
@@ -1240,8 +1516,21 @@ BtNavHistory *bt_app_nav_history(const BtApp *app)
   return app ? app->nav : NULL;
 }
 
+static guint stub_writer_call_count = 0;
+
+guint bt_app_stub_writer_calls_for_test(void)
+{
+  return stub_writer_call_count;
+}
+
+void bt_app_reset_stub_writer_calls_for_test(void)
+{
+  stub_writer_call_count = 0;
+}
+
 gboolean bt_app_open_or_create_wikilink(BtApp *app, const gchar *target, GError **error)
 {
+  stub_writer_call_count++;
   g_return_val_if_fail(app != NULL && target != NULL, FALSE);
   if (app->vault == NULL)
     return FALSE;
@@ -3614,6 +3903,7 @@ BtApp *bt_app_new(void)
   app->links_open_on_click = TRUE;
   app->scheme = BT_SCHEME_DARK;
   app->confirm_external_urls = TRUE;
+  app->self_ref = bt_app_ref_new(app);
   app->adw_app = adw_application_new("local.brainterm.App", G_APPLICATION_NON_UNIQUE);
 
   static const GOptionEntry opts[] = {
@@ -3642,6 +3932,20 @@ void bt_app_free(BtApp *app)
 {
   if (app == NULL)
     return;
+  if (app->self_ref != NULL) {
+    app->self_ref->app = NULL;
+    bt_app_ref_release(app->self_ref);
+    app->self_ref = NULL;
+  }
+  if (app->status_notice_timer_id != 0) {
+    g_source_remove(app->status_notice_timer_id);
+    app->status_notice_timer_id = 0;
+  }
+  if (app->deferred_graph_idle_id != 0) {
+    g_source_remove(app->deferred_graph_idle_id);
+    app->deferred_graph_idle_id = 0;
+  }
+  g_clear_pointer(&app->create_popover, bt_createpopover_free);
   clear_active_confirm(app);
   g_clear_pointer(&app->nav, bt_nav_history_free);
   if (app->editor != NULL)
