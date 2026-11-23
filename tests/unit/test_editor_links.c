@@ -1616,6 +1616,170 @@ static void test_ck12_shortcut_audit_no_unresolved_conflict(void **state)
   printf("BT_TEST_CK12 shortcut_audit_no_unresolved_conflict=ok\n");
 }
 
+static gboolean cs_mock_launcher(const char *target, gboolean is_uri, void *ud)
+{
+  (void)target;
+  (void)is_uri;
+  guint *calls = ud;
+  (*calls)++;
+  return TRUE;
+}
+
+static void test_l3_4_confirm_external_urls_settings(void **state)
+{
+  (void)state;
+  if (!gtk_init_check()) {
+    skip();
+    return;
+  }
+  adw_init();
+
+  gchar *root = g_dir_make_tmp("bt-l34-XXXXXX", NULL);
+  gchar *cfg = g_dir_make_tmp("bt-cfg34-XXXXXX", NULL);
+  g_setenv("BT_CONFIG_DIR", cfg, TRUE);
+
+  const gchar *note_txt =
+      "# Links\n"
+      "Safe [web](https://example.org/docs) and [second](https://example.org/two)\n"
+      "Bad [script](javascript:alert(1))\n"
+      "Creds [login](https://user:pass@example.org/secret)\n";
+  bt_test_put(root, "a.md", note_txt);
+
+  /* CS01: Fresh state file -> confirm_external_urls is true. */
+  assert_true(bt_app_load_confirm_external_urls(NULL));
+
+  /* CS02: Write false, reload state -> reads false. */
+  assert_true(bt_app_save_confirm_external_urls(FALSE, NULL));
+  assert_false(bt_app_load_confirm_external_urls(NULL));
+
+  /* CS03: Value "maybe" in state file -> reads true, logs exactly one warning line, no URL in log. */
+  g_autofree gchar *ini_path = bt_app_state_file_path();
+  assert_true(g_file_set_contents(ini_path, "[editor]\nconfirm_external_urls=maybe\n", -1, NULL));
+
+  BtApp *app1 = bt_app_new();
+  bt_app_prepare_ui_for_test(app1);
+  assert_true(bt_app_open_vault(app1, root, NULL));
+  assert_true(bt_app_open_note(app1, "a.md", NULL));
+  assert_true(bt_app_get_confirm_external_urls(app1));
+
+  g_autofree gchar *vlog_path = g_build_filename(root, ".bt", "vault.log", NULL);
+  g_autofree gchar *vlog_raw = NULL;
+  assert_true(g_file_get_contents(vlog_path, &vlog_raw, NULL, NULL));
+  guint warn_lines = 0;
+  gchar **lines = g_strsplit(vlog_raw, "\n", -1);
+  for (guint i = 0; lines[i] != NULL; i++) {
+    if (strstr(lines[i], "confirm_external_urls") != NULL) {
+      warn_lines++;
+      assert_null(strstr(lines[i], "http"));
+      assert_null(strstr(lines[i], "example.org"));
+    }
+  }
+  g_strfreev(lines);
+  assert_int_equal(warn_lines, 1);
+
+  /* CS07: Setting true, first https link -> confirm popover shown, launcher called 0 times before confirm. */
+  guint mock_calls = 0;
+  bt_app_set_launcher_for_test(app1, cs_mock_launcher, &mock_calls);
+  assert_true(bt_app_activate_link(app1, "https://example.org/docs"));
+  assert_non_null(bt_app_active_confirm_popover_for_test(app1));
+  assert_int_equal(mock_calls, 0);
+
+  /* CS08: Confirm with "Don't ask again this session" -> launches first, then second https opens without popover. */
+  assert_true(bt_app_confirm_active_popover_for_test(app1, TRUE));
+  assert_int_equal(mock_calls, 1);
+  assert_null(bt_app_active_confirm_popover_for_test(app1));
+
+  assert_true(bt_app_activate_link(app1, "https://example.org/two"));
+  assert_null(bt_app_active_confirm_popover_for_test(app1));
+  assert_int_equal(mock_calls, 2);
+
+  /* Persist true explicitly before ending session 1 so session 2 starts with confirm_external_urls=true. */
+  assert_true(bt_app_save_confirm_external_urls(TRUE, NULL));
+  GtkWindow *w1 = bt_app_window(app1);
+  if (w1) gtk_window_destroy(w1);
+  bt_app_free(app1);
+
+  /* CS09: New session after "Don't ask again" -> popover shown again (session-scoped). */
+  BtApp *app2 = bt_app_new();
+  bt_app_prepare_ui_for_test(app2);
+  assert_true(bt_app_open_vault(app2, root, NULL));
+  assert_true(bt_app_open_note(app2, "a.md", NULL));
+  guint mock_calls2 = 0;
+  bt_app_set_launcher_for_test(app2, cs_mock_launcher, &mock_calls2);
+  assert_true(bt_app_get_confirm_external_urls(app2));
+  assert_true(bt_app_activate_link(app2, "https://example.org/docs"));
+  assert_non_null(bt_app_active_confirm_popover_for_test(app2));
+  assert_int_equal(mock_calls2, 0);
+  assert_true(bt_app_confirm_active_popover_for_test(app2, FALSE));
+  assert_int_equal(mock_calls2, 1);
+
+  /* CS10 & CS11: Menu toggle action state matches stored value and toggling writes state.ini immediately. */
+  GActionMap *amap2 = G_ACTION_MAP(bt_app_application(app2));
+  GAction *act2 = g_action_map_lookup_action(amap2, "confirm-external-urls");
+  assert_non_null(act2);
+  GVariant *st2 = g_action_get_state(act2);
+  assert_true(g_variant_get_boolean(st2));
+  g_variant_unref(st2);
+
+  g_action_change_state(act2, g_variant_new_boolean(FALSE));
+  assert_false(bt_app_get_confirm_external_urls(app2));
+  assert_false(bt_app_load_confirm_external_urls(NULL));
+  g_autofree gchar *ini_after = NULL;
+  assert_true(g_file_get_contents(ini_path, &ini_after, NULL, NULL));
+  assert_non_null(strstr(ini_after, "confirm_external_urls=false"));
+
+  GtkWindow *w2 = bt_app_window(app2);
+  if (w2) gtk_window_destroy(w2);
+  bt_app_free(app2);
+
+  /* CS04, CS05, CS06, CS10 (false on open): New session with stored false. */
+  BtApp *app3 = bt_app_new();
+  bt_app_prepare_ui_for_test(app3);
+  assert_true(bt_app_open_vault(app3, root, NULL));
+  assert_true(bt_app_open_note(app3, "a.md", NULL));
+  assert_false(bt_app_get_confirm_external_urls(app3));
+
+  GAction *act3 = g_action_map_lookup_action(G_ACTION_MAP(bt_app_application(app3)),
+                                             "confirm-external-urls");
+  assert_non_null(act3);
+  GVariant *st3 = g_action_get_state(act3);
+  assert_false(g_variant_get_boolean(st3));
+  g_variant_unref(st3);
+
+  guint mock_calls3 = 0;
+  bt_app_set_launcher_for_test(app3, cs_mock_launcher, &mock_calls3);
+
+  /* CS04: Setting false, https link -> no popover, launcher mock called once. */
+  assert_true(bt_app_activate_link(app3, "https://example.org/docs"));
+  assert_null(bt_app_active_confirm_popover_for_test(app3));
+  assert_int_equal(mock_calls3, 1);
+
+  /* CS05: Setting false, javascript link -> still blocked, launcher mock called zero additional times. */
+  assert_false(bt_app_activate_link(app3, "javascript:alert(1)"));
+  assert_null(bt_app_active_confirm_popover_for_test(app3));
+  assert_int_equal(mock_calls3, 1);
+
+  /* CS06: Setting false, URL with userinfo -> tooltip still shows warning (and stripped credentials). */
+  BtEditorPane *ed3 = (BtEditorPane *)bt_app_editor(app3);
+  assert_non_null(ed3);
+  const char *uinfo_pos = strstr(note_txt, "https://user:pass@example.org/secret");
+  assert_non_null(uinfo_pos);
+  g_autofree gchar *tip_uinfo = bt_editorpane_tooltip_for_offset(ed3, (gsize)(uinfo_pos - note_txt));
+  assert_non_null(tip_uinfo);
+  assert_non_null(strstr(tip_uinfo, "https://example.org/secret"));
+  assert_non_null(strstr(tip_uinfo, "Warning: embedded credentials stripped"));
+  assert_null(strstr(tip_uinfo, "user:pass"));
+
+  printf("BT_TEST_L3_4 cs01_to_cs11=ok\n");
+  GtkWindow *w3 = bt_app_window(app3);
+  if (w3) gtk_window_destroy(w3);
+  bt_app_free(app3);
+  bt_test_rm_rf(root);
+  bt_test_rm_rf(cfg);
+  g_free(root);
+  g_free(cfg);
+}
+
 static guint ui_log_warnings = 0;
 
 static void on_ui_test_log(const gchar *domain, GLogLevelFlags level, const gchar *msg, gpointer ud)
@@ -1655,6 +1819,7 @@ int main(void)
     cmocka_unit_test(test_ck10_link_shortcuts_are_pane_scoped),
     cmocka_unit_test(test_ck11_alt_left_right_still_navigate_history),
     cmocka_unit_test(test_ck12_shortcut_audit_no_unresolved_conflict),
+    cmocka_unit_test(test_l3_4_confirm_external_urls_settings),
   };
   int rc = cmocka_run_group_tests(tests, NULL, NULL);
   if (ui_log_warnings > 0)

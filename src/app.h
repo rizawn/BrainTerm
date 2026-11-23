@@ -29,6 +29,10 @@ gboolean bt_app_load_links_open_on_click(void);
 gboolean bt_app_save_links_open_on_click(gboolean enabled, GError **error);
 void bt_app_set_links_open_on_click(BtApp *app, gboolean enabled, gboolean persist);
 gboolean bt_app_get_links_open_on_click(const BtApp *app);
+gboolean bt_app_load_confirm_external_urls(const BtVault *vault);
+gboolean bt_app_save_confirm_external_urls(gboolean enabled, GError **error);
+void bt_app_set_confirm_external_urls(BtApp *app, gboolean enabled, gboolean persist);
+gboolean bt_app_get_confirm_external_urls(const BtApp *app);
 gpointer bt_app_application(const BtApp *app);
 
 /* Accessors used by UI panes. */

@@ -95,6 +95,7 @@ struct BtApp {
   gboolean capture_failed;
   gboolean fail_next_save_for_test;
   gboolean confirm_external_urls;
+  gboolean confirm_external_urls_corrupt_pending_log;
   gboolean session_external_confirmed;
   BtLinkLauncherFn test_launcher;
   gpointer test_launcher_ud;
@@ -344,6 +345,75 @@ void bt_app_set_links_open_on_click(BtApp *app, gboolean enabled, gboolean persi
 gboolean bt_app_get_links_open_on_click(const BtApp *app)
 {
   return app ? app->links_open_on_click : TRUE;
+}
+
+static gboolean parse_confirm_external_urls_raw(const gchar *raw, gboolean *out_corrupt)
+{
+  if (out_corrupt != NULL)
+    *out_corrupt = FALSE;
+  if (raw == NULL)
+    return TRUE;
+  g_autofree gchar *trimmed = g_strstrip(g_strdup(raw));
+  if (g_strcmp0(trimmed, "1") == 0 || g_ascii_strcasecmp(trimmed, "true") == 0)
+    return TRUE;
+  if (g_strcmp0(trimmed, "0") == 0 || g_ascii_strcasecmp(trimmed, "false") == 0)
+    return FALSE;
+  if (out_corrupt != NULL)
+    *out_corrupt = TRUE;
+  return TRUE;
+}
+
+static gboolean load_confirm_external_urls_internal(const BtVault *vault, gboolean *out_corrupt)
+{
+  gchar *path = bt_app_state_file_path();
+  GKeyFile *kf = g_key_file_new();
+  gboolean val = TRUE; /* L3-4 default: confirm external URLs on first session open */
+  gboolean corrupt = FALSE;
+  if (g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL)) {
+    gchar *v = g_key_file_get_string(kf, "editor", "confirm_external_urls", NULL);
+    if (v != NULL) {
+      val = parse_confirm_external_urls_raw(v, &corrupt);
+      g_free(v);
+    }
+  }
+  g_key_file_unref(kf);
+  g_free(path);
+  if (corrupt && vault != NULL)
+    bt_vault_log(vault, "WARNING",
+                 "state.ini invalid [editor] confirm_external_urls; falling back to true");
+  if (out_corrupt != NULL)
+    *out_corrupt = corrupt;
+  return val;
+}
+
+gboolean bt_app_load_confirm_external_urls(const BtVault *vault)
+{
+  return load_confirm_external_urls_internal(vault, NULL);
+}
+
+gboolean bt_app_save_confirm_external_urls(gboolean enabled, GError **error)
+{
+  return save_state_str("editor", "confirm_external_urls", enabled ? "true" : "false", error);
+}
+
+void bt_app_set_confirm_external_urls(BtApp *app, gboolean enabled, gboolean persist)
+{
+  if (app == NULL)
+    return;
+  app->confirm_external_urls = enabled ? TRUE : FALSE;
+  if (app->adw_app != NULL) {
+    GAction *act = g_action_map_lookup_action(G_ACTION_MAP(app->adw_app), "confirm-external-urls");
+    if (act != NULL && G_IS_SIMPLE_ACTION(act))
+      g_simple_action_set_state(G_SIMPLE_ACTION(act),
+                                g_variant_new_boolean(app->confirm_external_urls));
+  }
+  if (persist)
+    bt_app_save_confirm_external_urls(app->confirm_external_urls, NULL);
+}
+
+gboolean bt_app_get_confirm_external_urls(const BtApp *app)
+{
+  return app ? app->confirm_external_urls : TRUE;
 }
 
 gpointer bt_app_application(const BtApp *app)
@@ -1360,6 +1430,11 @@ gboolean bt_app_open_vault(BtApp *app, const gchar *path, GError **error)
     vault_free(app->vault);
   app->vault = v;
   app->last_checkpoint_oid[0] = '\0';
+  if (app->confirm_external_urls_corrupt_pending_log && !ro_verify) {
+    bt_vault_log(app->vault, "WARNING",
+                 "state.ini invalid [editor] confirm_external_urls; falling back to true");
+    app->confirm_external_urls_corrupt_pending_log = FALSE;
+  }
 
   if (!app->smoke_test && app->capture_dir == NULL && !ro_verify) {
     gboolean differs = FALSE;
@@ -2883,6 +2958,14 @@ static void act_links_single_click_state(GSimpleAction *a, GVariant *value, gpoi
   bt_app_set_links_open_on_click(app, en, TRUE);
 }
 
+static void act_confirm_external_urls_state(GSimpleAction *a, GVariant *value, gpointer ud)
+{
+  (void)a;
+  BtApp *app = ud;
+  gboolean en = g_variant_get_boolean(value);
+  bt_app_set_confirm_external_urls(app, en, TRUE);
+}
+
 static void act_checkpoint(GSimpleAction *a, GVariant *p, gpointer ud)
 {
   (void)a; (void)p;
@@ -3015,6 +3098,7 @@ static const GActionEntry app_actions[] = {
   {"nav-back", act_nav_back, NULL, NULL, NULL, {0}},
   {"nav-forward", act_nav_forward, NULL, NULL, NULL, {0}},
   {"links-single-click", NULL, NULL, "true", act_links_single_click_state, {0}},
+  {"confirm-external-urls", NULL, NULL, "true", act_confirm_external_urls_state, {0}},
   {"preferences", act_preferences, NULL, NULL, NULL, {0}},
   {"about", act_about, NULL, NULL, NULL, {0}},
   {"quit", act_quit, NULL, NULL, NULL, {0}},
@@ -3574,6 +3658,7 @@ static GMenu *build_primary_menu(void)
 
   GMenu *s3 = g_menu_new();
   g_menu_append(s3, "Open links with single click", "app.links-single-click");
+  g_menu_append(s3, "Confirm external URLs", "app.confirm-external-urls");
   g_menu_append(s3, "Preferences", "app.preferences");
   g_menu_append(s3, "About BrainTerm", "app.about");
   g_menu_append_section(m, NULL, G_MENU_MODEL(s3));
@@ -3711,10 +3796,17 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
   bt_filetree_set_action_cb(app->tree, on_tree_action, app);
   app->editor = bt_editorpane_new(on_editor_save, on_editor_link, on_editor_dirty, app);
   bt_editorpane_set_conflict_cbs(app->editor, on_editor_conflict_diff, on_editor_conflict_reload);
-  if (app->capture_dir == NULL && !app_is_ro_bench(app))
+  if (app->capture_dir == NULL && !app_is_ro_bench(app)) {
     bt_app_set_links_open_on_click(app, bt_app_load_links_open_on_click(), FALSE);
-  else
+    gboolean corrupt_confirm = FALSE;
+    gboolean confirm_ext = load_confirm_external_urls_internal(app->vault, &corrupt_confirm);
+    if (corrupt_confirm && app->vault == NULL)
+      app->confirm_external_urls_corrupt_pending_log = TRUE;
+    bt_app_set_confirm_external_urls(app, confirm_ext, FALSE);
+  } else {
     bt_app_set_links_open_on_click(app, TRUE, FALSE);
+    bt_app_set_confirm_external_urls(app, TRUE, FALSE);
+  }
   app->graphview = bt_graphview_new(on_graph_open_note, on_tree_open_term, app);
   bt_graphview_set_rename_cb(app->graphview, on_graph_rename_note, app);
   if (!app->smoke_test && app->capture_dir == NULL && !app_is_ro_bench(app)) {
