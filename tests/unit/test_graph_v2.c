@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include "graph.h"
+#include "graph_palette.h"
 #include "graph_state.h"
 
 static BtGraph *make_sample_graph(guint n_nodes)
@@ -378,6 +379,67 @@ static void test_spatial_pick_stack_and_spread(void **state)
   assert_true(fabsf(nodes[3].sx - 400.0f) < 1e-5f);
 }
 
+static void test_galaxy_palette_assignment_and_persistence(void **state)
+{
+  (void)state;
+  gchar *tmp = g_dir_make_tmp("bt-pal-XXXXXX", NULL);
+  BtFolderColors *fc = bt_folder_colors_load(tmp);
+
+  /* Build a synthetic graph with 15 top-level folders (exceeding 12 swatches). */
+  BtGraph *g = g_new0(BtGraph, 1);
+  g->nodes = g_ptr_array_new_with_free_func(g_free);
+  g->edges = g_array_new(FALSE, FALSE, sizeof(BtGraphEdge));
+  for (guint i = 0; i < 15u; i++) {
+    BtGraphNode *nd = g_new0(BtGraphNode, 1);
+    nd->id = g_strdup_printf("f%u", i);
+    nd->label = g_strdup_printf("Folder%02u", i);
+    nd->relpath = g_strdup(nd->label);
+    nd->top_folder = g_strdup(nd->label);
+    nd->kind = BT_NODE_FOLDER;
+    nd->parent_idx = -1;
+    nd->visible = TRUE;
+    g_ptr_array_add(g->nodes, nd);
+  }
+
+  assert_true(bt_folder_colors_apply(fc, g, TRUE, 42ULL));
+
+  /* First 12 folders must all have distinct colors (no duplicates before exhaustion). */
+  guint32 cols[15];
+  for (guint i = 0; i < 15u; i++) {
+    const BtGraphNode *nd = g_ptr_array_index(g->nodes, i);
+    assert_true(nd->color_rgb != 0u);
+    cols[i] = nd->color_rgb;
+  }
+  for (guint i = 0; i < 12u; i++) {
+    for (guint j = i + 1; j < 12u; j++)
+      assert_true(cols[i] != cols[j]);
+  }
+  /* Generated 13th..15th colors must be perceptually separated from prior colors. */
+  for (guint i = 12u; i < 15u; i++) {
+    for (guint j = 0; j < i; j++)
+      assert_true(bt_color_perceptual_dist(cols[i], cols[j]) > 25.0);
+  }
+
+  /* Save & reload round-trip from <vault>/.brainterm/folder-colors.json. */
+  assert_true(bt_folder_colors_save(fc, NULL));
+  BtFolderColors *fc2 = bt_folder_colors_load(tmp);
+  for (guint i = 0; i < 15u; i++) {
+    const BtGraphNode *nd = g_ptr_array_index(g->nodes, i);
+    assert_int_equal(bt_folder_colors_get(fc2, nd->top_folder), cols[i]);
+  }
+
+  bt_folder_colors_free(fc2);
+  bt_folder_colors_free(fc);
+  for (guint i = 0; i < g->nodes->len; i++) {
+    BtGraphNode *nd = g_ptr_array_index(g->nodes, i);
+    g_free(nd->id); g_free(nd->label); g_free(nd->relpath); g_free(nd->top_folder);
+  }
+  g_ptr_array_unref(g->nodes);
+  g_array_unref(g->edges);
+  g_free(g);
+  g_free(tmp);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -389,6 +451,7 @@ int main(void)
     cmocka_unit_test(test_label_placement_no_overlap_and_caps),
     cmocka_unit_test(test_cursor_anchored_zoom),
     cmocka_unit_test(test_spatial_pick_stack_and_spread),
+    cmocka_unit_test(test_galaxy_palette_assignment_and_persistence),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

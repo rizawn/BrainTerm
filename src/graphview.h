@@ -27,6 +27,7 @@ BtGraphView *bt_graphview_new(BtGraphOpenNoteFn on_open, BtGraphOpenTermFn on_op
 void bt_graphview_free(BtGraphView *gv);
 
 GtkWidget *bt_graphview_widget(BtGraphView *gv);
+void bt_graphview_set_vault_root(BtGraphView *gv, const gchar *vault_root);
 void bt_graphview_set_graph(BtGraphView *gv, BtGraph *graph, gboolean animate_growth);
 void bt_graphview_set_dark(BtGraphView *gv, gboolean dark);
 void bt_graphview_set_quality(BtGraphView *gv, BtGraphQuality quality);

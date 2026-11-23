@@ -1392,6 +1392,8 @@ static void refresh_graph(BtApp *app, gboolean animate)
   if (g != NULL) {
     bt_graph_layout(g, 20);
     bt_graphview_set_dark(app->graphview, is_effective_dark(app));
+    if (app->vault != NULL)
+      bt_graphview_set_vault_root(app->graphview, vault_root(app->vault));
     bt_graphview_set_graph(app->graphview, g, animate);
   }
 }

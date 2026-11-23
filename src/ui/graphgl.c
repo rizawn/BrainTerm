@@ -6,6 +6,7 @@
  *   - Cached Pango RGBA label atlas rendered crisp after bloom composite.
  *   - Zero per-frame heap allocations; automatic Cairo fallback on any GL/shader error. */
 #include "ui/graphgl.h"
+#include "graph_palette.h"
 #include "theme.h"
 
 #include <cairo.h>
@@ -737,12 +738,12 @@ void bt_graph_gl_render_state(BtGraphGL *gl, const BtGraphRenderState *st)
 
   float r, g, b;
 
-  /* Pass 1: dark canvas + subtle radial vignette */
+  /* Pass 1: deep navy space canvas gradient (#05070D -> #02030A) */
   glDisable(GL_BLEND);
   glUseProgram(gl->prog_bg);
-  bt_theme_unpack_f(BT_COL_GRAPH_BG, &r, &g, &b);
+  bt_theme_unpack_f(BT_GALAXY_BG_TOP, &r, &g, &b);
   glUniform3f(gl->u_bg_col, r, g, b);
-  bt_theme_unpack_f(BT_COL_GRAPH_VIGNETTE, &r, &g, &b);
+  bt_theme_unpack_f(BT_GALAXY_BG_BOTTOM, &r, &g, &b);
   glUniform3f(gl->u_bg_vig, r, g, b);
   glBindVertexArray(gl->vao_bg);
   glDrawArrays(GL_TRIANGLES, 0, 3);

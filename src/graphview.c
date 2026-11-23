@@ -9,6 +9,7 @@
  *   - Smooth Pango label fade driven by bt_graph_label_alpha().
  *   - Toolbar toggles for Quality (Low / High) and Reduce Motion, plus zoom/fit/reset. */
 #include "graphview.h"
+#include "graph_palette.h"
 #include "graph_state.h"
 #include "theme.h"
 #include "ui/graphgl.h"
@@ -770,6 +771,10 @@ struct BtGraphView {
   GtkWidget *btn_tags;
   GtkWidget *btn_ghosts;
   GtkWidget *btn_links;
+  GtkWidget *btn_col_folder;
+  GtkWidget *btn_col_type;
+  GtkWidget *legend_box;
+  GtkWidget *legend_folders_box;
   GtkWidget *legend_lbl;
   GtkWidget *hover_lbl;
   GtkWidget *debug_lbl;
@@ -810,6 +815,11 @@ struct BtGraphView {
   gboolean show_tags;
   gboolean show_ghosts;
   gboolean show_links;
+  gboolean color_by_folder;
+  BtFolderColors *folder_colors;
+  gchar *vault_root_path;
+  gchar *isolated_folder;
+  gchar *color_target_folder;
   gboolean focus_isolated;
   guint focus_hops;
   gdouble spread_str;
@@ -1916,6 +1926,18 @@ static void sync_toolbar_buttons(BtGraphView *gv)
   if (gv->btn_links != NULL) {
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(gv->btn_links), gv->show_links);
   }
+  if (gv->btn_col_folder != NULL) {
+    if (gv->color_by_folder)
+      gtk_widget_add_css_class(gv->btn_col_folder, "bt-pill-active");
+    else
+      gtk_widget_remove_css_class(gv->btn_col_folder, "bt-pill-active");
+  }
+  if (gv->btn_col_type != NULL) {
+    if (!gv->color_by_folder)
+      gtk_widget_add_css_class(gv->btn_col_type, "bt-pill-active");
+    else
+      gtk_widget_remove_css_class(gv->btn_col_type, "bt-pill-active");
+  }
 }
 
 static const gchar *node_kind_label(BtNodeKind k)
@@ -1972,17 +1994,104 @@ static void update_hover_readout(BtGraphView *gv)
   g_free(txt);
 }
 
+static void apply_folder_colors_and_refresh(BtGraphView *gv, gboolean upload_gl);
+
+static void on_legend_folder_click(GtkGestureClick *g, gint n_press, gdouble x, gdouble y,
+                                   gpointer ud)
+{
+  (void)x; (void)y;
+  if (n_press != 1)
+    return;
+  GtkWidget *row = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(g));
+  BtGraphView *gv = ud;
+  const gchar *fname = g_object_get_data(G_OBJECT(row), "bt-folder-name");
+  if (gv == NULL || gv->graph == NULL || fname == NULL)
+    return;
+
+  GdkModifierType mods = gtk_event_controller_get_current_event_state(GTK_EVENT_CONTROLLER(g));
+  if ((mods & GDK_CONTROL_MASK) != 0) {
+    /* Ctrl+click = toggle hide that top-level folder */
+    for (guint i = 0; i < gv->graph->nodes->len; i++) {
+      BtGraphNode *nd = g_ptr_array_index(gv->graph->nodes, i);
+      if (nd->kind == BT_NODE_FOLDER && nd->parent_idx < 0 &&
+          g_strcmp0(nd->top_folder, fname) == 0) {
+        bt_graph_set_folder_hidden(gv->graph, i, !nd->hidden_by_user);
+        break;
+      }
+    }
+  } else {
+    /* Click = isolate that folder (click again to clear isolation) */
+    if (g_strcmp0(gv->isolated_folder, fname) == 0) {
+      g_clear_pointer(&gv->isolated_folder, g_free);
+    } else {
+      g_free(gv->isolated_folder);
+      gv->isolated_folder = g_strdup(fname);
+    }
+  }
+  apply_kind_visibility(gv, TRUE);
+  queue_canvas_draw(gv);
+}
+
 static void update_legend(BtGraphView *gv)
 {
-  if (gv == NULL || gv->legend_lbl == NULL)
+  if (gv == NULL)
+    return;
+
+  if (gv->legend_folders_box != NULL) {
+    GtkWidget *child = gtk_widget_get_first_child(gv->legend_folders_box);
+    while (child != NULL) {
+      GtkWidget *next = gtk_widget_get_next_sibling(child);
+      gtk_box_remove(GTK_BOX(gv->legend_folders_box), child);
+      child = next;
+    }
+
+    if (gv->graph != NULL && gv->graph->nodes != NULL) {
+      GPtrArray *top_folders = g_ptr_array_new();
+      for (guint i = 0; i < gv->graph->nodes->len; i++) {
+        BtGraphNode *nd = g_ptr_array_index(gv->graph->nodes, i);
+        if (nd->kind == BT_NODE_FOLDER && nd->parent_idx < 0 && nd->top_folder != NULL)
+          g_ptr_array_add(top_folders, nd);
+      }
+      for (guint i = 0; i < top_folders->len; i++) {
+        const BtGraphNode *fn = g_ptr_array_index(top_folders, i);
+        guint32 rgb = fn->color_rgb ? fn->color_rgb : bt_folder_colors_get(gv->folder_colors, fn->top_folder);
+        if (rgb == 0u) rgb = BT_GALAXY_ROOT_COLOR;
+        gboolean is_iso = (gv->isolated_folder != NULL &&
+                           g_strcmp0(gv->isolated_folder, fn->top_folder) == 0);
+        g_autofree gchar *esc = g_markup_escape_text(fn->label ? fn->label : fn->top_folder, -1);
+        g_autofree gchar *mk = g_strdup_printf(
+            "<span foreground='#%06X'>●</span> <span foreground='%s'>%s</span>"
+            " <span foreground='#666D79'>(%u)%s%s</span>",
+            rgb & 0xFFFFFFu,
+            fn->hidden_by_user ? "#666D79" : (is_iso ? "#FFFFFF" : "#D6DAE2"),
+            esc, fn->child_count,
+            fn->hidden_by_user ? " hidden" : "",
+            is_iso ? " ★" : "");
+        GtkWidget *lbl = gtk_label_new(NULL);
+        gtk_label_set_markup(GTK_LABEL(lbl), mk);
+        gtk_label_set_xalign(GTK_LABEL(lbl), 0.0f);
+        gtk_label_set_ellipsize(GTK_LABEL(lbl), PANGO_ELLIPSIZE_END);
+        gtk_label_set_max_width_chars(GTK_LABEL(lbl), 24);
+        gtk_widget_set_tooltip_text(lbl, "Click: isolate folder · Ctrl+click: hide/show folder");
+        g_object_set_data_full(G_OBJECT(lbl), "bt-folder-name", g_strdup(fn->top_folder), g_free);
+        GtkGesture *clk = gtk_gesture_click_new();
+        gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(clk), GDK_BUTTON_PRIMARY);
+        g_signal_connect(clk, "pressed", G_CALLBACK(on_legend_folder_click), gv);
+        gtk_widget_add_controller(lbl, GTK_EVENT_CONTROLLER(clk));
+        gtk_box_append(GTK_BOX(gv->legend_folders_box), lbl);
+      }
+      g_ptr_array_unref(top_folders);
+    }
+  }
+
+  if (gv->legend_lbl == NULL)
     return;
   gchar *markup = g_strdup_printf(
-      "<span foreground='#E6E8EC'>●</span> Note  "
-      "<span foreground='#8B7CF6'>●</span> AI  "
-      "<span foreground='%s'>● Tag%s</span>  "
+      "<span foreground='#9AA1AD'>Type:</span> "
+      "● Note  ○ AI  "
+      "<span foreground='%s'>• Tag%s</span>  "
       "<span foreground='%s'>◌ Ghost%s</span>  "
-      "<span foreground='#9AA1AD'>■</span> Session  "
-      "<span foreground='#4ADE80'>■</span> Import",
+      "■ Session  ■ Import  ◎ Folder",
       gv->show_tags ? "#FBBF24" : "#666D79",
       gv->show_tags ? "" : " (off)",
       gv->show_ghosts ? "#9AA1AD" : "#666D79",
@@ -1991,11 +2100,33 @@ static void update_legend(BtGraphView *gv)
   g_free(markup);
 }
 
+static void apply_folder_colors_and_refresh(BtGraphView *gv, gboolean upload_gl)
+{
+  if (gv == NULL || gv->graph == NULL)
+    return;
+  if (gv->folder_colors == NULL)
+    gv->folder_colors = bt_folder_colors_load(gv->vault_root_path);
+  gboolean added = bt_folder_colors_apply(gv->folder_colors, gv->graph,
+                                          gv->color_by_folder, 0u);
+  if (added && gv->folder_colors->json_path != NULL)
+    bt_folder_colors_save(gv->folder_colors, NULL);
+  if (upload_gl)
+    bt_graph_gl_mark_graph_dirty(gv->gl);
+  update_legend(gv);
+}
+
 static void apply_kind_visibility(BtGraphView *gv, gboolean upload_gl)
 {
   if (gv == NULL || gv->graph == NULL)
     return;
   bt_graph_recompute_visibility(gv->graph, gv->show_tags, gv->show_ghosts);
+  if (gv->isolated_folder != NULL) {
+    for (guint i = 0; i < gv->graph->nodes->len; i++) {
+      BtGraphNode *nd = g_ptr_array_index(gv->graph->nodes, i);
+      if (nd->visible && g_strcmp0(nd->top_folder, gv->isolated_folder) != 0)
+        nd->visible = FALSE;
+    }
+  }
   if (gv->hover_idx >= 0 && (guint)gv->hover_idx < gv->graph->nodes->len &&
       !((const BtGraphNode *)g_ptr_array_index(gv->graph->nodes, (guint)gv->hover_idx))->visible)
     gv->hover_idx = -1;
@@ -2011,6 +2142,7 @@ static void apply_kind_visibility(BtGraphView *gv, gboolean upload_gl)
     bt_graph_gl_set_graph(gv->gl, gv->graph);
   refresh_neighbor_mask(gv);
   update_hover_readout(gv);
+  update_legend(gv);
 }
 
 static void on_btn_2d_clicked(GtkButton *b, gpointer ud)
@@ -2081,6 +2213,30 @@ static void on_btn_links_toggled(GtkToggleButton *b, gpointer ud)
   gboolean en = gtk_toggle_button_get_active(b);
   if (en != gv->show_links)
     bt_graphview_set_show_links(gv, en);
+}
+
+static void on_btn_col_folder_clicked(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  BtGraphView *gv = ud;
+  if (!gv->color_by_folder) {
+    gv->color_by_folder = TRUE;
+    apply_folder_colors_and_refresh(gv, TRUE);
+    sync_toolbar_buttons(gv);
+    queue_canvas_draw(gv);
+  }
+}
+
+static void on_btn_col_type_clicked(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  BtGraphView *gv = ud;
+  if (gv->color_by_folder) {
+    gv->color_by_folder = FALSE;
+    apply_folder_colors_and_refresh(gv, TRUE);
+    sync_toolbar_buttons(gv);
+    queue_canvas_draw(gv);
+  }
 }
 
 /* ------------------------------------------- right-click context menu -- */
@@ -2275,6 +2431,132 @@ static void on_gctx_show_all_folders(GtkButton *b, gpointer ud)
   queue_canvas_draw(gv);
 }
 
+static void on_color_dialog_done(GObject *src, GAsyncResult *res, gpointer ud)
+{
+  BtGraphView *gv = ud;
+  GdkRGBA *rgba = gtk_color_dialog_choose_rgba_finish(GTK_COLOR_DIALOG(src), res, NULL);
+  if (rgba == NULL)
+    return;
+  guint ri = (guint)CLAMP(llround(rgba->red * 255.0), 0, 255);
+  guint gi = (guint)CLAMP(llround(rgba->green * 255.0), 0, 255);
+  guint bi = (guint)CLAMP(llround(rgba->blue * 255.0), 0, 255);
+  gdk_rgba_free(rgba);
+  guint32 rgb = (ri << 16) | (gi << 8) | bi;
+  if (gv->color_target_folder != NULL) {
+    if (gv->folder_colors == NULL)
+      gv->folder_colors = bt_folder_colors_load(gv->vault_root_path);
+    bt_folder_colors_set(gv->folder_colors, gv->color_target_folder, rgb);
+    bt_folder_colors_save(gv->folder_colors, NULL);
+    gv->color_by_folder = TRUE;
+    apply_folder_colors_and_refresh(gv, TRUE);
+    sync_toolbar_buttons(gv);
+    queue_canvas_draw(gv);
+  }
+}
+
+static void on_swatch_clicked(GtkButton *b, gpointer ud)
+{
+  BtGraphView *gv = ud;
+  guint32 rgb = GPOINTER_TO_UINT(g_object_get_data(G_OBJECT(b), "bt-swatch-rgb")) & 0xFFFFFFu;
+  g_autofree gchar *folder = g_strdup(gv->color_target_folder);
+  dismiss_ctx_popover(gv);
+  if (folder != NULL) {
+    if (gv->folder_colors == NULL)
+      gv->folder_colors = bt_folder_colors_load(gv->vault_root_path);
+    bt_folder_colors_set(gv->folder_colors, folder, rgb);
+    bt_folder_colors_save(gv->folder_colors, NULL);
+    gv->color_by_folder = TRUE;
+    apply_folder_colors_and_refresh(gv, TRUE);
+    sync_toolbar_buttons(gv);
+    queue_canvas_draw(gv);
+  }
+}
+
+static void on_custom_color_clicked(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  BtGraphView *gv = ud;
+  dismiss_ctx_popover(gv);
+  if (gv->color_target_folder == NULL)
+    return;
+  GtkColorDialog *dlg = gtk_color_dialog_new();
+  gtk_color_dialog_set_title(dlg, "Choose Folder Color");
+  gtk_color_dialog_set_with_alpha(dlg, FALSE);
+  guint32 cur = bt_folder_colors_get(gv->folder_colors, gv->color_target_folder);
+  GdkRGBA init = {
+    (float)((cur >> 16) & 0xFFu) / 255.0f,
+    (float)((cur >> 8) & 0xFFu) / 255.0f,
+    (float)(cur & 0xFFu) / 255.0f,
+    1.0f
+  };
+  gtk_color_dialog_choose_rgba(dlg, gv->toplevel, cur ? &init : NULL, NULL,
+                               on_color_dialog_done, gv);
+  g_object_unref(dlg);
+}
+
+static GtkWidget *make_gctx_btn(const gchar *label, const gchar *accel, GCallback cb,
+                                BtGraphView *gv);
+static GtkWidget *make_gctx_sep(void);
+
+static void on_gctx_folder_color(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  BtGraphView *gv = ud;
+  gint hit = gv->ctx_hit_idx;
+  g_autofree gchar *top = NULL;
+  if (gv->graph != NULL && hit >= 0 && (guint)hit < gv->graph->nodes->len) {
+    const BtGraphNode *nd = g_ptr_array_index(gv->graph->nodes, (guint)hit);
+    if (nd->top_folder != NULL)
+      top = g_strdup(nd->top_folder);
+  }
+  dismiss_ctx_popover(gv);
+  if (top == NULL || gv->canvas_stack == NULL)
+    return;
+
+  g_free(gv->color_target_folder);
+  gv->color_target_folder = g_strdup(top);
+
+  GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+  gtk_widget_add_css_class(box, "bt-ctx-menu");
+  GtkWidget *hdr = gtk_label_new(top);
+  gtk_widget_add_css_class(hdr, "bt-graph-toolbar-lbl");
+  gtk_box_append(GTK_BOX(box), hdr);
+
+  GtkWidget *grid = gtk_grid_new();
+  gtk_grid_set_row_spacing(GTK_GRID(grid), 4);
+  gtk_grid_set_column_spacing(GTK_GRID(grid), 4);
+  guint scnt = 0;
+  const BtGalaxySwatch *sw = bt_galaxy_palette(&scnt);
+  for (guint i = 0; i < scnt; i++) {
+    GtkWidget *sb = gtk_button_new();
+    gtk_widget_add_css_class(sb, "bt-graph-pill");
+    gtk_widget_set_tooltip_text(sb, sw[i].name);
+    g_autofree gchar *mk = g_strdup_printf("<span foreground='#%06X'>●</span>", sw[i].rgb);
+    GtkWidget *dl = gtk_label_new(NULL);
+    gtk_label_set_markup(GTK_LABEL(dl), mk);
+    gtk_button_set_child(GTK_BUTTON(sb), dl);
+    g_object_set_data(G_OBJECT(sb), "bt-swatch-rgb", GUINT_TO_POINTER(sw[i].rgb));
+    g_signal_connect(sb, "clicked", G_CALLBACK(on_swatch_clicked), gv);
+    gtk_grid_attach(GTK_GRID(grid), sb, (int)(i % 4u), (int)(i / 4u), 1, 1);
+  }
+  gtk_box_append(GTK_BOX(box), grid);
+  gtk_box_append(GTK_BOX(box), make_gctx_sep());
+  gtk_box_append(GTK_BOX(box),
+                 make_gctx_btn("Custom Color…", NULL, G_CALLBACK(on_custom_color_clicked), gv));
+
+  GtkWidget *pop = gtk_popover_new();
+  gtk_widget_add_css_class(pop, "bt-ctx-popover");
+  gtk_popover_set_has_arrow(GTK_POPOVER(pop), FALSE);
+  gtk_popover_set_autohide(GTK_POPOVER(pop), TRUE);
+  gtk_popover_set_child(GTK_POPOVER(pop), box);
+  gtk_widget_set_parent(pop, gv->canvas_stack);
+  GdkRectangle rect = {(int)gv->last_mouse_x, (int)gv->last_mouse_y, 1, 1};
+  gtk_popover_set_pointing_to(GTK_POPOVER(pop), &rect);
+  g_signal_connect(pop, "closed", G_CALLBACK(on_ctx_closed), gv);
+  gv->ctx_popover = pop;
+  gtk_popover_popup(GTK_POPOVER(pop));
+}
+
 static void on_gctx_toggle_mode(GtkButton *b, gpointer ud)
 {
   (void)b;
@@ -2361,9 +2643,12 @@ static void show_graph_context_menu(BtGraphView *gv, gdouble x, gdouble y)
       gtk_box_append(GTK_BOX(box),
                      make_gctx_btn("Copy [[wikilink]]", NULL,
                                    G_CALLBACK(on_gctx_copy_wikilink), gv));
-    if (is_folder || nd->parent_idx >= 0)
+    if (is_folder || nd->parent_idx >= 0) {
+      gtk_box_append(GTK_BOX(box),
+                     make_gctx_btn("Folder Color…", NULL, G_CALLBACK(on_gctx_folder_color), gv));
       gtk_box_append(GTK_BOX(box),
                      make_gctx_btn("Hide Folder", NULL, G_CALLBACK(on_gctx_hide_folder), gv));
+    }
     if (is_real_note && (gv->on_open_term != NULL || gv->on_rename != NULL))
       gtk_box_append(GTK_BOX(box), make_gctx_sep());
     if (is_real_note && gv->on_open_term != NULL)
@@ -2470,6 +2755,10 @@ static void on_canvas_destroy(GtkWidget *area, gpointer ud)
   gv->btn_tags = NULL;
   gv->btn_ghosts = NULL;
   gv->btn_links = NULL;
+  gv->btn_col_folder = NULL;
+  gv->btn_col_type = NULL;
+  gv->legend_box = NULL;
+  gv->legend_folders_box = NULL;
   gv->legend_lbl = NULL;
   gv->hover_lbl = NULL;
   gv->debug_lbl = NULL;
@@ -2503,6 +2792,7 @@ BtGraphView *bt_graphview_new(BtGraphOpenNoteFn on_open, BtGraphOpenTermFn on_op
   gv->window_active = TRUE;
   gv->quality = BT_GRAPH_QUALITY_HIGH;
   gv->mode = BT_GRAPH_MODE_2D;
+  gv->color_by_folder = TRUE;
   gv->pulse_enabled = FALSE;
   gv->hover_idx = -1;
   gv->selected_idx = -1;
@@ -2651,6 +2941,21 @@ BtGraphView *bt_graphview_new(BtGraphOpenNoteFn on_open, BtGraphOpenTermFn on_op
                               "Show all [[wiki-link]] edges (when off, 1-hop links appear on hover/select)");
   g_signal_connect(gv->btn_links, "toggled", G_CALLBACK(on_btn_links_toggled), gv);
 
+  GtkWidget *sep3 = gtk_separator_new(GTK_ORIENTATION_VERTICAL);
+  gtk_widget_add_css_class(sep3, "bt-graph-toolbar-sep");
+
+  GtkWidget *lbl_col = gtk_label_new("Color by:");
+  gtk_widget_add_css_class(lbl_col, "bt-graph-toolbar-lbl");
+  gv->btn_col_folder = gtk_button_new_with_label("Folder");
+  gtk_widget_add_css_class(gv->btn_col_folder, "bt-graph-pill");
+  gtk_widget_set_tooltip_text(gv->btn_col_folder, "Color nodes by top-level folder (Galaxy palette)");
+  g_signal_connect(gv->btn_col_folder, "clicked", G_CALLBACK(on_btn_col_folder_clicked), gv);
+
+  gv->btn_col_type = gtk_button_new_with_label("Type");
+  gtk_widget_add_css_class(gv->btn_col_type, "bt-graph-pill");
+  gtk_widget_set_tooltip_text(gv->btn_col_type, "Color nodes by type (Note, AI, Tag, Ghost, Session)");
+  g_signal_connect(gv->btn_col_type, "clicked", G_CALLBACK(on_btn_col_type_clicked), gv);
+
   gtk_box_append(GTK_BOX(mode_bar), lbl_view);
   gtk_box_append(GTK_BOX(mode_bar), gv->btn_2d);
   gtk_box_append(GTK_BOX(mode_bar), gv->btn_3d);
@@ -2664,6 +2969,10 @@ BtGraphView *bt_graphview_new(BtGraphOpenNoteFn on_open, BtGraphOpenTermFn on_op
   gtk_box_append(GTK_BOX(mode_bar), gv->btn_ghosts);
   gtk_box_append(GTK_BOX(mode_bar), gv->btn_pulse);
   gtk_box_append(GTK_BOX(mode_bar), gv->btn_motion);
+  gtk_box_append(GTK_BOX(mode_bar), sep3);
+  gtk_box_append(GTK_BOX(mode_bar), lbl_col);
+  gtk_box_append(GTK_BOX(mode_bar), gv->btn_col_folder);
+  gtk_box_append(GTK_BOX(mode_bar), gv->btn_col_type);
   gtk_overlay_add_overlay(GTK_OVERLAY(gv->overlay), mode_bar);
   sync_toolbar_buttons(gv);
 
@@ -2684,15 +2993,27 @@ BtGraphView *bt_graphview_new(BtGraphOpenNoteFn on_open, BtGraphOpenTermFn on_op
                                                G_CALLBACK(on_btn_reset), gv));
   gtk_overlay_add_overlay(GTK_OVERLAY(gv->overlay), ctrls);
 
+  gv->legend_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+  gtk_widget_add_css_class(gv->legend_box, "bt-graph-legend");
+  gtk_widget_set_halign(gv->legend_box, GTK_ALIGN_START);
+  gtk_widget_set_valign(gv->legend_box, GTK_ALIGN_END);
+  gtk_widget_set_margin_bottom(gv->legend_box, 10);
+  gtk_widget_set_margin_start(gv->legend_box, 10);
+
+  GtkWidget *leg_scroll = gtk_scrolled_window_new();
+  gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(leg_scroll),
+                                 GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+  gtk_scrolled_window_set_propagate_natural_height(GTK_SCROLLED_WINDOW(leg_scroll), TRUE);
+  gtk_scrolled_window_set_max_content_height(GTK_SCROLLED_WINDOW(leg_scroll), 150);
+  gv->legend_folders_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+  gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(leg_scroll), gv->legend_folders_box);
+  gtk_box_append(GTK_BOX(gv->legend_box), leg_scroll);
+
   gv->legend_lbl = gtk_label_new(NULL);
-  gtk_widget_add_css_class(gv->legend_lbl, "bt-graph-legend");
-  gtk_widget_set_halign(gv->legend_lbl, GTK_ALIGN_START);
-  gtk_widget_set_valign(gv->legend_lbl, GTK_ALIGN_END);
-  gtk_widget_set_margin_bottom(gv->legend_lbl, 10);
-  gtk_widget_set_margin_start(gv->legend_lbl, 10);
-  gtk_widget_set_can_target(gv->legend_lbl, FALSE);
+  gtk_label_set_xalign(GTK_LABEL(gv->legend_lbl), 0.0f);
+  gtk_box_append(GTK_BOX(gv->legend_box), gv->legend_lbl);
   update_legend(gv);
-  gtk_overlay_add_overlay(GTK_OVERLAY(gv->overlay), gv->legend_lbl);
+  gtk_overlay_add_overlay(GTK_OVERLAY(gv->overlay), gv->legend_box);
 
   gv->hover_lbl = gtk_label_new("");
   gtk_widget_set_name(gv->hover_lbl, "bt-graph-hover-readout");
@@ -2769,6 +3090,10 @@ void bt_graphview_free(BtGraphView *gv)
   g_free(gv->pending_notice);
   g_free(gv->nbr_mask);
   g_free(gv->pick_scratch);
+  bt_folder_colors_free(gv->folder_colors);
+  g_free(gv->vault_root_path);
+  g_free(gv->isolated_folder);
+  g_free(gv->color_target_folder);
   bt_graph_free(gv->graph);
   g_free(gv);
 }
@@ -2776,6 +3101,19 @@ void bt_graphview_free(BtGraphView *gv)
 GtkWidget *bt_graphview_widget(BtGraphView *gv)
 {
   return gv->root;
+}
+
+void bt_graphview_set_vault_root(BtGraphView *gv, const gchar *vault_root)
+{
+  if (gv == NULL)
+    return;
+  if (g_strcmp0(gv->vault_root_path, vault_root) == 0)
+    return;
+  g_free(gv->vault_root_path);
+  gv->vault_root_path = g_strdup(vault_root);
+  bt_folder_colors_free(gv->folder_colors);
+  gv->folder_colors = bt_folder_colors_load(vault_root);
+  g_clear_pointer(&gv->isolated_folder, g_free);
 }
 
 void bt_graphview_set_graph(BtGraphView *gv, BtGraph *graph, gboolean animate_growth)
@@ -2795,6 +3133,7 @@ void bt_graphview_set_graph(BtGraphView *gv, BtGraph *graph, gboolean animate_gr
   gv->needs_fit = TRUE;
   /* Hide wikilink clutter by default in dense views (>80 nodes); user can toggle "Links". */
   gv->show_links = (graph == NULL || graph->nodes->len <= 80u);
+  apply_folder_colors_and_refresh(gv, FALSE);
   apply_kind_visibility(gv, FALSE);
   sync_toolbar_buttons(gv);
   bt_graph_gl_set_graph(gv->gl, graph);

@@ -37,7 +37,7 @@ struct BtVault {
 };
 
 static const gchar *const default_ignored_names[] = {
-  ".git", ".obsidian", ".node_modules", "node_modules", "target", "dist", ".bt", NULL,
+  ".git", ".obsidian", ".node_modules", "node_modules", "target", "dist", ".bt", ".brainterm", NULL,
 };
 
 static gboolean name_equal(const gchar *a, const gchar *b)

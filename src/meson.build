@@ -22,6 +22,7 @@ core_sources = files(
   'organizer.c',
   'graph.c',
   'graph_state.c',
+  'graph_palette.c',
   'importer.c',
   'embed.c',
   'theme.c',
