@@ -29,6 +29,11 @@ typedef enum {
   BT_GRAPH_MODE_TIMELINE = 3
 } BtGraphMode;
 
+typedef enum {
+  BT_GRAPH_STYLE_CLEAN = 0,
+  BT_GRAPH_STYLE_GLOW = 1
+} BtGraphStyle;
+
 /* Neighbor mask values written by bt_graph_compute_neighbors(). */
 #define BT_NBR_NONE     ((guint8)0u)
 #define BT_NBR_NEIGHBOR ((guint8)1u)

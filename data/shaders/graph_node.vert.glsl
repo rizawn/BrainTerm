@@ -82,7 +82,7 @@ void main()
   } else {
     vec2 wpos = a_geom.xy * bt;
     center_px = u_viewport * 0.5 + u_pan + wpos * u_zoom;
-    core_px = clamp(a_geom.z * pow(max(u_zoom, 0.05), 0.35), 3.0, 14.0) * u_scale;
+    core_px = clamp(a_geom.z * pow(max(u_zoom, 0.05), 0.35), 2.0, 14.0) * u_scale;
   }
 
   float halo_mult = (u_high_quality != 0) ? 2.1 : 1.6;

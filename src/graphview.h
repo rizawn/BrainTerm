@@ -34,6 +34,8 @@ void bt_graphview_set_quality(BtGraphView *gv, BtGraphQuality quality);
 BtGraphQuality bt_graphview_get_quality(const BtGraphView *gv);
 void bt_graphview_set_mode(BtGraphView *gv, BtGraphMode mode);
 BtGraphMode bt_graphview_get_mode(const BtGraphView *gv);
+void bt_graphview_set_style(BtGraphView *gv, BtGraphStyle style);
+BtGraphStyle bt_graphview_get_style(const BtGraphView *gv);
 void bt_graphview_set_pulse(BtGraphView *gv, gboolean enabled);
 gboolean bt_graphview_get_pulse(const BtGraphView *gv);
 void bt_graphview_set_reduce_motion(BtGraphView *gv, gboolean reduce_motion);

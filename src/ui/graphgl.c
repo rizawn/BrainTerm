@@ -102,7 +102,7 @@ struct BtGraphGL {
   GLint u_node_vp, u_node_pan, u_node_zoom, u_node_scale, u_node_bt;
   GLint u_node_has_foc, u_node_hf, u_node_hq, u_node_glow_col, u_node_s2_col;
   GLint u_node_mode3d, u_node_mvp, u_node_mouse, u_node_spread, u_node_dim_alpha;
-  GLint u_node_gal_time;
+  GLint u_node_gal_time, u_node_clean, u_node_bg_col, u_node_note_col;
   GLint u_lbl_vp, u_lbl_atlas, u_lbl_tp, u_lbl_ts, u_lbl_pbg, u_lbl_bg;
   GLint u_ext_scene, u_ext_thresh;
   GLint u_blur_tex, u_blur_dir;
@@ -788,11 +788,12 @@ void bt_graph_gl_render_state(BtGraphGL *gl, const BtGraphRenderState *st)
   gboolean is_galaxy = (st->mode == BT_GRAPH_MODE_GALAXY);
   gboolean mode_3d = ((st->mode == BT_GRAPH_MODE_3D || is_galaxy) &&
                       gl->pts3d != NULL && gl->pts3d_count > 0);
+  gboolean clean_2d = (st->style == BT_GRAPH_STYLE_CLEAN && !mode_3d);
 
   GLint target_fbo = 0;
   glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &target_fbo);
 
-  gboolean use_bloom = high && ensure_bloom_fbos(gl, fb_w, fb_h, target_fbo);
+  gboolean use_bloom = (!clean_2d) && high && ensure_bloom_fbos(gl, fb_w, fb_h, target_fbo);
   if (use_bloom)
     glBindFramebuffer(GL_FRAMEBUFFER, gl->scene_fbo);
 
@@ -814,32 +815,40 @@ void bt_graph_gl_render_state(BtGraphGL *gl, const BtGraphRenderState *st)
 
   float r, g, b;
 
-  /* Pass 1: deep navy space canvas gradient (#05070D -> #02030A) + Galaxy core bulge */
+  /* Pass 1: background (flat @bt_graph_bg in Clean 2D; deep navy gradient + bulge in Glow/3D/Galaxy) */
   glDisable(GL_BLEND);
   glUseProgram(gl->prog_bg);
-  bt_theme_unpack_f(BT_GALAXY_BG_TOP, &r, &g, &b);
-  glUniform3f(gl->u_bg_col, r, g, b);
-  bt_theme_unpack_f(BT_GALAXY_BG_BOTTOM, &r, &g, &b);
-  glUniform3f(gl->u_bg_vig, r, g, b);
-  if (is_galaxy && mode_3d) {
-    BtGraphVec3 origin = {0.0f, 0.0f, 0.0f};
-    gdouble osx = 0.0, osy = 0.0, ow = 1.0;
-    if (bt_graph_project_3d(mvp, &origin, 1.0, 1.0, &osx, &osy, &ow)) {
-      glUniform2f(gl->u_bg_bulge_uv, (float)osx, (float)(1.0 - osy));
-      glUniform1f(gl->u_bg_bulge_str, high ? 1.0f : 0.65f);
+  if (clean_2d) {
+    bt_theme_unpack_f(BT_COL_GRAPH_BG, &r, &g, &b);
+    glUniform3f(gl->u_bg_col, r, g, b);
+    glUniform3f(gl->u_bg_vig, r, g, b);
+    glUniform2f(gl->u_bg_bulge_uv, 0.5f, 0.5f);
+    glUniform1f(gl->u_bg_bulge_str, 0.0f);
+  } else {
+    bt_theme_unpack_f(BT_GALAXY_BG_TOP, &r, &g, &b);
+    glUniform3f(gl->u_bg_col, r, g, b);
+    bt_theme_unpack_f(BT_GALAXY_BG_BOTTOM, &r, &g, &b);
+    glUniform3f(gl->u_bg_vig, r, g, b);
+    if (is_galaxy && mode_3d) {
+      BtGraphVec3 origin = {0.0f, 0.0f, 0.0f};
+      gdouble osx = 0.0, osy = 0.0, ow = 1.0;
+      if (bt_graph_project_3d(mvp, &origin, 1.0, 1.0, &osx, &osy, &ow)) {
+        glUniform2f(gl->u_bg_bulge_uv, (float)osx, (float)(1.0 - osy));
+        glUniform1f(gl->u_bg_bulge_str, high ? 1.0f : 0.65f);
+      } else {
+        glUniform2f(gl->u_bg_bulge_uv, 0.5f, 0.5f);
+        glUniform1f(gl->u_bg_bulge_str, 0.0f);
+      }
     } else {
       glUniform2f(gl->u_bg_bulge_uv, 0.5f, 0.5f);
       glUniform1f(gl->u_bg_bulge_str, 0.0f);
     }
-  } else {
-    glUniform2f(gl->u_bg_bulge_uv, 0.5f, 0.5f);
-    glUniform1f(gl->u_bg_bulge_str, 0.0f);
   }
   glBindVertexArray(gl->vao_bg);
   glDrawArrays(GL_TRIANGLES, 0, 3);
 
-  /* Pass 2: GPU drifting dust / background starfield sprites (additive, off in Low Galaxy) */
-  if (high || !is_galaxy) {
+  /* Pass 2: GPU drifting dust / starfield sprites (skipped completely in Clean 2D & Low Galaxy) */
+  if (!clean_2d && (high || !is_galaxy)) {
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE);
     glUseProgram(gl->prog_dust);
@@ -871,10 +880,10 @@ void bt_graph_gl_render_state(BtGraphGL *gl, const BtGraphRenderState *st)
     hf = 1.0f;
 
   if (st->graph != NULL && gl->node_count > 0) {
-    /* Pass 3: instanced edges (normal alpha in 3D/dense to prevent white blowout) */
+    /* Pass 3: instanced edges (thin straight normal-alpha lines in Clean 2D) */
     if (gl->edge_count > 0) {
-      int segs = high ? 6 : 1;
-      glBlendFunc(GL_SRC_ALPHA, mode_3d ? GL_ONE_MINUS_SRC_ALPHA : GL_ONE);
+      int segs = clean_2d ? 1 : (high ? 6 : 1);
+      glBlendFunc(GL_SRC_ALPHA, (mode_3d || clean_2d) ? GL_ONE_MINUS_SRC_ALPHA : GL_ONE);
       glUseProgram(gl->prog_edge);
       glUniform2f(gl->u_edge_vp, vp_w, vp_h);
       glUniform2f(gl->u_edge_pan, (float)st->pan_x, (float)st->pan_y);
@@ -885,18 +894,18 @@ void bt_graph_gl_render_state(BtGraphGL *gl, const BtGraphRenderState *st)
       glUniform1i(gl->u_edge_sel, st->selected_idx);
       glUniform1f(gl->u_edge_hf, hf);
       glUniform1i(gl->u_edge_segs, segs);
-      glUniform1i(gl->u_edge_curved, high ? 1 : 0);
-      glUniform1f(gl->u_edge_ba, high ? (mode_3d ? 0.16f : 0.20f) : 0.14f);
-      glUniform1f(gl->u_edge_hw, high ? 0.85f : 0.70f);
+      glUniform1i(gl->u_edge_curved, (high && !clean_2d) ? 1 : 0);
+      glUniform1f(gl->u_edge_ba, clean_2d ? 0.40f : (high ? (mode_3d ? 0.16f : 0.20f) : 0.14f));
+      glUniform1f(gl->u_edge_hw, clean_2d ? 0.55f : (high ? 0.85f : 0.70f));
       bt_theme_unpack_f(BT_COL_GRAPH_EDGE_DIM, &r, &g, &b);
       glUniform3f(gl->u_edge_dim_col, r, g, b);
       bt_theme_unpack_f(BT_COL_GRAPH_EDGE_ACTIVE, &r, &g, &b);
       glUniform3f(gl->u_edge_act_col, r, g, b);
       glUniform1i(gl->u_edge_mode3d, mode_3d ? 1 : 0);
       glUniformMatrix4fv(gl->u_edge_mvp, 1, GL_FALSE, mvp);
-      glUniform1i(gl->u_edge_pulse_en, (st->pulse_enabled && !st->reduce_motion) ? 1 : 0);
+      glUniform1i(gl->u_edge_pulse_en, (!clean_2d && st->pulse_enabled && !st->reduce_motion) ? 1 : 0);
       glUniform1f(gl->u_edge_pulse_ph, (float)st->pulse_phase);
-      glUniform1i(gl->u_edge_show_links, st->show_links ? 1 : 0);
+      glUniform1i(gl->u_edge_show_links, (clean_2d || st->show_links) ? 1 : 0);
       glUniform1f(gl->u_edge_gal_time, is_galaxy ? (float)st->gal_time : 0.0f);
       glBindVertexArray(gl->vao_edge);
       glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, (segs + 1) * 2, (GLsizei)gl->edge_count);
@@ -935,6 +944,11 @@ void bt_graph_gl_render_state(BtGraphGL *gl, const BtGraphRenderState *st)
     glUniform1f(gl->u_node_spread, (mode_3d && !st->reduce_motion) ? (float)st->spread_str : 0.0f);
     glUniform1f(gl->u_node_dim_alpha, st->focus_isolated ? 0.08f : 0.25f);
     glUniform1f(gl->u_node_gal_time, is_galaxy ? (float)st->gal_time : 0.0f);
+    glUniform1i(gl->u_node_clean, clean_2d ? 1 : 0);
+    bt_theme_unpack_f(BT_COL_GRAPH_BG, &r, &g, &b);
+    glUniform3f(gl->u_node_bg_col, r, g, b);
+    bt_theme_unpack_f(BT_COL_TEXT_SECONDARY, &r, &g, &b);
+    glUniform3f(gl->u_node_note_col, r, g, b);
     glBindVertexArray(gl->vao_node);
     glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, (GLsizei)gl->node_count);
   }
@@ -989,9 +1003,11 @@ void bt_graph_gl_render_state(BtGraphGL *gl, const BtGraphRenderState *st)
     glBindTexture(GL_TEXTURE_2D, 0);
   }
 
-  /* Pass 6: Greedy screen-space culled Pango RGBA labels drawn AFTER bloom */
+  /* Pass 6: Greedy screen-space culled Pango RGBA labels drawn AFTER bloom.
+   * In Clean 2D style: NO labels at rest (only on hover/select, or when zoom >= 1.8). */
   if (st->graph != NULL && gl->node_count > 0 && gl->atlas_slots != NULL && gl->tex_atlas != 0 &&
-      gl->lbl_cands != NULL && gl->obs_scratch != NULL) {
+      gl->lbl_cands != NULL && gl->obs_scratch != NULL &&
+      (!clean_2d || has_focus || st->zoom >= 1.8)) {
     guint cand_n = 0;
     guint obs_n = 0;
     float bt_eased = 1.0f - powf(1.0f - CLAMP(bt, 0.0f, 1.0f), 3.0f);
@@ -1268,6 +1284,9 @@ static void on_realize(GtkWidget *widget, gpointer ud)
   gl->u_node_spread = glGetUniformLocation(gl->prog_node, "u_spread_str");
   gl->u_node_dim_alpha = glGetUniformLocation(gl->prog_node, "u_dim_alpha");
   gl->u_node_gal_time = glGetUniformLocation(gl->prog_node, "u_gal_time");
+  gl->u_node_clean = glGetUniformLocation(gl->prog_node, "u_clean_style");
+  gl->u_node_bg_col = glGetUniformLocation(gl->prog_node, "u_bg_col");
+  gl->u_node_note_col = glGetUniformLocation(gl->prog_node, "u_note_col");
 
   gl->u_lbl_vp = glGetUniformLocation(gl->prog_label, "u_viewport");
   gl->u_lbl_atlas = glGetUniformLocation(gl->prog_label, "u_atlas");

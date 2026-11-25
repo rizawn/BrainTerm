@@ -12,6 +12,7 @@
 #include "graph_palette.h"
 #include "graph_state.h"
 #include "graph_timeline.h"
+#include "graphlayout.h"
 #include "theme.h"
 #include "ui/graphgl.h"
 #include "ui/graphview_renderer.h"
@@ -290,12 +291,13 @@ static void cairo_backend_render(BtGraphRenderer *r, cairo_t *cr, const BtGraphR
   gboolean heavy = (g->nodes->len > 400u);
   gboolean very_heavy = (g->nodes->len > 1500u);
 
-  /* 2. Sparse drifting atmospheric dust particles. */
-  if (!very_heavy || high)
+  /* 2. Sparse drifting atmospheric dust particles (skipped in Clean style). */
+  gboolean clean = (st->style == BT_GRAPH_STYLE_CLEAN);
+  if (!clean && (!very_heavy || high))
     draw_dust(cr, p, st);
 
   cairo_save(cr);
-  cairo_set_antialias(cr, heavy ? CAIRO_ANTIALIAS_FAST : CAIRO_ANTIALIAS_GOOD);
+  cairo_set_antialias(cr, (heavy && !clean) ? CAIRO_ANTIALIAS_FAST : CAIRO_ANTIALIAS_GOOD);
   cairo_translate(cr, width * 0.5 + st->pan_x, height * 0.5 + st->pan_y);
   cairo_scale(cr, st->zoom, st->zoom);
 
@@ -305,10 +307,10 @@ static void cairo_backend_render(BtGraphRenderer *r, cairo_t *cr, const BtGraphR
   gdouble min_wy = (-height * 0.5 - st->pan_y) / zoom - 40.0;
   gdouble max_wy = (height * 0.5 - st->pan_y) / zoom + 40.0;
 
-  /* Subtle session dock divider when session/import nodes exist on small/medium vaults. */
+  /* Subtle session dock divider (Glow style only). */
   gdouble stem_min_x = 1e9, stem_max_x = -1e9;
   gboolean has_stem = FALSE;
-  if (!heavy) {
+  if (!heavy && !clean) {
     for (guint i = 0; i < g->nodes->len; i++) {
       const BtGraphNode *nd = g_ptr_array_index(g->nodes, i);
       if (!nd->visible)
@@ -338,18 +340,18 @@ static void cairo_backend_render(BtGraphRenderer *r, cairo_t *cr, const BtGraphR
     hf = 1.0;
   gdouble dim_target = st->focus_isolated ? 0.08 : 0.25;
   gdouble dim_factor = has_focus ? (1.0 - (1.0 - dim_target) * hf) : 1.0;
-  gboolean use_curved_edges = (high && g->edges->len <= 600u);
+  gboolean use_curved_edges = (!clean && high && g->edges->len <= 600u);
   gboolean lod_collapse = (g->nodes->len > 2000u && zoom < 0.6);
 
-  /* Pass 1: base edges — faint folder tethers always, wikilinks only if show_links. */
+  /* Pass 1: base edges — in Clean style draw all visible edges thin & straight (alpha 0.40). */
   cairo_save(cr);
-  cairo_set_antialias(cr, (heavy || !high) ? CAIRO_ANTIALIAS_NONE : CAIRO_ANTIALIAS_GOOD);
-  cairo_set_line_width(cr, (high ? 1.0 : 0.9) / zoom);
-  set_tok(cr, BT_COL_GRAPH_EDGE_DIM, (high ? 0.18 : 0.14) * dim_factor);
+  cairo_set_antialias(cr, ((heavy || !high) && !clean) ? CAIRO_ANTIALIAS_NONE : CAIRO_ANTIALIAS_GOOD);
+  cairo_set_line_width(cr, (clean ? 1.0 : (high ? 1.0 : 0.9)) / zoom);
+  set_tok(cr, BT_COL_GRAPH_EDGE_DIM, (clean ? 0.40 : (high ? 0.18 : 0.14)) * dim_factor);
 
   for (guint i = 0; i < g->edges->len; i++) {
     const BtGraphEdge *e = &g_array_index(g->edges, BtGraphEdge, i);
-    if (e->kind != BT_EDGE_CONTAINS && !st->show_links)
+    if (!clean && e->kind != BT_EDGE_CONTAINS && !st->show_links)
       continue;
     if (lod_collapse && e->kind == BT_EDGE_TAGGED)
       continue;
@@ -421,10 +423,10 @@ static void cairo_backend_render(BtGraphRenderer *r, cairo_t *cr, const BtGraphR
     cairo_restore(cr);
   }
 
-  /* Pass 2a: pre-baked radial glow halos (all nodes <= 400; hubs/AI/focused on heavy). */
-  gboolean draw_all_halos = high && !heavy;
-  gboolean draw_hub_halos = high && heavy && !very_heavy;
-  if (draw_all_halos || draw_hub_halos || has_focus || st->selected_idx >= 0) {
+  /* Pass 2a: pre-baked radial glow halos (skipped completely in Clean style). */
+  gboolean draw_all_halos = !clean && high && !heavy;
+  gboolean draw_hub_halos = !clean && high && heavy && !very_heavy;
+  if (!clean && (draw_all_halos || draw_hub_halos || has_focus || st->selected_idx >= 0)) {
     cairo_save(cr);
     if (high)
       cairo_set_operator(cr, CAIRO_OPERATOR_ADD);
@@ -479,6 +481,40 @@ static void cairo_backend_render(BtGraphRenderer *r, cairo_t *cr, const BtGraphR
     guint32 col = node_color(nd);
     gdouble rad = bt_graph_screen_core_radius(nd->radius, zoom) / zoom;
 
+    if (clean) {
+      /* 1px background-colored separation ring cuts incoming edges cleanly at node border. */
+      if (nd->kind == BT_NODE_SESSION || nd->kind == BT_NODE_IMPORT_ROOT) {
+        gdouble s = rad * 1.85;
+        cairo_rectangle(cr, nx - s * 0.5 - 1.0 / zoom, ny - s * 0.5 - 1.0 / zoom,
+                        s + 2.0 / zoom, s + 2.0 / zoom);
+        set_tok(cr, BT_COL_GRAPH_BG, alpha);
+        cairo_fill(cr);
+        cairo_rectangle(cr, nx - s * 0.5, ny - s * 0.5, s, s);
+        set_tok(cr, (is_foc || is_sel) ? BT_COL_GRAPH_NODE_GLOW : BT_COL_TEXT_SECONDARY, alpha);
+        cairo_fill(cr);
+      } else if (nd->kind == BT_NODE_GHOST) {
+        set_tok(cr, (is_foc || is_sel) ? BT_COL_GRAPH_NODE_GLOW : BT_COL_TEXT_MUTED, 0.85 * alpha);
+        cairo_set_line_width(cr, 1.2 / zoom);
+        cairo_arc(cr, nx, ny, rad, 0.0, 2.0 * M_PI);
+        cairo_stroke(cr);
+      } else {
+        set_tok(cr, BT_COL_GRAPH_BG, alpha);
+        cairo_arc(cr, nx, ny, rad + 1.1 / zoom, 0.0, 2.0 * M_PI);
+        cairo_fill(cr);
+        guint32 fill_tok = (is_foc || is_sel) ? BT_COL_GRAPH_NODE_GLOW : BT_COL_TEXT_SECONDARY;
+        set_tok(cr, fill_tok, alpha);
+        cairo_arc(cr, nx, ny, rad, 0.0, 2.0 * M_PI);
+        cairo_fill(cr);
+        if (nd->kind == BT_NODE_AI_NOTE) {
+          set_tok(cr, BT_COL_GRAPH_NODE_GLOW, alpha);
+          cairo_set_line_width(cr, 1.1 / zoom);
+          cairo_arc(cr, nx, ny, rad, 0.0, 2.0 * M_PI);
+          cairo_stroke(cr);
+        }
+      }
+      continue;
+    }
+
     if (nd->kind == BT_NODE_FOLDER) {
       set_tok(cr, col, 0.92 * alpha);
       cairo_set_line_width(cr, 1.8 / zoom);
@@ -526,8 +562,9 @@ static void cairo_backend_render(BtGraphRenderer *r, cairo_t *cr, const BtGraphR
 
   cairo_restore(cr);
 
-  /* Pass 3: Greedy screen-space culled Pango labels (shared bt_graph_place_labels). */
-  if (!very_heavy || has_focus || st->selected_idx >= 0) {
+  /* Pass 3: Greedy screen-space culled Pango labels (in Clean style: none at rest until zoom >= 1.8). */
+  if ((!very_heavy || has_focus || st->selected_idx >= 0) &&
+      (!clean || has_focus || st->selected_idx >= 0 || zoom >= 1.8)) {
     if (g->nodes->len > p->lbl_scratch_cap) {
       g_free(p->lbl_cands);
       g_free(p->obs_scratch);
@@ -774,6 +811,8 @@ struct BtGraphView {
   GtkWidget *btn_tl_lane_type;
   GtkWidget *btn_q_low;
   GtkWidget *btn_q_high;
+  GtkWidget *btn_style_clean;
+  GtkWidget *btn_style_glow;
   GtkWidget *btn_pulse;
   GtkWidget *btn_motion;
   GtkWidget *btn_tags;
@@ -824,6 +863,7 @@ struct BtGraphView {
   gboolean window_active;
   BtGraphQuality quality;
   BtGraphMode mode;
+  BtGraphStyle style;
   gboolean pulse_enabled;
   gboolean reduce_motion;
   gboolean show_tags;
@@ -1140,6 +1180,8 @@ static gboolean needs_ambient_tick(const BtGraphView *gv)
     return FALSE;
   if (gv->reduce_motion || !gv->window_active)
     return FALSE;
+  if (gv->mode == BT_GRAPH_MODE_2D && gv->style == BT_GRAPH_STYLE_CLEAN)
+    return FALSE; /* Clean 2D has zero dust/idle animation -> 0 idle redraws (A9) */
   if (needs_idle_orbit(gv) || needs_pulse_tick(gv))
     return TRUE;
   if (gv->quality != BT_GRAPH_QUALITY_HIGH)
@@ -1510,6 +1552,7 @@ static void fill_render_state(BtGraphView *gv, int w, int h, int scale, BtGraphR
   out->pulse_phase = gv->pulse_phase;
   out->quality = gv->quality;
   out->mode = (gv->active_backend == BT_GRAPH_BACKEND_GL) ? gv->mode : BT_GRAPH_MODE_2D;
+  out->style = gv->style;
   out->reduce_motion = gv->reduce_motion;
   out->pulse_enabled = gv->pulse_enabled;
   out->show_links = gv->show_links;
@@ -2427,6 +2470,18 @@ static void sync_toolbar_buttons(BtGraphView *gv)
     else
       gtk_widget_remove_css_class(gv->btn_q_low, "bt-pill-active");
   }
+  if (gv->btn_style_clean != NULL) {
+    if (gv->style == BT_GRAPH_STYLE_CLEAN)
+      gtk_widget_add_css_class(gv->btn_style_clean, "bt-pill-active");
+    else
+      gtk_widget_remove_css_class(gv->btn_style_clean, "bt-pill-active");
+  }
+  if (gv->btn_style_glow != NULL) {
+    if (gv->style == BT_GRAPH_STYLE_GLOW)
+      gtk_widget_add_css_class(gv->btn_style_glow, "bt-pill-active");
+    else
+      gtk_widget_remove_css_class(gv->btn_style_glow, "bt-pill-active");
+  }
   if (gv->btn_q_high != NULL) {
     if (hi)
       gtk_widget_add_css_class(gv->btn_q_high, "bt-pill-active");
@@ -2761,6 +2816,20 @@ static void on_btn_q_high_clicked(GtkButton *b, gpointer ud)
 {
   (void)b;
   bt_graphview_set_quality(ud, BT_GRAPH_QUALITY_HIGH);
+}
+
+static void on_btn_style_clean_clicked(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  bt_graphview_set_style(ud, BT_GRAPH_STYLE_CLEAN);
+  notify_prefs_changed(ud);
+}
+
+static void on_btn_style_glow_clicked(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  bt_graphview_set_style(ud, BT_GRAPH_STYLE_GLOW);
+  notify_prefs_changed(ud);
 }
 
 static void on_btn_pulse_toggled(GtkToggleButton *b, gpointer ud)
@@ -3545,6 +3614,20 @@ BtGraphView *bt_graphview_new(BtGraphOpenNoteFn on_open, BtGraphOpenTermFn on_op
                               "High quality: bloom glow, curved additive edges, and ambient dust");
   g_signal_connect(gv->btn_q_high, "clicked", G_CALLBACK(on_btn_q_high_clicked), gv);
 
+  GtkWidget *lbl_style = gtk_label_new("Style:");
+  gtk_widget_add_css_class(lbl_style, "bt-graph-toolbar-lbl");
+  gv->btn_style_clean = gtk_button_new_with_label("Clean");
+  gtk_widget_add_css_class(gv->btn_style_clean, "bt-graph-pill");
+  gtk_widget_set_tooltip_text(gv->btn_style_clean,
+                              "Clean style: flat non-overlapping dots, thin straight edges, background separation rings");
+  g_signal_connect(gv->btn_style_clean, "clicked", G_CALLBACK(on_btn_style_clean_clicked), gv);
+
+  gv->btn_style_glow = gtk_button_new_with_label("Glow");
+  gtk_widget_add_css_class(gv->btn_style_glow, "bt-graph-pill");
+  gtk_widget_set_tooltip_text(gv->btn_style_glow,
+                              "Glow style: colored folder halos, bloom glow, and ambient starfield");
+  g_signal_connect(gv->btn_style_glow, "clicked", G_CALLBACK(on_btn_style_glow_clicked), gv);
+
   GtkWidget *sep2 = gtk_separator_new(GTK_ORIENTATION_VERTICAL);
   gtk_widget_add_css_class(sep2, "bt-graph-toolbar-sep");
 
@@ -3602,6 +3685,9 @@ BtGraphView *bt_graphview_new(BtGraphOpenNoteFn on_open, BtGraphOpenTermFn on_op
   gtk_box_append(GTK_BOX(mode_bar), lbl_qual);
   gtk_box_append(GTK_BOX(mode_bar), gv->btn_q_low);
   gtk_box_append(GTK_BOX(mode_bar), gv->btn_q_high);
+  gtk_box_append(GTK_BOX(mode_bar), lbl_style);
+  gtk_box_append(GTK_BOX(mode_bar), gv->btn_style_clean);
+  gtk_box_append(GTK_BOX(mode_bar), gv->btn_style_glow);
   gtk_box_append(GTK_BOX(mode_bar), sep2);
   gtk_box_append(GTK_BOX(mode_bar), gv->btn_links);
   gtk_box_append(GTK_BOX(mode_bar), gv->btn_tags);
@@ -3894,6 +3980,24 @@ void bt_graphview_set_mode(BtGraphView *gv, BtGraphMode mode)
 BtGraphMode bt_graphview_get_mode(const BtGraphView *gv)
 {
   return gv ? gv->mode : BT_GRAPH_MODE_2D;
+}
+
+void bt_graphview_set_style(BtGraphView *gv, BtGraphStyle style)
+{
+  if (gv == NULL)
+    return;
+  gv->style = style;
+  sync_toolbar_buttons(gv);
+  if (needs_ambient_tick(gv))
+    ensure_tick(gv);
+  else
+    stop_tick_if_idle(gv);
+  queue_canvas_draw(gv);
+}
+
+BtGraphStyle bt_graphview_get_style(const BtGraphView *gv)
+{
+  return gv ? gv->style : BT_GRAPH_STYLE_CLEAN;
 }
 
 void bt_graphview_set_pulse(BtGraphView *gv, gboolean enabled)

@@ -317,6 +317,24 @@ static BtGraphMode load_saved_graph_mode(void)
   return mode;
 }
 
+static BtGraphStyle load_saved_graph_style(void)
+{
+  gchar *path = bt_app_state_file_path();
+  GKeyFile *kf = g_key_file_new();
+  BtGraphStyle st = BT_GRAPH_STYLE_CLEAN;
+  if (g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL)) {
+    gchar *v = g_key_file_get_string(kf, "graph", "style", NULL);
+    if (v != NULL) {
+      if (g_ascii_strcasecmp(v, "glow") == 0)
+        st = BT_GRAPH_STYLE_GLOW;
+      g_free(v);
+    }
+  }
+  g_key_file_unref(kf);
+  g_free(path);
+  return st;
+}
+
 static void on_graph_prefs_changed(gboolean show_tags, gboolean show_ghosts, gpointer ud)
 {
   BtApp *app = ud;
@@ -331,6 +349,9 @@ static void on_graph_prefs_changed(gboolean show_tags, gboolean show_ghosts, gpo
                       : (m == BT_GRAPH_MODE_TIMELINE) ? "timeline"
                                                       : "2d";
     save_state_str("graph", "mode", ms, NULL);
+    save_state_str("graph", "style",
+                   bt_graphview_get_style(app->graphview) == BT_GRAPH_STYLE_GLOW ? "glow" : "clean",
+                   NULL);
   }
 }
 
@@ -3991,6 +4012,7 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
     bt_graphview_set_show_tags(app->graphview, load_saved_graph_bool("show_tags", FALSE));
     bt_graphview_set_show_ghosts(app->graphview, load_saved_graph_bool("show_ghosts", FALSE));
     bt_graphview_set_mode(app->graphview, load_saved_graph_mode());
+    bt_graphview_set_style(app->graphview, load_saved_graph_style());
   } else {
     BtGraphMode env_m = BT_GRAPH_MODE_2D;
     if (parse_graph_mode_str(g_getenv("BRAINTERM_VIEW"), &env_m))

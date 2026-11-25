@@ -41,6 +41,7 @@ typedef struct {
   gdouble pulse_phase;
   BtGraphQuality quality;
   BtGraphMode mode;
+  BtGraphStyle style;
   gboolean reduce_motion;
   gboolean pulse_enabled;
   gboolean show_links;
