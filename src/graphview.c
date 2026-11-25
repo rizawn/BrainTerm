@@ -784,10 +784,12 @@ struct BtGraphView {
   GtkWidget *legend_box;
   GtkWidget *legend_folders_box;
   GtkWidget *legend_lbl;
+  GtkWidget *mode_badge_lbl;
   GtkWidget *hover_lbl;
   GtkWidget *debug_lbl;
   GtkWindow *toplevel;
   gulong toplevel_active_sig;
+  gdouble gal_time;
 
   BtGraphAlive *alive;
   BtGraph *graph;
@@ -1412,8 +1414,13 @@ static gboolean on_tick(GtkWidget *widget, GdkFrameClock *clock, gpointer ud)
     }
   }
 
-  /* 5. Gentle 3D idle rotation (stops on user interaction / unfocus / Reduce Motion). */
-  if (needs_idle_orbit(gv) && !gv->animating_3d) {
+  /* 5. Gentle 3D idle rotation (in Galaxy mode: differential galactic rotation instead of rigid orbit). */
+  if (gv->mode == BT_GRAPH_MODE_GALAXY && gv->active_backend == BT_GRAPH_BACKEND_GL &&
+      !gv->reduce_motion && !gv->dragging && gv->window_active &&
+      gv->graph != NULL && gv->graph->nodes->len > 0) {
+    gv->gal_time += dt;
+    active = TRUE;
+  } else if (needs_idle_orbit(gv) && !gv->animating_3d) {
     gv->yaw += dt * 0.14;
     if (gv->yaw > 2.0 * M_PI)
       gv->yaw -= 2.0 * M_PI;
@@ -1510,6 +1517,7 @@ static void fill_render_state(BtGraphView *gv, int w, int h, int scale, BtGraphR
   out->mouse_x = gv->last_mouse_x;
   out->mouse_y = gv->last_mouse_y;
   out->spread_str = gv->spread_str;
+  out->gal_time = (gv->mode == BT_GRAPH_MODE_GALAXY) ? gv->gal_time : 0.0;
 }
 
 static void sync_toolbar_buttons(BtGraphView *gv);
@@ -1821,8 +1829,11 @@ static guint pick_stack_at(BtGraphView *gv, gdouble sx, gdouble sy, BtPickCand *
     if (is3d) {
       if (i >= gv->pts3d_count)
         continue;
+      BtGraphVec3 pt = gv->pts3d[i];
+      if (gv->mode == BT_GRAPH_MODE_GALAXY && fabs(gv->gal_time) > 1e-6)
+        bt_galaxy_apply_diff_rot(&pt, gv->gal_time, &pt);
       gdouble px = 0.0, py = 0.0, pw = 0.0;
-      if (!bt_graph_project_3d(mvp, &gv->pts3d[i], (gdouble)w, (gdouble)h, &px, &py, &pw))
+      if (!bt_graph_project_3d(mvp, &pt, (gdouble)w, (gdouble)h, &px, &py, &pw))
         continue;
       float persp = CLAMP(2.4f / MAX((float)pw, 0.35f), 0.40f, 2.2f);
       sn->sx = (float)px;
@@ -2382,6 +2393,13 @@ static void sync_toolbar_buttons(BtGraphView *gv)
   }
   if (gv->tl_controls_box != NULL)
     gtk_widget_set_visible(gv->tl_controls_box, is_tl);
+  if (gv->mode_badge_lbl != NULL) {
+    const gchar *badge = is_gal ? "GALAXY VIEW"
+                         : is_tl ? "TIMELINE VIEW"
+                         : is3d  ? "3D VIEW"
+                                 : "2D VIEW";
+    gtk_label_set_text(GTK_LABEL(gv->mode_badge_lbl), badge);
+  }
   if (gv->btn_tl_organic != NULL) {
     if (!gv->tl_kept) gtk_widget_add_css_class(gv->btn_tl_organic, "bt-pill-active");
     else gtk_widget_remove_css_class(gv->btn_tl_organic, "bt-pill-active");
@@ -3595,6 +3613,18 @@ BtGraphView *bt_graphview_new(BtGraphOpenNoteFn on_open, BtGraphOpenTermFn on_op
   gtk_box_append(GTK_BOX(mode_bar), gv->btn_col_folder);
   gtk_box_append(GTK_BOX(mode_bar), gv->btn_col_type);
   gtk_overlay_add_overlay(GTK_OVERLAY(gv->overlay), mode_bar);
+
+  /* Corner uppercase tracked mode badge (e.g. "GALAXY VIEW") for unmistakable mode feedback. */
+  gv->mode_badge_lbl = gtk_label_new("2D VIEW");
+  gtk_widget_set_name(gv->mode_badge_lbl, "bt-graph-mode-badge");
+  gtk_widget_add_css_class(gv->mode_badge_lbl, "bt-graph-mode-badge");
+  gtk_widget_set_halign(gv->mode_badge_lbl, GTK_ALIGN_START);
+  gtk_widget_set_valign(gv->mode_badge_lbl, GTK_ALIGN_START);
+  gtk_widget_set_margin_top(gv->mode_badge_lbl, 46);
+  gtk_widget_set_margin_start(gv->mode_badge_lbl, 10);
+  gtk_widget_set_can_target(gv->mode_badge_lbl, FALSE);
+  gtk_overlay_add_overlay(GTK_OVERLAY(gv->overlay), gv->mode_badge_lbl);
+
   sync_toolbar_buttons(gv);
 
   /* Top-right zoom / fit / reset overlay controls. */
@@ -4004,6 +4034,67 @@ void bt_graphview_toggle_debug_overlay(BtGraphView *gv)
 {
   if (gv != NULL)
     bt_graphview_set_debug_overlay(gv, !gv->debug_overlay);
+}
+
+gboolean bt_graphview_is_screenshot_ready(const BtGraphView *gv)
+{
+  if (gv == NULL || gv->graph == NULL || gv->canvas_stack == NULL)
+    return FALSE;
+  if (gtk_widget_get_width(gv->canvas_stack) <= 40 ||
+      gtk_widget_get_height(gv->canvas_stack) <= 40)
+    return FALSE;
+  if (gv->mode == BT_GRAPH_MODE_TIMELINE)
+    return TRUE;
+  if (gv->active_backend == BT_GRAPH_BACKEND_GL) {
+    if (gv->gl == NULL || (!bt_graph_gl_is_ready(gv->gl) && !bt_graph_gl_has_failed(gv->gl)))
+      return FALSE;
+    if (mode_is_3d_orbit(gv->mode) && gv->graph->nodes->len > 0 &&
+        (gv->pts3d == NULL || gv->pts3d_count == 0))
+      return FALSE;
+  }
+  return TRUE;
+}
+
+void bt_graphview_prepare_screenshot(BtGraphView *gv)
+{
+  if (gv == NULL || gv->graph == NULL)
+    return;
+  guint n = gv->graph->nodes->len;
+  for (guint i = 0; i < n; i++) {
+    BtGraphNode *nd = g_ptr_array_index(gv->graph->nodes, i);
+    nd->birth_t = 1.0;
+  }
+  if (gv->morphing_3d && gv->pts3d_target != NULL && gv->pts3d != NULL) {
+    memcpy(gv->pts3d, gv->pts3d_target, gv->pts3d_count * sizeof(BtGraphVec3));
+    gv->morphing_3d = FALSE;
+    gv->morph_t = 1.0;
+    g_clear_pointer(&gv->pts3d_from, g_free);
+    g_clear_pointer(&gv->pts3d_target, g_free);
+    if (gv->gl != NULL)
+      bt_graph_gl_set_layout3d(gv->gl, gv->pts3d, gv->pts3d_count);
+  }
+  gv->animating_cam = FALSE;
+  gv->animating_3d = FALSE;
+  if (gv->mode == BT_GRAPH_MODE_GALAXY) {
+    gv->yaw = 0.35;
+    gv->pitch = 0.58;
+    gv->dist3d = 2.55;
+  } else if (gv->mode == BT_GRAPH_MODE_3D) {
+    gv->yaw = 0.35;
+    gv->pitch = 0.22;
+    gv->dist3d = 2.75;
+  } else if (gv->mode == BT_GRAPH_MODE_2D) {
+    int w = gv->canvas_stack ? gtk_widget_get_width(gv->canvas_stack) : 800;
+    int h = gv->canvas_stack ? gtk_widget_get_height(gv->canvas_stack) : 600;
+    compute_fit_camera(gv, w, h, &gv->pan_x, &gv->pan_y, &gv->zoom);
+    gv->target_pan_x = gv->pan_x;
+    gv->target_pan_y = gv->pan_y;
+    gv->target_zoom = gv->zoom;
+    gv->needs_fit = FALSE;
+  } else if (gv->mode == BT_GRAPH_MODE_TIMELINE) {
+    gv->tl_dirty = TRUE;
+  }
+  queue_canvas_draw(gv);
 }
 
 gboolean bt_graphview_is_capture_ready(const BtGraphView *gv, const BtGraphCaptureSpec *spec)

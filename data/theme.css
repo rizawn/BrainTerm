@@ -825,6 +825,18 @@ toast {
   color: @bt_text_muted;
 }
 
+.bt-graph-mode-badge {
+  font-family: "JetBrains Mono", "Cascadia Mono", "Consolas", monospace;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 2px;
+  color: alpha(@bt_text_primary, 0.72);
+  background-color: alpha(@bt_surface_2, 0.78);
+  border: 1px solid alpha(@bt_border, 0.7);
+  border-radius: 6px;
+  padding: 3px 8px;
+}
+
 .bt-graph-debug {
   font-family: "JetBrains Mono", "Cascadia Mono", "Consolas", monospace;
   font-size: 11px;

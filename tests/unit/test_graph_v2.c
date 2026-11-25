@@ -471,6 +471,22 @@ static void test_galaxy_layout_determinism_and_z_bulge(void **state)
     assert_true(fabsf(a[i].z - b[i].z) < 1e-6f);
   }
 
+  /* Global pairwise distance >= d_min * 0.9 thanks to 3D spatial-hash relaxation. */
+  BtGalaxyParams gp;
+  bt_galaxy_default_params(&gp);
+  float min_d2 = 1e9f;
+  for (guint i = 0; i < 120u; i++) {
+    for (guint j = i + 1u; j < 120u; j++) {
+      float dx = a[j].x - a[i].x;
+      float dy = a[j].y - a[i].y;
+      float dz = a[j].z - a[i].z;
+      float d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 < min_d2)
+        min_d2 = d2;
+    }
+  }
+  assert_true(sqrtf(min_d2) >= gp.d_min * 0.9f);
+
   /* Vertical z-distribution: core bulge (r < 0.25) thicker on average than outer disk (r > 0.50). */
   gdouble bulge_z = 0.0, disk_z = 0.0;
   guint bulge_n = 0u, disk_n = 0u;

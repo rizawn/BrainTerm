@@ -411,21 +411,76 @@ static gint cmp_folder_slot_desc(const void *a, const void *b)
   return g_ascii_strcasecmp(fa->name, fb->name);
 }
 
+void bt_galaxy_default_params(BtGalaxyParams *p)
+{
+  if (p == NULL)
+    return;
+  p->arms = 4;
+  p->pitch_b = 0.28f;
+  p->arm_spread = 0.30f;
+  p->r_min = 0.12f;
+  p->r_bulge = 0.18f;
+  p->h_disk = 0.025f;
+  p->h_bulge = 0.12f;
+  p->halo_frac = 0.03f;
+  p->warp = 0.06f;
+  p->d_min = 0.012f;
+}
+
+void bt_galaxy_apply_diff_rot(const BtGraphVec3 *pt, gdouble gal_time, BtGraphVec3 *out)
+{
+  if (pt == NULL || out == NULL)
+    return;
+  if (fabs(gal_time) < 1e-6) {
+    *out = *pt;
+    return;
+  }
+  gdouble r = hypot((gdouble)pt->x, (gdouble)pt->z);
+  gdouble ang = gal_time * (0.08 / (1.0 + r / 0.3));
+  gdouble ca = cos(ang);
+  gdouble sa = sin(ang);
+  out->x = (float)((gdouble)pt->x * ca - (gdouble)pt->z * sa);
+  out->y = pt->y;
+  out->z = (float)((gdouble)pt->x * sa + (gdouble)pt->z * ca);
+}
+
+static gint cmp_guint_asc(const void *a, const void *b)
+{
+  guint ua = *(const guint *)a;
+  guint ub = *(const guint *)b;
+  return (ua > ub) - (ua < ub);
+}
+
+static guint galaxy_cell_hash(gint cx, gint cy, gint cz, guint buckets)
+{
+  guint64 h = (guint64)(guint32)cx * 73856093ULL ^
+              (guint64)(guint32)cy * 19349663ULL ^
+              (guint64)(guint32)cz * 83492791ULL;
+  return (guint)(h % (guint64)buckets);
+}
+
 void bt_graph_compute_galaxy_layout(const BtGraph *g, guint arms, BtGraphVec3 *out_pts,
                                     guint max_pts)
 {
   if (g == NULL || g->nodes == NULL || out_pts == NULL || max_pts == 0u)
     return;
   guint n = MIN(g->nodes->len, max_pts);
-  guint n_arms = (arms >= 3u && arms <= 5u) ? arms : 4u;
-  const gdouble k_twist = 2.65;
-  const gdouble r0_twist = 0.14;
-  const gdouble h_disk = 0.032;
-  const gdouble h_bulge = 0.24;
-  const gdouble r_bulge = 0.22;
-  const gdouble warp_amp = 0.075;
+  if (n == 0u)
+    return;
 
-  /* 1. Collect top-level folders & sort by descendant count desc (largest sit mid-radius). */
+  BtGalaxyParams gp;
+  bt_galaxy_default_params(&gp);
+  guint n_arms = (arms >= 3u && arms <= 5u) ? arms : (guint)gp.arms;
+
+  /* 0. Degree array sorted ascending for hubness percentile in [0, 1]. */
+  g_autofree guint *deg_sorted = g_new(guint, n);
+  for (guint i = 0; i < n; i++) {
+    const BtGraphNode *nd = g_ptr_array_index(g->nodes, i);
+    deg_sorted[i] = nd->degree;
+  }
+  qsort(deg_sorted, n, sizeof(guint), cmp_guint_asc);
+
+  /* 1. Collect top-level folders & sort by descendant count desc; golden-ratio radial spread. */
   GHashTable *f_counts = g_hash_table_new(g_str_hash, g_str_equal);
   for (guint i = 0; i < n; i++) {
     const BtGraphNode *nd = g_ptr_array_index(g->nodes, i);
@@ -450,15 +505,11 @@ void bt_graph_compute_galaxy_layout(const BtGraph *g, guint arms, BtGraphVec3 *o
     qsort(slots, nf, sizeof(GalaxyFolderSlot), cmp_folder_slot_desc);
     for (guint i = 0; i < nf; i++) {
       slots[i].arm_idx = i % n_arms;
-      guint rank_in_arm = i / n_arms;
-      guint per_arm = MAX((nf + n_arms - 1u) / n_arms, 1u);
-      /* Largest folders sit mid-radius (~0.42..0.68), smaller fill inner/outer slots. */
-      gdouble frac = (per_arm > 1u) ? ((gdouble)rank_in_arm / (gdouble)(per_arm - 1u)) : 0.45;
-      gdouble r_slot = 0.34 + 0.54 * frac;
-      if (i < n_arms)
-        r_slot = 0.44 + 0.05 * (gdouble)(i % 2u);
+      gdouble gr = 0.5 + (gdouble)i * 0.61803398875;
+      gdouble frac = gr - floor(gr);
+      gdouble r_slot = (gdouble)gp.r_min + (1.0 - (gdouble)gp.r_min) * frac;
       gdouble arm_base = ((gdouble)slots[i].arm_idx / (gdouble)n_arms) * 2.0 * M_PI;
-      gdouble phi = arm_base + k_twist * log(1.0 + r_slot / r0_twist);
+      gdouble phi = arm_base + log(MAX(r_slot / (gdouble)gp.r_min, 1.0001)) / (gdouble)gp.pitch_b;
       slots[i].anchor_r = r_slot;
       slots[i].anchor_phi = phi;
       g_hash_table_insert(slot_map, (gpointer)slots[i].name, &slots[i]);
@@ -470,93 +521,130 @@ void bt_graph_compute_galaxy_layout(const BtGraph *g, guint arms, BtGraphVec3 *o
     const BtGraphNode *nd = g_ptr_array_index(g->nodes, i);
     const gchar *key = (nd->relpath && nd->relpath[0]) ? nd->relpath : (nd->id ? nd->id : "");
     guint64 rng = fnv1a64(key);
-    gdouble r = 0.25;
+    gdouble r = 0.22;
     gdouble phi = galaxy_rand01(&rng) * 2.0 * M_PI;
 
     const GalaxyFolderSlot *sl =
         (nd->top_folder != NULL) ? g_hash_table_lookup(slot_map, nd->top_folder) : NULL;
 
     if (nd->kind == BT_NODE_FOLDER && nd->parent_idx < 0 && sl != NULL) {
-      /* Top-level folder = bright cluster star anchored on its spiral arm. */
+      /* Top-level folder = bright cluster star anchored on its spiral arm (z ~ 0). */
       r = sl->anchor_r;
       phi = sl->anchor_phi;
     } else if (sl != NULL) {
-      /* Scatter child around folder anchor with Gaussian sigma ~ sqrt(count), pulled to arm. */
-      gdouble sigma = CLAMP(0.045 + 0.011 * sqrt((gdouble)sl->count), 0.05, 0.16);
-      gdouble ax = sl->anchor_r * cos(sl->anchor_phi);
-      gdouble az = sl->anchor_r * sin(sl->anchor_phi);
-      gdouble gx = ax + galaxy_gauss(&rng) * sigma;
-      gdouble gz = az + galaxy_gauss(&rng) * sigma;
-      r = CLAMP(hypot(gx, gz), 0.06, 1.02);
-      phi = atan2(gz, gx);
-
-      /* Pull gently toward spiral arm centerline so arms remain legible. */
       gdouble arm_base = ((gdouble)sl->arm_idx / (gdouble)n_arms) * 2.0 * M_PI;
-      gdouble target_phi = arm_base + k_twist * log(1.0 + r / r0_twist);
-      gdouble dphi = fmod(target_phi - phi + 3.0 * M_PI, 2.0 * M_PI) - M_PI;
-      phi += dphi * 0.36;
+      r = CLAMP(sl->anchor_r * (1.0 + 0.18 * galaxy_gauss(&rng)), (gdouble)gp.r_min * 0.5, 1.04);
+      gdouble theta_arm = arm_base + log(MAX(r / (gdouble)gp.r_min, 1.0001)) / (gdouble)gp.pitch_b;
+      phi = theta_arm + (gdouble)gp.arm_spread * galaxy_gauss(&rng);
     } else if (nd->kind == BT_NODE_GHOST) {
-      /* Ghosts drift to the outer galactic rim. */
       guint arm = (guint)(galaxy_splitmix64(&rng) % n_arms);
-      r = 0.80 + galaxy_rand01(&rng) * 0.20;
+      r = 0.78 + galaxy_rand01(&rng) * 0.22;
       gdouble arm_base = ((gdouble)arm / (gdouble)n_arms) * 2.0 * M_PI;
-      phi = arm_base + k_twist * log(1.0 + r / r0_twist) + galaxy_gauss(&rng) * 0.24;
+      phi = arm_base + log(MAX(r / (gdouble)gp.r_min, 1.0001)) / (gdouble)gp.pitch_b +
+            (gdouble)gp.arm_spread * galaxy_gauss(&rng);
     } else {
-      /* Vault-root notes & sessions/tags settle into the warm inner bulge + inner arms. */
+      /* Vault-root notes & sessions/tags sit near the warm inner bulge + inner arms. */
       guint arm = (guint)(galaxy_splitmix64(&rng) % n_arms);
-      r = 0.08 + fabs(galaxy_gauss(&rng)) * 0.18;
-      r = CLAMP(r, 0.04, 0.45);
+      r = CLAMP(0.06 + fabs(galaxy_gauss(&rng)) * 0.16, 0.03, 0.42);
       gdouble arm_base = ((gdouble)arm / (gdouble)n_arms) * 2.0 * M_PI;
-      phi = arm_base + k_twist * log(1.0 + r / r0_twist) + galaxy_gauss(&rng) * 0.35;
+      phi = arm_base + log(MAX(r / (gdouble)gp.r_min, 1.0001)) / (gdouble)gp.pitch_b +
+            (gdouble)gp.arm_spread * galaxy_gauss(&rng);
     }
 
-    /* High-degree hubs drift inward toward the warm central bulge. */
-    if ((nd->kind == BT_NODE_HUMAN_NOTE || nd->kind == BT_NODE_AI_NOTE) && nd->degree >= 3u) {
-      gdouble pull = 1.0 / (1.0 + 0.16 * sqrt((gdouble)nd->degree));
-      r = MAX(r * pull, 0.05);
+    /* Hubness percentile in [0, 1]: hubs fall toward the warm bright core; ghosts/leaves drift out. */
+    if (nd->kind != BT_NODE_FOLDER) {
+      guint lo = 0, hi = n;
+      while (lo < hi) {
+        guint mid = lo + (hi - lo) / 2u;
+        if (deg_sorted[mid] < nd->degree)
+          lo = mid + 1u;
+        else
+          hi = mid;
+      }
+      gdouble hubness = (n > 1u && nd->degree > 0u) ? ((gdouble)lo / (gdouble)(n - 1u)) : 0.0;
+      if (nd->degree >= 2u && hubness > 0.0)
+        r = MAX(r * (1.0 - 0.6 * hubness * hubness), 0.03);
+      else if (nd->kind == BT_NODE_GHOST || nd->degree <= 1u)
+        r = MIN(r * 1.12, 1.08);
     }
 
-    /* Vertical axis (Y in Y-up camera): puffy bulge in center, thin disk outward,
-     * ~3% halo outliers, plus subtle rim warp. */
-    gdouble z_sig = h_disk + h_bulge * exp(-r / r_bulge);
-    gboolean is_halo = (galaxy_rand01(&rng) < 0.03);
-    if (is_halo)
-      z_sig = 0.28;
-    gdouble zy = galaxy_gauss(&rng) * z_sig;
-    if (nd->kind == BT_NODE_FOLDER && nd->parent_idx < 0)
-      zy *= 0.35; /* keep parent folder stars close to the galactic plane */
-    zy += warp_amp * (r * r) * sin(phi);
-    zy = CLAMP(zy, -0.55, 0.55);
+    /* Vertical height (Y in Y-up camera): puffy bulge in center, thin disk outward,
+     * 3% halo outliers (6x sigma), plus rim warp. */
+    gdouble sigma_z = (gdouble)gp.h_disk + (gdouble)gp.h_bulge * exp(-r / (gdouble)gp.r_bulge);
+    gdouble zy = galaxy_gauss(&rng) * sigma_z;
+    if (nd->kind == BT_NODE_FOLDER && nd->parent_idx < 0) {
+      zy *= 0.15; /* parent folder anchor sits near z ~ 0 */
+    } else if (galaxy_rand01(&rng) < (gdouble)gp.halo_frac) {
+      zy *= 6.0;
+    }
+    zy += (gdouble)gp.warp * (r * r) * sin(phi);
+    zy = CLAMP(zy, -0.58, 0.58);
 
-    out_pts[i].x = (float)CLAMP(r * cos(phi), -1.08, 1.08);
+    out_pts[i].x = (float)CLAMP(r * cos(phi), -1.12, 1.12);
     out_pts[i].y = (float)zy;
-    out_pts[i].z = (float)CLAMP(r * sin(phi), -1.08, 1.08);
+    out_pts[i].z = (float)CLAMP(r * sin(phi), -1.12, 1.12);
   }
 
-  /* 3. Light collision relax pass (3 bounded iterations) so cluster notes never stack identically. */
-  const float min_sep = 0.028f;
-  const float min_sep2 = min_sep * min_sep;
-  guint window = MIN(n, 24u);
-  for (int it = 0; it < 3; it++) {
+  /* 3. 3D spatial-hash collision relax (6 bounded passes) so no pair is closer than d_min. */
+  const float d_min = gp.d_min * 1.05f;
+  const float d_min2 = d_min * d_min;
+  const float inv_cell = 1.0f / d_min;
+  const guint buckets = MAX(n * 2u + 17u, 64u);
+  g_autofree gint *head = g_new(gint, buckets);
+  g_autofree gint *next = g_new(gint, n);
+
+  for (int it = 0; it < 6; it++) {
+    for (guint b = 0; b < buckets; b++)
+      head[b] = -1;
     for (guint i = 0; i < n; i++) {
-      for (guint k = 1; k < window && i + k < n; k++) {
-        guint j = i + k;
-        float dx = out_pts[j].x - out_pts[i].x;
-        float dy = out_pts[j].y - out_pts[i].y;
-        float dz = out_pts[j].z - out_pts[i].z;
-        float d2 = dx * dx + dy * dy + dz * dz;
-        if (d2 < min_sep2 && d2 > 1e-8f) {
-          float d = sqrtf(d2);
-          float push = 0.35f * (min_sep - d) / d;
-          out_pts[i].x -= dx * push;
-          out_pts[i].y -= dy * push * 0.5f;
-          out_pts[i].z -= dz * push;
-          out_pts[j].x += dx * push;
-          out_pts[j].y += dy * push * 0.5f;
-          out_pts[j].z += dz * push;
+      gint cx = (gint)floorf(out_pts[i].x * inv_cell);
+      gint cy = (gint)floorf(out_pts[i].y * inv_cell);
+      gint cz = (gint)floorf(out_pts[i].z * inv_cell);
+      guint b = galaxy_cell_hash(cx, cy, cz, buckets);
+      next[i] = head[b];
+      head[b] = (gint)i;
+    }
+    gboolean moved = FALSE;
+    for (guint i = 0; i < n; i++) {
+      gint cx = (gint)floorf(out_pts[i].x * inv_cell);
+      gint cy = (gint)floorf(out_pts[i].y * inv_cell);
+      gint cz = (gint)floorf(out_pts[i].z * inv_cell);
+      for (gint ox = -1; ox <= 1; ox++) {
+        for (gint oy = -1; oy <= 1; oy++) {
+          for (gint oz = -1; oz <= 1; oz++) {
+            guint b = galaxy_cell_hash(cx + ox, cy + oy, cz + oz, buckets);
+            for (gint j = head[b]; j >= 0; j = next[j]) {
+              if ((guint)j <= i)
+                continue;
+              float dx = out_pts[j].x - out_pts[i].x;
+              float dy = out_pts[j].y - out_pts[i].y;
+              float dz = out_pts[j].z - out_pts[i].z;
+              float d2 = dx * dx + dy * dy + dz * dz;
+              if (d2 < d_min2) {
+                float d = sqrtf(d2);
+                if (d < 1e-6f) {
+                  float ang = (float)((i * 2654435761u + (guint)j * 31u) & 1023u) * (6.283185f / 1024.0f);
+                  dx = cosf(ang) * d_min;
+                  dy = 0.15f * d_min;
+                  dz = sinf(ang) * d_min;
+                  d = sqrtf(dx * dx + dy * dy + dz * dz);
+                }
+                float push = 0.55f * (d_min - d) / d;
+                out_pts[i].x -= dx * push;
+                out_pts[i].y -= dy * push;
+                out_pts[i].z -= dz * push;
+                out_pts[j].x += dx * push;
+                out_pts[j].y += dy * push;
+                out_pts[j].z += dz * push;
+                moved = TRUE;
+              }
+            }
+          }
         }
       }
     }
+    if (!moved)
+      break;
   }
 
   g_hash_table_destroy(slot_map);

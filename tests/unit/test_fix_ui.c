@@ -389,9 +389,9 @@ static void test_build_stamp(void **state)
   const gchar *stamp = bt_app_build_stamp();
   assert_non_null(stamp);
   assert_true(stamp[0] != '\0');
-  /* Expected: "<short-hash>[-dirty] · YYYY-MM-DD HH:MM" (or "nogit · ..."). */
+  /* Expected: "<short-hash>[-dirty] · YYYY-MM-DD HH:MM[:SS]" (or "nogit · ..."). */
   gboolean matched = g_regex_match_simple(
-      "^([0-9a-f]{7,12}(-dirty)?|nogit) \\x{00B7} [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}$",
+      "^([0-9a-f]{7,12}(-dirty)?|nogit) \\x{00B7} [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}(:[0-9]{2})?$",
       stamp, G_REGEX_DEFAULT, G_REGEX_MATCH_DEFAULT);
   if (!matched)
     fail_msg("Build stamp '%s' did not match expected format", stamp);

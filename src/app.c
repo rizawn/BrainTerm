@@ -93,6 +93,8 @@ struct BtApp {
   guint capture_settle_left;
   gboolean capture_applied;
   gboolean capture_failed;
+  gchar *screenshot_out;
+  guint screenshot_settle_left;
   gboolean fail_next_save_for_test;
   gboolean confirm_external_urls;
   gboolean confirm_external_urls_corrupt_pending_log;
@@ -272,20 +274,41 @@ static gboolean load_saved_graph_bool(const gchar *key, gboolean def_val)
   return val;
 }
 
+static gboolean parse_graph_mode_str(const gchar *s, BtGraphMode *out)
+{
+  if (s == NULL || s[0] == '\0')
+    return FALSE;
+  if (g_ascii_strcasecmp(s, "2d") == 0) {
+    if (out) *out = BT_GRAPH_MODE_2D;
+    return TRUE;
+  }
+  if (g_ascii_strcasecmp(s, "3d") == 0) {
+    if (out) *out = BT_GRAPH_MODE_3D;
+    return TRUE;
+  }
+  if (g_ascii_strcasecmp(s, "galaxy") == 0) {
+    if (out) *out = BT_GRAPH_MODE_GALAXY;
+    return TRUE;
+  }
+  if (g_ascii_strcasecmp(s, "timeline") == 0) {
+    if (out) *out = BT_GRAPH_MODE_TIMELINE;
+    return TRUE;
+  }
+  return FALSE;
+}
+
 static BtGraphMode load_saved_graph_mode(void)
 {
+  BtGraphMode env_m = BT_GRAPH_MODE_2D;
+  if (parse_graph_mode_str(g_getenv("BRAINTERM_VIEW"), &env_m))
+    return env_m;
   gchar *path = bt_app_state_file_path();
   GKeyFile *kf = g_key_file_new();
   BtGraphMode mode = BT_GRAPH_MODE_2D;
   if (g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL)) {
     gchar *v = g_key_file_get_string(kf, "graph", "mode", NULL);
     if (v != NULL) {
-      if (g_ascii_strcasecmp(v, "3d") == 0)
-        mode = BT_GRAPH_MODE_3D;
-      else if (g_ascii_strcasecmp(v, "galaxy") == 0)
-        mode = BT_GRAPH_MODE_GALAXY;
-      else if (g_ascii_strcasecmp(v, "timeline") == 0)
-        mode = BT_GRAPH_MODE_TIMELINE;
+      parse_graph_mode_str(v, &mode);
       g_free(v);
     }
   }
@@ -3246,6 +3269,150 @@ static gboolean capture_widget_png(GtkWindow *win, GtkWidget *widget, const gcha
   return ok;
 }
 
+static gboolean on_screenshot_settle_tick(GtkWidget *w, GdkFrameClock *clock, gpointer ud)
+{
+  (void)w; (void)clock;
+  BtApp *app = ud;
+  if (app->screenshot_settle_left > 0u) {
+    app->screenshot_settle_left--;
+    gtk_widget_queue_draw(bt_graphview_widget(app->graphview));
+    return G_SOURCE_CONTINUE;
+  }
+  GError *err = NULL;
+  if (!capture_widget_png(app->window, bt_graphview_widget(app->graphview),
+                          app->screenshot_out, &err)) {
+    g_printerr("BT_SCREENSHOT ERROR: %s\n", err ? err->message : "unknown");
+    g_clear_error(&err);
+    app->capture_failed = TRUE;
+  } else {
+    BtGraphMode m = bt_graphview_get_mode(app->graphview);
+    const gchar *ms = (m == BT_GRAPH_MODE_3D)       ? "3d"
+                      : (m == BT_GRAPH_MODE_GALAXY)   ? "galaxy"
+                      : (m == BT_GRAPH_MODE_TIMELINE) ? "timeline"
+                                                      : "2d";
+    printf("BT_SCREENSHOT ok mode=%s build=\"%s\" path=%s\n",
+           ms, BT_BUILD_STAMP, app->screenshot_out);
+    fflush(stdout);
+  }
+  g_application_quit(G_APPLICATION(app->adw_app));
+  return G_SOURCE_REMOVE;
+}
+
+static gboolean on_screenshot_poll(gpointer ud)
+{
+  BtApp *app = ud;
+  if (!bt_graphview_is_screenshot_ready(app->graphview))
+    return G_SOURCE_CONTINUE;
+  bt_graphview_prepare_screenshot(app->graphview);
+  app->screenshot_settle_left = 4u;
+  gtk_widget_add_tick_callback(bt_graphview_widget(app->graphview),
+                               on_screenshot_settle_tick, app, NULL);
+  return G_SOURCE_REMOVE;
+}
+
+static int run_dump_layout_cli(const gchar *mode_name, const gchar *vault_arg)
+{
+  gchar *vpath = vault_arg ? g_strdup(vault_arg) : bt_app_load_last_vault();
+  if (vpath == NULL || vpath[0] == '\0') {
+    g_printerr("dump-layout: no --vault provided and no saved last vault\n");
+    g_free(vpath);
+    return 1;
+  }
+  GError *err = NULL;
+  BtVault *v = vault_open(vpath, NULL, &err);
+  if (v == NULL) {
+    g_printerr("dump-layout: cannot open vault '%s': %s\n", vpath, err ? err->message : "err");
+    g_clear_error(&err);
+    g_free(vpath);
+    return 1;
+  }
+  BtIndex *idx = bt_index_open(vault_root(v), NULL, NULL);
+
+  BtGraph *g = bt_graph_build(v, idx, NULL);
+  if (g == NULL || g->nodes == NULL || g->nodes->len == 0) {
+    g_printerr("dump-layout: empty graph\n");
+    if (g != NULL) bt_graph_free(g);
+    if (idx != NULL) bt_index_close(idx);
+    vault_free(v);
+    g_free(vpath);
+    return 1;
+  }
+  guint n = g->nodes->len;
+  g_autofree BtGraphVec3 *pts_a = g_new0(BtGraphVec3, n);
+  g_autofree BtGraphVec3 *pts_b = g_new0(BtGraphVec3, n);
+  gboolean is_gal = (g_ascii_strcasecmp(mode_name, "galaxy") == 0);
+  if (is_gal) {
+    bt_graph_compute_galaxy_layout(g, 4u, pts_a, n);
+    bt_graph_compute_galaxy_layout(g, 4u, pts_b, n);
+  } else {
+    bt_graph_layout(g, 20);
+    bt_graph_compute_3d_layout(g, pts_a, n);
+    bt_graph_compute_3d_layout(g, pts_b, n);
+  }
+
+  gdouble max_det_diff = 0.0;
+  guint folder_n = 0u, inner_n = 0u, outer_n = 0u;
+  gdouble inner_sum = 0.0, inner_sq = 0.0;
+  gdouble outer_sum = 0.0, outer_sq = 0.0;
+  for (guint i = 0; i < n; i++) {
+    const BtGraphNode *nd = g_ptr_array_index(g->nodes, i);
+    if (nd->kind == BT_NODE_FOLDER)
+      folder_n++;
+    gdouble dd = fabs((gdouble)pts_a[i].x - (gdouble)pts_b[i].x) +
+                 fabs((gdouble)pts_a[i].y - (gdouble)pts_b[i].y) +
+                 fabs((gdouble)pts_a[i].z - (gdouble)pts_b[i].z);
+    if (dd > max_det_diff)
+      max_det_diff = dd;
+    gdouble r = hypot((gdouble)pts_a[i].x, (gdouble)pts_a[i].z);
+    gdouble zy = (gdouble)pts_a[i].y;
+    if (r < 0.2) {
+      inner_sum += zy;
+      inner_sq += zy * zy;
+      inner_n++;
+    } else if (r > 0.7) {
+      outer_sum += zy;
+      outer_sq += zy * zy;
+      outer_n++;
+    }
+  }
+  gdouble std_in = (inner_n > 1u)
+      ? sqrt(MAX(inner_sq / (gdouble)inner_n - pow(inner_sum / (gdouble)inner_n, 2.0), 0.0))
+      : 0.0;
+  gdouble std_out = (outer_n > 1u)
+      ? sqrt(MAX(outer_sq / (gdouble)outer_n - pow(outer_sum / (gdouble)outer_n, 2.0), 0.0))
+      : 0.0;
+
+  gdouble min_d2 = 1e9;
+  for (guint i = 0; i < n; i++) {
+    for (guint j = i + 1u; j < n; j++) {
+      gdouble dx = (gdouble)pts_a[j].x - (gdouble)pts_a[i].x;
+      gdouble dy = (gdouble)pts_a[j].y - (gdouble)pts_a[i].y;
+      gdouble dz = (gdouble)pts_a[j].z - (gdouble)pts_a[i].z;
+      gdouble d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 < min_d2)
+        min_d2 = d2;
+    }
+  }
+  BtGalaxyParams gp;
+  bt_galaxy_default_params(&gp);
+  gdouble min_d = (n > 1u) ? sqrt(min_d2) : 0.0;
+
+  printf("BT_DUMP_LAYOUT mode=%s build=\"%s\" vault=\"%s\"\n", mode_name, BT_BUILD_STAMP, vault_root(v));
+  printf("  nodes=%u folders=%u deterministic=%s (max_diff=%.2e)\n",
+         n, folder_n, (max_det_diff < 1e-6) ? "PASS" : "FAIL", max_det_diff);
+  printf("  z_stddev_inner(r<0.2, n=%u)=%.4f  z_stddev_outer(r>0.7, n=%u)=%.4f  ratio=%.2fx\n",
+         inner_n, std_in, outer_n, std_out, (std_out > 1e-6) ? (std_in / std_out) : 0.0);
+  printf("  min_pair_dist=%.5f (threshold d_min*0.9=%.5f -> %s)\n",
+         min_d, (gdouble)gp.d_min * 0.9, (min_d >= (gdouble)gp.d_min * 0.9) ? "PASS" : "FAIL");
+  fflush(stdout);
+
+  bt_graph_free(g);
+  if (idx != NULL) bt_index_close(idx);
+  vault_free(v);
+  g_free(vpath);
+  return 0;
+}
+
 static void compute_timing_stats(const GArray *arr, gdouble *out_avg, gdouble *out_p95,
                                  gdouble *out_max)
 {
@@ -3824,6 +3991,10 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
     bt_graphview_set_show_tags(app->graphview, load_saved_graph_bool("show_tags", FALSE));
     bt_graphview_set_show_ghosts(app->graphview, load_saved_graph_bool("show_ghosts", FALSE));
     bt_graphview_set_mode(app->graphview, load_saved_graph_mode());
+  } else {
+    BtGraphMode env_m = BT_GRAPH_MODE_2D;
+    if (parse_graph_mode_str(g_getenv("BRAINTERM_VIEW"), &env_m))
+      bt_graphview_set_mode(app->graphview, env_m);
   }
   bt_graphview_set_prefs_cb(app->graphview, on_graph_prefs_changed, app);
   if (app->graph_debug)
@@ -3845,7 +4016,11 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
   const gchar *stack_page = (g_strcmp0(saved_page, "sessions") == 0) ? "sessions" : "editor";
   adw_view_stack_set_visible_child_name(app->view_stack, stack_page);
 
-  app->graph_visible = (app->smoke_test || app->capture_dir != NULL || app_is_ro_bench(app)) ? TRUE : load_saved_graph_visible();
+  gboolean env_view_set = parse_graph_mode_str(g_getenv("BRAINTERM_VIEW"), NULL);
+  app->graph_visible = (app->smoke_test || app->capture_dir != NULL || app->screenshot_out != NULL ||
+                        env_view_set || app_is_ro_bench(app))
+                           ? TRUE
+                           : load_saved_graph_visible();
   if (g_strcmp0(saved_page, "graph") == 0)
     app->graph_visible = TRUE;
 
@@ -4020,8 +4195,9 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
   g_free(saved_page);
   g_free(initial);
 
-  if (app->capture_dir != NULL && app->capture_w > 0 && app->capture_w <= 1100) {
-    /* Compact capture size (e.g. 1000x700): let graph widget fill the capture viewport. */
+  if ((app->capture_dir != NULL && app->capture_w > 0 && app->capture_w <= 1100) ||
+      app->screenshot_out != NULL) {
+    /* Let graph widget fill the capture viewport cleanly. */
     adw_overlay_split_view_set_show_sidebar(app->split_view, FALSE);
     gtk_widget_set_visible(left_card, FALSE);
     gtk_widget_set_visible(app->term_card, FALSE);
@@ -4030,6 +4206,8 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
     g_timeout_add(250, on_smoke_idle, app);
   else if (app->smoke_test)
     ; /* Unit test mode via bt_app_prepare_ui_for_test */
+  else if (app->screenshot_out != NULL)
+    g_timeout_add(60, on_screenshot_poll, app);
   else if (app->capture_dir != NULL)
     g_timeout_add(60, on_capture_poll, app);
   else if (app->verify_l2_dir != NULL)
@@ -4058,6 +4236,17 @@ static gint on_handle_local_options(GApplication *gapp, GVariantDict *opts, gpoi
   if (g_variant_dict_lookup(opts, "vault", "s", &vault)) {
     g_free(app->cli_vault);
     app->cli_vault = vault;
+  }
+  gchar *dump_mode = NULL;
+  if (g_variant_dict_lookup(opts, "dump-layout", "s", &dump_mode)) {
+    int rc = run_dump_layout_cli(dump_mode, app->cli_vault);
+    g_free(dump_mode);
+    return rc;
+  }
+  gchar *ss_out = NULL;
+  if (g_variant_dict_lookup(opts, "graph-screenshot", "s", &ss_out)) {
+    g_free(app->screenshot_out);
+    app->screenshot_out = ss_out;
   }
   if (g_variant_dict_contains(opts, "smoke-test"))
     app->smoke_test = TRUE;
@@ -4160,6 +4349,8 @@ BtApp *bt_app_new(void)
     {"smoke-test", 0, 0, G_OPTION_ARG_NONE, NULL, "Open UI, verify startup, and exit", NULL},
     {"graph-debug", 0, 0, G_OPTION_ARG_NONE, NULL, "Show Brain Graph frame-time debug overlay", NULL},
     {"graph-capture", 0, 0, G_OPTION_ARG_STRING, NULL, "Capture graph PNG + JSON evidence to DIR and exit", "DIR"},
+    {"graph-screenshot", 0, 0, G_OPTION_ARG_STRING, NULL, "Render graph widget to PNG file and exit", "OUT.PNG"},
+    {"dump-layout", 0, 0, G_OPTION_ARG_STRING, NULL, "Compute layout stats (galaxy|3d) and exit", "MODE"},
     {"graph-state", 0, 0, G_OPTION_ARG_STRING, NULL, "Named capture state (default-fit|hover-hub|hover-small|selected|zoom2x|3d|reduce-motion-on|reduce-motion-off|all)", "NAME"},
     {"graph-size", 0, 0, G_OPTION_ARG_STRING, NULL, "Window size WxH for --graph-capture (e.g. 1000x700 or 1920x1080)", "WxH"},
     {"selftest-links", 0, 0, G_OPTION_ARG_STRING, NULL, "Run read-only link resolver self-test on DIR and exit", "DIR"},
@@ -4217,6 +4408,7 @@ void bt_app_free(BtApp *app)
   g_free(app->cli_vault);
   g_free(app->capture_dir);
   g_free(app->capture_state);
+  g_free(app->screenshot_out);
   g_free(app->verify_l2_dir);
   if (app->verify_l2_frame_ms != NULL)
     g_array_free(app->verify_l2_frame_ms, TRUE);

@@ -48,6 +48,7 @@ typedef struct {
   gdouble mouse_x;
   gdouble mouse_y;
   gdouble spread_str;      /* [0..1] local fisheye hover spread in 3D/Galaxy */
+  gdouble gal_time;        /* differential galactic rotation clock (seconds) */
 } BtGraphRenderState;
 
 typedef struct BtGraphRenderer BtGraphRenderer;

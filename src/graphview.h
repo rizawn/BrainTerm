@@ -52,6 +52,8 @@ gboolean bt_graphview_get_debug_overlay(const BtGraphView *gv);
 void bt_graphview_toggle_debug_overlay(BtGraphView *gv);
 gboolean bt_graphview_is_capture_ready(const BtGraphView *gv, const BtGraphCaptureSpec *spec);
 void bt_graphview_apply_capture_state(BtGraphView *gv, const BtGraphCaptureSpec *spec);
+gboolean bt_graphview_is_screenshot_ready(const BtGraphView *gv);
+void bt_graphview_prepare_screenshot(BtGraphView *gv);
 gboolean bt_graphview_capture_evidence(BtGraphView *gv, GtkWindow *win, const gchar *out_dir,
                                        const BtGraphCaptureSpec *spec, const gchar *build_stamp,
                                        GError **error);

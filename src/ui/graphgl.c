@@ -17,7 +17,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#define BT_GL_DUST_MAX    128u
+#define BT_GL_DUST_MAX    960u
 #define BT_GL_LABEL_CAP   128u
 #define BT_GL_ATLAS_MAX_W 2048
 #define BT_GL_ATLAS_MAX_H 1024
@@ -98,9 +98,11 @@ struct BtGraphGL {
   GLint u_edge_foc, u_edge_sel, u_edge_hf, u_edge_segs, u_edge_curved;
   GLint u_edge_ba, u_edge_hw, u_edge_dim_col, u_edge_act_col;
   GLint u_edge_mode3d, u_edge_mvp, u_edge_pulse_en, u_edge_pulse_ph, u_edge_show_links;
+  GLint u_edge_gal_time;
   GLint u_node_vp, u_node_pan, u_node_zoom, u_node_scale, u_node_bt;
   GLint u_node_has_foc, u_node_hf, u_node_hq, u_node_glow_col, u_node_s2_col;
   GLint u_node_mode3d, u_node_mvp, u_node_mouse, u_node_spread, u_node_dim_alpha;
+  GLint u_node_gal_time;
   GLint u_lbl_vp, u_lbl_atlas, u_lbl_tp, u_lbl_ts, u_lbl_pbg, u_lbl_bg;
   GLint u_ext_scene, u_ext_thresh;
   GLint u_blur_tex, u_blur_dir;
@@ -123,6 +125,11 @@ struct BtGraphGL {
   guint node_count;
   guint node_state_cap;
   float *node_state_scratch;
+  NodeInst *node_static_src;
+  NodeInst *node_static_sorted;
+  float *node_state_sorted;
+  BtGraphVec3 *node3d_sorted;
+  gboolean last_drawn_sorted;
 
   AtlasSlot *atlas_slots;
   guint atlas_slot_count;
@@ -604,7 +611,22 @@ static void upload_graph_buffers(BtGraphGL *gl)
   }
 
   guint nn = g->nodes->len;
-  g_autofree NodeInst *nbuf = g_new(NodeInst, nn);
+  if (nn > gl->node_state_cap) {
+    g_free(gl->node_state_scratch);
+    g_free(gl->node_static_src);
+    g_free(gl->node_static_sorted);
+    g_free(gl->node_state_sorted);
+    g_free(gl->node3d_sorted);
+    gl->node_state_scratch = g_new0(float, nn);
+    gl->node_static_src = g_new0(NodeInst, nn);
+    gl->node_static_sorted = g_new0(NodeInst, nn);
+    gl->node_state_sorted = g_new0(float, nn);
+    gl->node3d_sorted = g_new0(BtGraphVec3, nn);
+    gl->node_state_cap = nn;
+  } else {
+    memset(gl->node_state_scratch, 0, nn * sizeof(float));
+  }
+  NodeInst *nbuf = gl->node_static_src;
   for (guint i = 0; i < nn; i++) {
     const BtGraphNode *nd = g_ptr_array_index(g->nodes, i);
     float cr = 0.0f, cg = 0.0f, cb = 0.0f;
@@ -620,15 +642,8 @@ static void upload_graph_buffers(BtGraphGL *gl)
     nbuf[i].vis = nd->visible ? 1.0f : 0.0f;
   }
   glBindBuffer(GL_ARRAY_BUFFER, gl->vbo_node_static);
-  glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(nn * sizeof(NodeInst)), nbuf, GL_STATIC_DRAW);
-
-  if (nn > gl->node_state_cap) {
-    g_free(gl->node_state_scratch);
-    gl->node_state_scratch = g_new0(float, nn);
-    gl->node_state_cap = nn;
-  } else {
-    memset(gl->node_state_scratch, 0, nn * sizeof(float));
-  }
+  glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(nn * sizeof(NodeInst)), nbuf, GL_DYNAMIC_DRAW);
+  gl->last_drawn_sorted = FALSE;
   if (nn > gl->lbl_scratch_cap) {
     g_free(gl->lbl_cands);
     g_free(gl->obs_scratch);
@@ -696,6 +711,53 @@ static void upload_node_states(BtGraphGL *gl, const BtGraphRenderState *st)
   glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)(gl->node_count * sizeof(float)),
                   gl->node_state_scratch);
   glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
+typedef struct {
+  guint idx;
+  float depth;
+} NodeDepthKey;
+
+static gint cmp_depth_desc(const void *a, const void *b)
+{
+  const NodeDepthKey *da = a;
+  const NodeDepthKey *db = b;
+  if (da->depth > db->depth)
+    return -1;
+  if (da->depth < db->depth)
+    return 1;
+  return (da->idx > db->idx) - (da->idx < db->idx);
+}
+
+static void upload_depth_sorted_nodes(BtGraphGL *gl, const float mvp[16], gdouble gal_time)
+{
+  guint n = gl->node_count;
+  if (n == 0u || gl->node_static_src == NULL || gl->pts3d == NULL || gl->pts3d_count == 0u)
+    return;
+  g_autofree NodeDepthKey *keys = g_new(NodeDepthKey, n);
+  for (guint i = 0; i < n; i++) {
+    BtGraphVec3 p = (i < gl->pts3d_count) ? gl->pts3d[i] : (BtGraphVec3){0.0f, 0.0f, 0.0f};
+    if (fabs(gal_time) > 1e-6)
+      bt_galaxy_apply_diff_rot(&p, gal_time, &p);
+    float cw = mvp[3] * p.x + mvp[7] * p.y + mvp[11] * p.z + mvp[15];
+    keys[i].idx = i;
+    keys[i].depth = cw;
+  }
+  qsort(keys, n, sizeof(NodeDepthKey), cmp_depth_desc);
+  for (guint i = 0; i < n; i++) {
+    guint s = keys[i].idx;
+    gl->node_static_sorted[i] = gl->node_static_src[s];
+    gl->node_state_sorted[i] = gl->node_state_scratch[s];
+    gl->node3d_sorted[i] = (s < gl->pts3d_count) ? gl->pts3d[s] : (BtGraphVec3){0.0f, 0.0f, 0.0f};
+  }
+  glBindBuffer(GL_ARRAY_BUFFER, gl->vbo_node_static);
+  glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)(n * sizeof(NodeInst)), gl->node_static_sorted);
+  glBindBuffer(GL_ARRAY_BUFFER, gl->vbo_node_state);
+  glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)(n * sizeof(float)), gl->node_state_sorted);
+  glBindBuffer(GL_ARRAY_BUFFER, gl->vbo_node3d);
+  glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)(n * sizeof(BtGraphVec3)), gl->node3d_sorted);
+  glBindBuffer(GL_ARRAY_BUFFER, 0);
+  gl->last_drawn_sorted = TRUE;
 }
 
 /* ---------------------------------------------------------- rendering -- */
@@ -835,11 +897,24 @@ void bt_graph_gl_render_state(BtGraphGL *gl, const BtGraphRenderState *st)
       glUniform1i(gl->u_edge_pulse_en, (st->pulse_enabled && !st->reduce_motion) ? 1 : 0);
       glUniform1f(gl->u_edge_pulse_ph, (float)st->pulse_phase);
       glUniform1i(gl->u_edge_show_links, st->show_links ? 1 : 0);
+      glUniform1f(gl->u_edge_gal_time, is_galaxy ? (float)st->gal_time : 0.0f);
       glBindVertexArray(gl->vao_edge);
       glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, (segs + 1) * 2, (GLsizei)gl->edge_count);
     }
 
-    /* Pass 4: instanced glowing nodes (normal alpha blending, clamped brightness) */
+    /* Pass 4: instanced glowing nodes (back-to-front sorted in 3D/Galaxy, normal alpha) */
+    if (mode_3d) {
+      upload_depth_sorted_nodes(gl, mvp, is_galaxy ? st->gal_time : 0.0);
+    } else if (gl->last_drawn_sorted && gl->node_static_src != NULL) {
+      glBindBuffer(GL_ARRAY_BUFFER, gl->vbo_node_static);
+      glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)(gl->node_count * sizeof(NodeInst)),
+                      gl->node_static_src);
+      glBindBuffer(GL_ARRAY_BUFFER, gl->vbo_node_state);
+      glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)(gl->node_count * sizeof(float)),
+                      gl->node_state_scratch);
+      glBindBuffer(GL_ARRAY_BUFFER, 0);
+      gl->last_drawn_sorted = FALSE;
+    }
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glUseProgram(gl->prog_node);
     glUniform2f(gl->u_node_vp, vp_w, vp_h);
@@ -859,6 +934,7 @@ void bt_graph_gl_render_state(BtGraphGL *gl, const BtGraphRenderState *st)
     glUniform2f(gl->u_node_mouse, (float)st->mouse_x, (float)st->mouse_y);
     glUniform1f(gl->u_node_spread, (mode_3d && !st->reduce_motion) ? (float)st->spread_str : 0.0f);
     glUniform1f(gl->u_node_dim_alpha, st->focus_isolated ? 0.08f : 0.25f);
+    glUniform1f(gl->u_node_gal_time, is_galaxy ? (float)st->gal_time : 0.0f);
     glBindVertexArray(gl->vao_node);
     glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, (GLsizei)gl->node_count);
   }
@@ -934,6 +1010,8 @@ void bt_graph_gl_render_state(BtGraphGL *gl, const BtGraphRenderState *st)
           continue;
         BtGraphVec3 pt = {gl->pts3d[i].x * bt_eased, gl->pts3d[i].y * bt_eased,
                           gl->pts3d[i].z * bt_eased};
+        if (is_galaxy && fabs(st->gal_time) > 1e-6)
+          bt_galaxy_apply_diff_rot(&pt, st->gal_time, &pt);
         gdouble psx = 0.0, psy = 0.0, pw = 0.0;
         if (!bt_graph_project_3d(mvp, &pt, (gdouble)vp_w, (gdouble)vp_h, &psx, &psy, &pw))
           continue;
@@ -1172,6 +1250,7 @@ static void on_realize(GtkWidget *widget, gpointer ud)
   gl->u_edge_pulse_en = glGetUniformLocation(gl->prog_edge, "u_pulse_enabled");
   gl->u_edge_pulse_ph = glGetUniformLocation(gl->prog_edge, "u_pulse_phase");
   gl->u_edge_show_links = glGetUniformLocation(gl->prog_edge, "u_show_links");
+  gl->u_edge_gal_time = glGetUniformLocation(gl->prog_edge, "u_gal_time");
 
   gl->u_node_vp = glGetUniformLocation(gl->prog_node, "u_viewport");
   gl->u_node_pan = glGetUniformLocation(gl->prog_node, "u_pan");
@@ -1188,6 +1267,7 @@ static void on_realize(GtkWidget *widget, gpointer ud)
   gl->u_node_mouse = glGetUniformLocation(gl->prog_node, "u_mouse_px");
   gl->u_node_spread = glGetUniformLocation(gl->prog_node, "u_spread_str");
   gl->u_node_dim_alpha = glGetUniformLocation(gl->prog_node, "u_dim_alpha");
+  gl->u_node_gal_time = glGetUniformLocation(gl->prog_node, "u_gal_time");
 
   gl->u_lbl_vp = glGetUniformLocation(gl->prog_label, "u_viewport");
   gl->u_lbl_atlas = glGetUniformLocation(gl->prog_label, "u_atlas");
@@ -1275,6 +1355,10 @@ void bt_graph_gl_free(BtGraphGL *gl)
     return;
   g_free(gl->pts3d);
   g_free(gl->node_state_scratch);
+  g_free(gl->node_static_src);
+  g_free(gl->node_static_sorted);
+  g_free(gl->node_state_sorted);
+  g_free(gl->node3d_sorted);
   g_free(gl->atlas_slots);
   g_free(gl->lbl_cands);
   g_free(gl->obs_scratch);

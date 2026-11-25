@@ -16,6 +16,7 @@ uniform mat4 u_mvp;
 uniform vec2 u_mouse_px;
 uniform float u_spread_str;
 uniform float u_dim_alpha;
+uniform float u_gal_time;
 
 out vec2 v_local;
 out vec3 v_color;
@@ -45,7 +46,14 @@ void main()
   float depth_t = 0.0;
 
   if (u_mode_3d != 0) {
-    vec4 clip = u_mvp * vec4(a_pos3d * bt, 1.0);
+    vec3 p3 = a_pos3d * bt;
+    if (abs(u_gal_time) > 1e-5) {
+      float rr = length(p3.xz);
+      float ang = u_gal_time * (0.08 / (1.0 + rr / 0.3));
+      float ca = cos(ang), sa = sin(ang);
+      p3 = vec3(p3.x * ca - p3.z * sa, p3.y, p3.x * sa + p3.z * ca);
+    }
+    vec4 clip = u_mvp * vec4(p3, 1.0);
     if (clip.w <= 0.15) {
       gl_Position = vec4(-2.0, -2.0, 0.0, 1.0);
       v_local = vec2(0.0); v_color = vec3(0.0); v_kind = 0.0;

@@ -34,7 +34,7 @@ def main() -> int:
     if short_hash != "nogit" and dirty:
         short_hash += "-dirty"
 
-    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     stamp = f"{short_hash} · {now_str}"
 
     content = (

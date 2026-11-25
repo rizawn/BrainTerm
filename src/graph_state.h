@@ -147,8 +147,25 @@ void bt_graph_compute_3d_layout(const BtGraph *g, BtGraphVec3 *out_pts, guint ma
 /* Deterministic 3D Andromeda spiral-disk Galaxy layout (pure C, GTK-free).
  * arms: 3..5 logarithmic spiral arms (0 -> default 4).
  * Vertical height (y) has puffy core bulge, thin disk, 3% halo, and subtle rim warp. */
+typedef struct {
+  int arms;
+  float pitch_b;
+  float arm_spread;
+  float r_min;
+  float r_bulge;
+  float h_disk;
+  float h_bulge;
+  float halo_frac;
+  float warp;
+  float d_min;
+} BtGalaxyParams;
+
+void bt_galaxy_default_params(BtGalaxyParams *p);
 void bt_graph_compute_galaxy_layout(const BtGraph *g, guint arms, BtGraphVec3 *out_pts,
                                     guint max_pts);
+
+/* Applies differential galactic rotation omega(r) = 0.08 / (1 + r / 0.3) in the XZ plane. */
+void bt_galaxy_apply_diff_rot(const BtGraphVec3 *pt, gdouble gal_time, BtGraphVec3 *out);
 
 /* Builds column-major 4x4 perspective orbit MVP matrix for 3D graph mode. */
 void bt_graph_build_orbit_mvp(gdouble yaw, gdouble pitch, gdouble dist, gdouble aspect,

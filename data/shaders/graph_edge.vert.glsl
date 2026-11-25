@@ -22,6 +22,7 @@ uniform mat4 u_mvp;
 uniform int u_pulse_enabled;
 uniform float u_pulse_phase;
 uniform int u_show_links;
+uniform float u_gal_time;
 
 out float v_cross;
 out float v_t;
@@ -36,8 +37,20 @@ void main()
   float depth_fade = 1.0;
 
   if (u_mode_3d != 0) {
-    vec4 ca = u_mvp * vec4(a_a3d * bt, 1.0);
-    vec4 cb = u_mvp * vec4(a_b3d * bt, 1.0);
+    vec3 pa = a_a3d * bt;
+    vec3 pb = a_b3d * bt;
+    if (abs(u_gal_time) > 1e-5) {
+      float ra = length(pa.xz);
+      float aa = u_gal_time * (0.08 / (1.0 + ra / 0.3));
+      float caa = cos(aa), saa = sin(aa);
+      pa = vec3(pa.x * caa - pa.z * saa, pa.y, pa.x * saa + pa.z * caa);
+      float rb = length(pb.xz);
+      float ab = u_gal_time * (0.08 / (1.0 + rb / 0.3));
+      float cab = cos(ab), sab = sin(ab);
+      pb = vec3(pb.x * cab - pb.z * sab, pb.y, pb.x * sab + pb.z * cab);
+    }
+    vec4 ca = u_mvp * vec4(pa, 1.0);
+    vec4 cb = u_mvp * vec4(pb, 1.0);
     if (ca.w <= 0.15 || cb.w <= 0.15) {
       gl_Position = vec4(-2.0, -2.0, 0.0, 1.0);
       v_cross = 0.0; v_t = 0.0; v_color = vec3(0.0); v_alpha = 0.0; v_pulse = 0.0;
