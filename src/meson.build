@@ -21,6 +21,7 @@ core_sources = files(
   'watcher.c',
   'organizer.c',
   'graph.c',
+  'graphlayout.c',
   'graph_state.c',
   'graph_palette.c',
   'graph_timeline.c',

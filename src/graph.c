@@ -1,5 +1,6 @@
 /* graph.c — Brain Graph model + deterministic spine/brainstem/cortex layout. */
 #include "graph.h"
+#include "graphlayout.h"
 #include "linkresolve.h"
 #include "noteutil.h"
 
@@ -434,105 +435,13 @@ void bt_graph_recompute_visibility(BtGraph *g, gboolean show_tags, gboolean show
 void bt_graph_layout(BtGraph *g, guint relax_iters)
 {
   g_return_if_fail(g != NULL);
-  guint n = g->nodes->len;
-  if (n == 0)
+  if (g->nodes == NULL || g->nodes->len == 0)
     return;
-
-  /* 1. Forced Brainstem (bottom band y = +260) and Forced Spine (center x = 0). */
-  guint stem_count = 0;
-  for (guint i = 0; i < n; i++) {
-    BtGraphNode *nd = g_ptr_array_index(g->nodes, i);
-    if (nd->kind == BT_NODE_SESSION || nd->kind == BT_NODE_IMPORT_ROOT)
-      stem_count++;
-  }
-  guint stem_i = 0;
-  guint spine_i = 0;
-
-  for (guint i = 0; i < n; i++) {
-    BtGraphNode *nd = g_ptr_array_index(g->nodes, i);
-    if (nd->kind == BT_NODE_SESSION || nd->kind == BT_NODE_IMPORT_ROOT) {
-      gdouble spread = (gdouble)MAX(stem_count, 1u) * 32.0;
-      nd->x = -spread * 0.5 + ((gdouble)stem_i + 0.5) * 32.0;
-      nd->y = 260.0;
-      stem_i++;
-    } else if ((nd->kind == BT_NODE_HUMAN_NOTE || nd->kind == BT_NODE_AI_NOTE) &&
-               nd->degree == 0) {
-      /* Isolated note attaches directly to the vertical spine (deterministic). */
-      nd->x = (spine_i % 2 == 0) ? -14.0 : 14.0;
-      nd->y = 180.0 - (gdouble)(spine_i % 40) * 10.0;
-      spine_i++;
-    } else {
-      /* Cortex radial placement by dominant tag hue (deterministic). */
-      gdouble angle = (nd->hue / 360.0) * 2.0 * M_PI + ((gdouble)(i % 17) * 0.09);
-      gdouble rad = 85.0 + (gdouble)((i * 29) % 160);
-      if (nd->kind == BT_NODE_TAG)
-        rad = 65.0;
-      else if (nd->kind == BT_NODE_GHOST)
-        rad = 220.0 + (gdouble)((i * 13) % 50);
-      nd->x = cos(angle) * rad;
-      nd->y = -40.0 + sin(angle) * rad * 0.85;
-    }
-  }
-
-  /* 2. Cortex force relaxation (brainstem & spine-attached isolated nodes stay forced). */
-  guint iters = relax_iters > 0 ? relax_iters : 25u;
-  gdouble *dx = g_new0(gdouble, n);
-  gdouble *dy = g_new0(gdouble, n);
-
-  for (guint it = 0; it < iters; it++) {
-    memset(dx, 0, sizeof(gdouble) * n);
-    memset(dy, 0, sizeof(gdouble) * n);
-
-    /* Edge attraction. */
-    for (guint e = 0; e < g->edges->len; e++) {
-      const BtGraphEdge *ed = &g_array_index(g->edges, BtGraphEdge, e);
-      BtGraphNode *a = g_ptr_array_index(g->nodes, ed->src_idx);
-      BtGraphNode *b = g_ptr_array_index(g->nodes, ed->dst_idx);
-      gdouble vx = b->x - a->x;
-      gdouble vy = b->y - a->y;
-      gdouble dist = sqrt(vx * vx + vy * vy) + 1.0;
-      gdouble f = (dist - 42.0) * 0.04 * ed->weight;
-      gdouble fx = (vx / dist) * f;
-      gdouble fy = (vy / dist) * f;
-      dx[ed->src_idx] += fx;
-      dy[ed->src_idx] += fy;
-      dx[ed->dst_idx] -= fx;
-      dy[ed->dst_idx] -= fy;
-    }
-
-    /* Local repulsion (bounded window for O(n) scaling at 1k–10k nodes). */
-    guint stride = n > 200 ? 12u : n;
-    for (guint i = 0; i < n; i++) {
-      BtGraphNode *a = g_ptr_array_index(g->nodes, i);
-      for (guint k = 1; k < stride && i + k < n; k++) {
-        guint j = i + k;
-        BtGraphNode *b = g_ptr_array_index(g->nodes, j);
-        gdouble vx = a->x - b->x;
-        gdouble vy = a->y - b->y;
-        gdouble d2 = vx * vx + vy * vy + 16.0;
-        if (d2 < 3600.0) {
-          gdouble f = 140.0 / d2;
-          dx[i] += vx * f;
-          dy[i] += vy * f;
-          dx[j] -= vx * f;
-          dy[j] -= vy * f;
-        }
-      }
-    }
-
-    for (guint i = 0; i < n; i++) {
-      BtGraphNode *nd = g_ptr_array_index(g->nodes, i);
-      /* Brainstem & isolated spine nodes remain strictly forced! */
-      if (nd->kind == BT_NODE_SESSION || nd->kind == BT_NODE_IMPORT_ROOT ||
-          ((nd->kind == BT_NODE_HUMAN_NOTE || nd->kind == BT_NODE_AI_NOTE) && nd->degree == 0))
-        continue;
-      nd->x += CLAMP(dx[i], -12.0, 12.0);
-      nd->y += CLAMP(dy[i], -12.0, 12.0);
-    }
-  }
-
-  g_free(dx);
-  g_free(dy);
+  BtGraphLayoutOpts opts;
+  bt_graph_layout_default_opts(&opts);
+  if (relax_iters >= 100u)
+    opts.max_iterations = relax_iters;
+  bt_graph_layout_run(g, &opts);
 }
 
 void bt_graph_apply_filter(BtGraph *g, const BtGraphFilter *f)

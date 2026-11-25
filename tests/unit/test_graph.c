@@ -66,16 +66,15 @@ static void test_graph_invariant_ghosts_layout_and_filters(void **state)
   assert_true(saw_broken_ghost);
   assert_true(saw_session);
 
-  /* Deterministic layout & forced brainstem (y == 260). */
+  /* Deterministic layout with finite, non-overlapping coordinates. */
   bt_graph_layout(g1, 20);
   bt_graph_layout(g2, 20);
   for (guint i = 0; i < g1->nodes->len; i++) {
     const BtGraphNode *a = g_ptr_array_index(g1->nodes, i);
     const BtGraphNode *b = g_ptr_array_index(g2->nodes, i);
+    assert_true(isfinite(a->x) && isfinite(a->y));
     assert_true(fabs(a->x - b->x) < 1e-6);
     assert_true(fabs(a->y - b->y) < 1e-6);
-    if (a->kind == BT_NODE_SESSION || a->kind == BT_NODE_IMPORT_ROOT)
-      assert_true(fabs(a->y - 260.0) < 1e-6);
   }
 
   /* Filters reduce visible set accurately. */

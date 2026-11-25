@@ -182,6 +182,22 @@ t_graph_v2 = executable(
 )
 test('graph_v2', t_graph_v2, suite: 'unit')
 
+t_graphlayout = executable(
+  'test_graphlayout',
+  'unit/test_graphlayout.c',
+  include_directories: test_inc,
+  dependencies: [bt_core_dep, cmocka_dep],
+)
+test('graphlayout', t_graphlayout, suite: 'unit')
+
+bench_graphlayout = executable(
+  'bench_graphlayout',
+  'bench/bench_graphlayout.c',
+  include_directories: test_inc,
+  dependencies: [bt_core_dep],
+)
+test('bench_graphlayout', bench_graphlayout, suite: 'bench', timeout: 60)
+
 t_linkresolve = executable(
   'test_linkresolve',
   'unit/test_linkresolve.c',
