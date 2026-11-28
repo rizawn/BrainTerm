@@ -127,6 +127,10 @@ typedef struct {
   guint node_idx;
 } BtGraphCoreObstacle;
 
+typedef struct {
+  float width, height;
+} BtGraphLabelViewport;
+
 /* Sub-linear screen-space core radius matching graph_node.vert.glsl (max 14 px). */
 gdouble bt_graph_screen_core_radius(gdouble base_radius, gdouble zoom);
 
@@ -139,10 +143,12 @@ guint bt_graph_label_cap_for_zoom(gdouble zoom);
 
 /* Sorts cands in-place by (priority desc, degree desc, node_idx asc), skips any
  * non-always_show label overlapping an already placed label or a visible node core,
- * enforces max_labels and max_neighbors, and writes accepted labels to out[]. */
+ * enforces max_labels and max_neighbors, and writes accepted labels to out[].
+ * With a viewport, primary labels for visible nodes stay within the canvas when possible. */
 guint bt_graph_place_labels(BtGraphLabelCand *cands, guint cand_count,
                             const BtGraphCoreObstacle *obstacles, guint obstacle_count,
                             guint max_labels, guint max_neighbors,
+                            const BtGraphLabelViewport *viewport,
                             BtGraphLabelCand *out, guint out_cap);
 
 /* Deterministic 3D cortex/spine/brainstem projection derived from BtGraph.

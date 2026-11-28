@@ -43,6 +43,34 @@ static void on_tab_pty_exit(BtTerminal *term, gint exit_code, gpointer ud)
     e->owner->on_session_end(e->session_id, e->owner->user_data);
 }
 
+static void close_tab_entry(BtTermTabs *tabs, TabEntry *e);
+
+static void on_tab_middle_click(GtkGestureClick *g, gint n_press, gdouble x, gdouble y,
+                                gpointer ud)
+{
+  (void)g; (void)x; (void)y;
+  if (n_press != 1 || ud == NULL)
+    return;
+  TabEntry *e = ud;
+  close_tab_entry(e->owner, e);
+}
+
+static void on_notebook_switch_page(GtkNotebook *nb, GtkWidget *page, guint page_num,
+                                    gpointer ud)
+{
+  (void)nb; (void)page_num;
+  BtTermTabs *tabs = ud;
+  if (tabs == NULL || page == NULL)
+    return;
+  for (guint i = 0; i < tabs->entries->len; i++) {
+    TabEntry *e = g_ptr_array_index(tabs->entries, i);
+    if (e->page == page) {
+      bt_terminal_focus(e->term);
+      break;
+    }
+  }
+}
+
 static void close_tab_entry(BtTermTabs *tabs, TabEntry *e)
 {
   if (e->session_id != NULL && tabs->on_session_end != NULL) {
@@ -53,6 +81,8 @@ static void close_tab_entry(BtTermTabs *tabs, TabEntry *e)
   if (page_num >= 0)
     gtk_notebook_remove_page(GTK_NOTEBOOK(tabs->notebook), page_num);
   g_ptr_array_remove(tabs->entries, e); /* calls tab_entry_free -> bt_terminal_close */
+  if (tabs->entries->len > 0)
+    bt_termtabs_focus_active(tabs);
 }
 
 static void on_close_btn_clicked(GtkButton *btn, gpointer ud)
@@ -60,6 +90,18 @@ static void on_close_btn_clicked(GtkButton *btn, gpointer ud)
   (void)btn;
   TabEntry *e = ud;
   close_tab_entry(e->owner, e);
+}
+
+static void cycle_tabs(BtTermTabs *tabs, gboolean backwards)
+{
+  if (tabs == NULL || tabs->entries->len < 2)
+    return;
+  guint count = tabs->entries->len;
+  gint current = gtk_notebook_get_current_page(GTK_NOTEBOOK(tabs->notebook));
+  if (current < 0)
+    return;
+  guint step = backwards ? count - 1u : 1u;
+  bt_termtabs_select(tabs, ((guint)current + step) % count);
 }
 
 static gboolean on_tabs_key(GtkEventControllerKey *ctrl, guint keyval, guint keycode,
@@ -71,7 +113,10 @@ static gboolean on_tabs_key(GtkEventControllerKey *ctrl, guint keyval, guint key
   if ((state & GDK_CONTROL_MASK) == 0)
     return FALSE;
   if (keyval == GDK_KEY_Tab || keyval == GDK_KEY_ISO_Left_Tab) {
-    bt_termtabs_next(tabs);
+    GdkModifierType mods = state & gtk_accelerator_get_default_mod_mask();
+    if (mods != GDK_CONTROL_MASK && mods != (GDK_CONTROL_MASK | GDK_SHIFT_MASK))
+      return FALSE;
+    cycle_tabs(tabs, keyval == GDK_KEY_ISO_Left_Tab || (mods & GDK_SHIFT_MASK) != 0);
     return TRUE;
   }
   if (keyval >= GDK_KEY_1 && keyval <= GDK_KEY_8) {
@@ -99,6 +144,7 @@ BtTermTabs *bt_termtabs_new(guint max_tabs, BtTerminalFullscreenFn on_fullscreen
   gtk_notebook_set_show_border(GTK_NOTEBOOK(tabs->notebook), FALSE);
   gtk_widget_set_vexpand(tabs->notebook, TRUE);
   gtk_widget_set_hexpand(tabs->notebook, TRUE);
+  g_signal_connect(tabs->notebook, "switch-page", G_CALLBACK(on_notebook_switch_page), tabs);
 
   GtkWidget *plus_btn = gtk_button_new_from_icon_name("bt-plus-symbolic");
   gtk_widget_add_css_class(plus_btn, "bt-iconbtn");
@@ -209,7 +255,15 @@ gboolean bt_termtabs_open(BtTermTabs *tabs, const BtVault *vault, const gchar *r
   gtk_widget_set_tooltip_text(tab_box, e->cwd_abs);
   GtkWidget *close_btn = gtk_button_new_with_label("×");
   gtk_widget_add_css_class(close_btn, "flat");
+  gtk_widget_set_tooltip_text(close_btn, "Close terminal tab");
+  gtk_accessible_update_property(GTK_ACCESSIBLE(close_btn),
+                                 GTK_ACCESSIBLE_PROPERTY_LABEL, "Close terminal tab", -1);
   g_signal_connect(close_btn, "clicked", G_CALLBACK(on_close_btn_clicked), e);
+
+  GtkGesture *mclick = gtk_gesture_click_new();
+  gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(mclick), GDK_BUTTON_MIDDLE);
+  g_signal_connect(mclick, "pressed", G_CALLBACK(on_tab_middle_click), e);
+  gtk_widget_add_controller(tab_box, GTK_EVENT_CONTROLLER(mclick));
   gtk_box_append(GTK_BOX(tab_box), tico);
   gtk_box_append(GTK_BOX(tab_box), lbl);
   gtk_box_append(GTK_BOX(tab_box), close_btn);
@@ -255,11 +309,7 @@ void bt_termtabs_select(BtTermTabs *tabs, guint index)
 
 void bt_termtabs_next(BtTermTabs *tabs)
 {
-  if (tabs == NULL || tabs->entries->len < 2)
-    return;
-  gint cur = gtk_notebook_get_current_page(GTK_NOTEBOOK(tabs->notebook));
-  guint next = (guint)(cur + 1) % tabs->entries->len;
-  bt_termtabs_select(tabs, next);
+  cycle_tabs(tabs, FALSE);
 }
 
 guint bt_termtabs_count(const BtTermTabs *tabs)

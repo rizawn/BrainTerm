@@ -81,10 +81,11 @@ static gchar *sanitize_title_literal(const gchar *title)
       g_string_append_c(s, ' ');
     } else if (c < 0x20 || c == 0x7F) {
       continue;
-    } else if (c == '"' || c == '`' || c == '$' || c == '\\' || c == ';' || c == '|' ||
-               c == '&' || c == '<' || c == '>' || c == '(' || c == ')') {
-      /* Replace shell metacharacters with safe space so no shell can expand
-       * $(...), `...`, $VAR, or break out of quotes. */
+    } else if (c == '"' || c == '\'' || c == '`' || c == '$' || c == '%' || c == '!' ||
+               c == '\\' || c == ';' || c == '|' || c == '&' || c == '<' || c == '>' ||
+               c == '(' || c == ')') {
+      /* Replace shell metacharacters with safe space so neither POSIX shells nor
+       * cmd.exe can expand $(...), `...`, $VAR, %VAR%, !VAR!, or break quotes. */
       g_string_append_c(s, ' ');
     } else {
       g_string_append_c(s, (gchar)c);

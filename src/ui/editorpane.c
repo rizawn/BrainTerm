@@ -23,7 +23,22 @@ struct BtEditorPane {
   GtkWidget *box;
   GtkWidget *conflict_bar;
   GtkWidget *conflict_label;
+  GtkWidget *find_bar;
+  GtkWidget *find_entry;
+  GtkWidget *find_count_lbl;
+  GtkWidget *find_case_btn;
+  GtkWidget *replace_row;
+  GtkWidget *replace_entry;
+  GtkSourceSearchSettings *search_settings;
+  GtkSourceSearchContext *search_ctx;
   GtkWidget *placeholder;
+  GtkWidget *placeholder_title;
+  GtkWidget *placeholder_sub;
+  GtkWidget *placeholder_actions;
+  gboolean has_vault;
+  BtEditorActionFn on_open_vault;
+  BtEditorActionFn on_create_vault;
+  gpointer onboarding_ud;
   GtkWidget *overlay;
   GtkWidget *scrolled;
   GtkAdjustment *hadj;
@@ -1061,7 +1076,7 @@ static void on_cursor_mark_set(GtkTextBuffer *buf, const GtkTextIter *loc,
 {
   (void)loc;
   BtEditorPane *p = ud;
-  if (p == NULL || p->loading || p->buffer == NULL)
+  if (p == NULL || p->loading || p->math_spans == NULL || p->math_spans->len == 0)
     return;
   if (mark != gtk_text_buffer_get_insert(buf) &&
       mark != gtk_text_buffer_get_selection_bound(buf))
@@ -1841,6 +1856,17 @@ static void on_editor_leave(GtkEventControllerMotion *ctrl, gpointer ud)
   clear_hover_state(ud);
 }
 
+static gboolean handle_find_shortcut(BtEditorPane *pane, guint keyval, GdkModifierType state)
+{
+  if ((state & gtk_accelerator_get_default_mod_mask()) != GDK_CONTROL_MASK)
+    return FALSE;
+  guint key = gdk_keyval_to_lower(keyval);
+  if (key != GDK_KEY_f && key != GDK_KEY_h)
+    return FALSE;
+  bt_editorpane_show_find(pane, key == GDK_KEY_h);
+  return TRUE;
+}
+
 static gboolean on_editor_key_event(GtkEventControllerKey *ctrl, guint keyval, guint keycode,
                                     GdkModifierType state, gpointer ud)
 {
@@ -1857,6 +1883,8 @@ static gboolean on_editor_key_event(GtkEventControllerKey *ctrl, guint keyval, g
     gtk_widget_set_cursor_from_name(GTK_WIDGET(pane->view), want_pointer ? "pointer" : "text");
   }
   if (bt_editorpane_handle_key_event(pane, keyval, state))
+    return TRUE;
+  if (handle_find_shortcut(pane, keyval, state))
     return TRUE;
   if ((state & (GDK_CONTROL_MASK | GDK_ALT_MASK)) ==
       (GDK_CONTROL_MASK | GDK_ALT_MASK)) {
@@ -2146,6 +2174,163 @@ static void on_conflict_reload(GtkButton *b, gpointer ud)
     p->on_reload(p->relpath, p->user_data);
 }
 
+/* ------------------------------------------- in-document find & replace -- */
+
+static void update_find_count_label(BtEditorPane *p)
+{
+  if (p == NULL || p->find_count_lbl == NULL || p->search_ctx == NULL)
+    return;
+  const gchar *txt = gtk_editable_get_text(GTK_EDITABLE(p->find_entry));
+  if (txt == NULL || txt[0] == '\0') {
+    gtk_label_set_text(GTK_LABEL(p->find_count_lbl), "");
+    return;
+  }
+  gint cnt = gtk_source_search_context_get_occurrences_count(p->search_ctx);
+  if (cnt < 0) {
+    gtk_label_set_text(GTK_LABEL(p->find_count_lbl), "…");
+    return;
+  }
+  GtkTextIter ms, me;
+  GtkTextBuffer *buf = GTK_TEXT_BUFFER(p->buffer);
+  gint cur_idx = 0;
+  if (gtk_text_buffer_get_selection_bounds(buf, &ms, &me))
+    cur_idx = gtk_source_search_context_get_occurrence_position(p->search_ctx, &ms, &me);
+  g_autofree gchar *lbl = (cur_idx > 0) ? g_strdup_printf("%d / %d", cur_idx, cnt)
+                                        : g_strdup_printf("%d", cnt);
+  gtk_label_set_text(GTK_LABEL(p->find_count_lbl), lbl);
+}
+
+static void on_search_occurrences_changed(GObject *obj, GParamSpec *pspec, gpointer ud)
+{
+  (void)obj; (void)pspec;
+  update_find_count_label(ud);
+}
+
+static void find_step(BtEditorPane *p, gboolean forward)
+{
+  if (p == NULL || p->search_ctx == NULL || p->buffer == NULL)
+    return;
+  GtkTextBuffer *buf = GTK_TEXT_BUFFER(p->buffer);
+  GtkTextIter start, sel_s, sel_e;
+  if (gtk_text_buffer_get_selection_bounds(buf, &sel_s, &sel_e))
+    start = forward ? sel_e : sel_s;
+  else
+    gtk_text_buffer_get_iter_at_mark(buf, &start, gtk_text_buffer_get_insert(buf));
+
+  GtkTextIter ms, me;
+  gboolean wrapped = FALSE;
+  gboolean ok = forward
+                    ? gtk_source_search_context_forward(p->search_ctx, &start, &ms, &me, &wrapped)
+                    : gtk_source_search_context_backward(p->search_ctx, &start, &ms, &me, &wrapped);
+  (void)wrapped;
+  if (ok) {
+    gtk_text_buffer_select_range(buf, &ms, &me);
+    if (p->view != NULL)
+      gtk_text_view_scroll_to_iter(GTK_TEXT_VIEW(p->view), &ms, 0.15, FALSE, 0.0, 0.0);
+  }
+  update_find_count_label(p);
+}
+
+static void on_find_changed(GtkEditable *ed, gpointer ud)
+{
+  BtEditorPane *p = ud;
+  const gchar *txt = gtk_editable_get_text(ed);
+  gtk_source_search_settings_set_search_text(p->search_settings, (txt && txt[0]) ? txt : NULL);
+  gtk_source_search_context_set_highlight(p->search_ctx, (txt && txt[0]) ? TRUE : FALSE);
+  if (txt != NULL && txt[0] != '\0') {
+    GtkTextIter it, ms, me;
+    gtk_text_buffer_get_iter_at_mark(GTK_TEXT_BUFFER(p->buffer), &it,
+                                     gtk_text_buffer_get_insert(GTK_TEXT_BUFFER(p->buffer)));
+    if (gtk_source_search_context_forward(p->search_ctx, &it, &ms, &me, NULL)) {
+      gtk_text_buffer_select_range(GTK_TEXT_BUFFER(p->buffer), &ms, &me);
+      if (p->view != NULL)
+        gtk_text_view_scroll_to_iter(GTK_TEXT_VIEW(p->view), &ms, 0.15, FALSE, 0.0, 0.0);
+    }
+  }
+  update_find_count_label(p);
+}
+
+static void on_find_next_clicked(GtkButton *b, gpointer ud) { (void)b; find_step(ud, TRUE); }
+static void on_find_prev_clicked(GtkButton *b, gpointer ud) { (void)b; find_step(ud, FALSE); }
+
+static void on_find_case_toggled(GtkToggleButton *b, gpointer ud)
+{
+  BtEditorPane *p = ud;
+  gtk_source_search_settings_set_case_sensitive(p->search_settings,
+                                                gtk_toggle_button_get_active(b));
+  update_find_count_label(p);
+}
+
+static void on_replace_one_clicked(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  BtEditorPane *p = ud;
+  if (p->search_ctx == NULL || p->buffer == NULL)
+    return;
+  GtkTextBuffer *buf = GTK_TEXT_BUFFER(p->buffer);
+  GtkTextIter ms, me;
+  if (!gtk_text_buffer_get_selection_bounds(buf, &ms, &me) ||
+      gtk_source_search_context_get_occurrence_position(p->search_ctx, &ms, &me) <= 0) {
+    find_step(p, TRUE);
+    if (!gtk_text_buffer_get_selection_bounds(buf, &ms, &me))
+      return;
+  }
+  const gchar *rep = gtk_editable_get_text(GTK_EDITABLE(p->replace_entry));
+  gtk_source_search_context_replace(p->search_ctx, &ms, &me, rep ? rep : "", -1, NULL);
+  find_step(p, TRUE);
+}
+
+static void on_replace_all_clicked(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  BtEditorPane *p = ud;
+  if (p->search_ctx == NULL)
+    return;
+  const gchar *rep = gtk_editable_get_text(GTK_EDITABLE(p->replace_entry));
+  gtk_source_search_context_replace_all(p->search_ctx, rep ? rep : "", -1, NULL);
+  update_find_count_label(p);
+}
+
+static void on_find_close_clicked(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  bt_editorpane_hide_find(ud);
+}
+
+static gboolean on_find_key_pressed(GtkEventControllerKey *c, guint keyval, guint kc,
+                                    GdkModifierType st, gpointer ud)
+{
+  (void)c; (void)kc;
+  BtEditorPane *p = ud;
+  if (handle_find_shortcut(p, keyval, st))
+    return TRUE;
+  if (keyval == GDK_KEY_Escape) {
+    bt_editorpane_hide_find(p);
+    return TRUE;
+  }
+  if (keyval == GDK_KEY_Return || keyval == GDK_KEY_KP_Enter) {
+    find_step(p, (st & GDK_SHIFT_MASK) == 0);
+    return TRUE;
+  }
+  return FALSE;
+}
+
+static void on_onboarding_open_clicked(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  BtEditorPane *p = ud;
+  if (p->on_open_vault != NULL)
+    p->on_open_vault(p->onboarding_ud);
+}
+
+static void on_onboarding_create_clicked(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  BtEditorPane *p = ud;
+  if (p->on_create_vault != NULL)
+    p->on_create_vault(p->onboarding_ud);
+}
+
 /* ---------------------------------------------------------- public API -- */
 
 BtEditorPane *bt_editorpane_new(BtEditorSaveFn on_save, BtEditorLinkFn on_link,
@@ -2249,7 +2434,7 @@ BtEditorPane *bt_editorpane_new(BtEditorSaveFn on_save, BtEditorLinkFn on_link,
   gtk_widget_set_hexpand(pane->overlay, TRUE);
   gtk_widget_set_vexpand(pane->overlay, TRUE);
 
-  /* Empty state placeholder */
+  /* Empty state placeholder / first-run vault onboarding */
   pane->placeholder = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
   gtk_widget_set_name(pane->placeholder, "bt-editor-placeholder");
   gtk_widget_add_css_class(pane->placeholder, "bt-empty");
@@ -2259,12 +2444,93 @@ BtEditorPane *bt_editorpane_new(BtEditorSaveFn on_save, BtEditorLinkFn on_link,
   gtk_widget_set_hexpand(pane->placeholder, TRUE);
   GtkWidget *pico = gtk_image_new_from_icon_name("bt-editor-symbolic");
   gtk_image_set_pixel_size(GTK_IMAGE(pico), 36);
-  GtkWidget *ptitle = gtk_label_new("No note selected");
-  gtk_widget_add_css_class(ptitle, "bt-empty-title");
-  GtkWidget *psub = gtk_label_new("Choose a Markdown note from the sidebar or press Ctrl+P");
+  pane->placeholder_title = gtk_label_new("Welcome to BrainTerm");
+  gtk_widget_add_css_class(pane->placeholder_title, "bt-empty-title");
+  pane->placeholder_sub = gtk_label_new(
+      "Open an existing Markdown folder as a vault or create a new starter vault.");
+  gtk_label_set_wrap(GTK_LABEL(pane->placeholder_sub), TRUE);
+  gtk_label_set_justify(GTK_LABEL(pane->placeholder_sub), GTK_JUSTIFY_CENTER);
+  pane->placeholder_actions = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+  gtk_widget_set_halign(pane->placeholder_actions, GTK_ALIGN_CENTER);
+  gtk_widget_set_margin_top(pane->placeholder_actions, 6);
+  GtkWidget *b_open_v = gtk_button_new_with_label("Open Vault…");
+  gtk_widget_add_css_class(b_open_v, "bt-hairline");
+  GtkWidget *b_new_v = gtk_button_new_with_label("Create Starter Vault…");
+  gtk_widget_add_css_class(b_new_v, "suggested-action");
+  g_signal_connect(b_open_v, "clicked", G_CALLBACK(on_onboarding_open_clicked), pane);
+  g_signal_connect(b_new_v, "clicked", G_CALLBACK(on_onboarding_create_clicked), pane);
+  gtk_box_append(GTK_BOX(pane->placeholder_actions), b_open_v);
+  gtk_box_append(GTK_BOX(pane->placeholder_actions), b_new_v);
   gtk_box_append(GTK_BOX(pane->placeholder), pico);
-  gtk_box_append(GTK_BOX(pane->placeholder), ptitle);
-  gtk_box_append(GTK_BOX(pane->placeholder), psub);
+  gtk_box_append(GTK_BOX(pane->placeholder), pane->placeholder_title);
+  gtk_box_append(GTK_BOX(pane->placeholder), pane->placeholder_sub);
+  gtk_box_append(GTK_BOX(pane->placeholder), pane->placeholder_actions);
+
+  /* In-document Find & Replace bar (Ctrl+F / Ctrl+H) backed by GtkSourceSearchContext */
+  pane->search_settings = gtk_source_search_settings_new();
+  gtk_source_search_settings_set_wrap_around(pane->search_settings, TRUE);
+  pane->search_ctx = gtk_source_search_context_new(pane->buffer, pane->search_settings);
+  g_signal_connect(pane->search_ctx, "notify::occurrences-count",
+                   G_CALLBACK(on_search_occurrences_changed), pane);
+
+  pane->find_bar = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+  gtk_widget_set_name(pane->find_bar, "bt-find-bar");
+  gtk_widget_add_css_class(pane->find_bar, "bt-banner");
+  GtkWidget *find_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+  pane->find_entry = gtk_search_entry_new();
+  gtk_widget_set_name(pane->find_entry, "bt-find-entry");
+  gtk_widget_set_hexpand(pane->find_entry, TRUE);
+  gtk_accessible_update_property(GTK_ACCESSIBLE(pane->find_entry), GTK_ACCESSIBLE_PROPERTY_LABEL,
+                                 "Find text in note", -1);
+  pane->find_count_lbl = gtk_label_new("");
+  gtk_widget_add_css_class(pane->find_count_lbl, "dim-label");
+  pane->find_case_btn = gtk_toggle_button_new_with_label("Aa");
+  gtk_widget_add_css_class(pane->find_case_btn, "bt-hairline");
+  gtk_widget_set_tooltip_text(pane->find_case_btn, "Match case");
+  GtkWidget *b_fprev = gtk_button_new_with_label("Prev");
+  GtkWidget *b_fnext = gtk_button_new_with_label("Next");
+  GtkWidget *b_fclose = gtk_button_new_with_label("Close");
+  gtk_widget_add_css_class(b_fprev, "bt-hairline");
+  gtk_widget_add_css_class(b_fnext, "bt-hairline");
+  gtk_widget_add_css_class(b_fclose, "bt-hairline");
+  g_signal_connect(pane->find_entry, "changed", G_CALLBACK(on_find_changed), pane);
+  g_signal_connect(pane->find_case_btn, "toggled", G_CALLBACK(on_find_case_toggled), pane);
+  g_signal_connect(b_fprev, "clicked", G_CALLBACK(on_find_prev_clicked), pane);
+  g_signal_connect(b_fnext, "clicked", G_CALLBACK(on_find_next_clicked), pane);
+  g_signal_connect(b_fclose, "clicked", G_CALLBACK(on_find_close_clicked), pane);
+  gtk_box_append(GTK_BOX(find_row), pane->find_entry);
+  gtk_box_append(GTK_BOX(find_row), pane->find_count_lbl);
+  gtk_box_append(GTK_BOX(find_row), pane->find_case_btn);
+  gtk_box_append(GTK_BOX(find_row), b_fprev);
+  gtk_box_append(GTK_BOX(find_row), b_fnext);
+  gtk_box_append(GTK_BOX(find_row), b_fclose);
+
+  pane->replace_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+  gtk_widget_set_name(pane->replace_row, "bt-replace-row");
+  pane->replace_entry = gtk_entry_new();
+  gtk_widget_set_name(pane->replace_entry, "bt-replace-entry");
+  gtk_entry_set_placeholder_text(GTK_ENTRY(pane->replace_entry), "Replace with…");
+  gtk_widget_set_hexpand(pane->replace_entry, TRUE);
+  GtkWidget *b_rep = gtk_button_new_with_label("Replace");
+  GtkWidget *b_rep_all = gtk_button_new_with_label("Replace All");
+  gtk_widget_set_name(b_rep_all, "bt-replace-all");
+  gtk_widget_add_css_class(b_rep, "bt-hairline");
+  gtk_widget_add_css_class(b_rep_all, "bt-hairline");
+  g_signal_connect(b_rep, "clicked", G_CALLBACK(on_replace_one_clicked), pane);
+  g_signal_connect(b_rep_all, "clicked", G_CALLBACK(on_replace_all_clicked), pane);
+  gtk_box_append(GTK_BOX(pane->replace_row), pane->replace_entry);
+  gtk_box_append(GTK_BOX(pane->replace_row), b_rep);
+  gtk_box_append(GTK_BOX(pane->replace_row), b_rep_all);
+  gtk_widget_set_visible(pane->replace_row, FALSE);
+
+  gtk_box_append(GTK_BOX(pane->find_bar), find_row);
+  gtk_box_append(GTK_BOX(pane->find_bar), pane->replace_row);
+  gtk_widget_set_visible(pane->find_bar, FALSE);
+
+  GtkEventController *fkey = gtk_event_controller_key_new();
+  gtk_event_controller_set_propagation_phase(fkey, GTK_PHASE_CAPTURE);
+  g_signal_connect(fkey, "key-pressed", G_CALLBACK(on_find_key_pressed), pane);
+  gtk_widget_add_controller(pane->find_bar, fkey);
 
   /* Conflict banner (§6.A5): never auto-overwrites either side. */
   pane->conflict_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
@@ -2292,11 +2558,69 @@ BtEditorPane *bt_editorpane_new(BtEditorSaveFn on_save, BtEditorLinkFn on_link,
   gtk_widget_set_hexpand(pane->box, TRUE);
   gtk_widget_set_vexpand(pane->box, TRUE);
   gtk_box_append(GTK_BOX(pane->box), pane->conflict_bar);
+  gtk_box_append(GTK_BOX(pane->box), pane->find_bar);
   gtk_box_append(GTK_BOX(pane->box), pane->placeholder);
   gtk_box_append(GTK_BOX(pane->box), pane->overlay);
   gtk_widget_set_visible(pane->overlay, FALSE);
 
   return pane;
+}
+
+void bt_editorpane_set_onboarding_cbs(BtEditorPane *pane, BtEditorActionFn on_open_vault,
+                                      BtEditorActionFn on_create_vault, gpointer user_data)
+{
+  if (pane == NULL)
+    return;
+  pane->on_open_vault = on_open_vault;
+  pane->on_create_vault = on_create_vault;
+  pane->onboarding_ud = user_data;
+}
+
+void bt_editorpane_set_has_vault(BtEditorPane *pane, gboolean has_vault)
+{
+  if (pane == NULL)
+    return;
+  pane->has_vault = has_vault ? TRUE : FALSE;
+  if (pane->placeholder_title != NULL)
+    gtk_label_set_text(GTK_LABEL(pane->placeholder_title),
+                       pane->has_vault ? "No note selected" : "Welcome to BrainTerm");
+  if (pane->placeholder_sub != NULL)
+    gtk_label_set_text(GTK_LABEL(pane->placeholder_sub),
+                       pane->has_vault
+                           ? "Choose a Markdown note from the sidebar, press Ctrl+P to open, or Ctrl+N to create"
+                           : "Open an existing Markdown folder as a vault or create a new starter vault.");
+  if (pane->placeholder_actions != NULL)
+    gtk_widget_set_visible(pane->placeholder_actions, !pane->has_vault);
+}
+
+void bt_editorpane_show_find(BtEditorPane *pane, gboolean with_replace)
+{
+  if (pane == NULL || pane->find_bar == NULL || pane->relpath == NULL)
+    return;
+  gtk_widget_set_visible(pane->find_bar, TRUE);
+  if (pane->replace_row != NULL)
+    gtk_widget_set_visible(pane->replace_row, with_replace);
+  if (pane->buffer != NULL) {
+    GtkTextIter s, e;
+    if (gtk_text_buffer_get_selection_bounds(GTK_TEXT_BUFFER(pane->buffer), &s, &e)) {
+      g_autofree gchar *sel = gtk_text_buffer_get_text(GTK_TEXT_BUFFER(pane->buffer), &s, &e, FALSE);
+      if (sel != NULL && sel[0] != '\0' && strchr(sel, '\n') == NULL && strlen(sel) <= 128)
+        gtk_editable_set_text(GTK_EDITABLE(pane->find_entry), sel);
+    }
+  }
+  gtk_widget_grab_focus(pane->find_entry);
+  gtk_editable_select_region(GTK_EDITABLE(pane->find_entry), 0, -1);
+}
+
+void bt_editorpane_hide_find(BtEditorPane *pane)
+{
+  if (pane == NULL || pane->find_bar == NULL)
+    return;
+  gtk_widget_set_visible(pane->find_bar, FALSE);
+  if (pane->search_ctx != NULL)
+    gtk_source_search_context_set_highlight(pane->search_ctx, FALSE);
+  if (pane->view != NULL)
+    gtk_widget_grab_focus(GTK_WIDGET(pane->view));
 }
 
 void bt_editorpane_set_conflict_cbs(BtEditorPane *pane, BtEditorDiffFn on_diff,
@@ -2580,6 +2904,8 @@ void bt_editorpane_free(BtEditorPane *pane)
   }
   g_clear_pointer(&pane->link_spans, g_array_unref);
   g_clear_pointer(&pane->math_spans, g_array_unref);
+  g_clear_object(&pane->search_ctx);
+  g_clear_object(&pane->search_settings);
   g_free(pane->relpath);
   g_clear_object(&pane->buffer);
   g_free(pane);
@@ -2668,6 +2994,7 @@ void bt_editorpane_clear(BtEditorPane *pane)
   pane->active_math_span = -1;
   pane->loading = FALSE;
   pane->dirty = FALSE;
+  bt_editorpane_hide_find(pane);
   gtk_widget_set_visible(pane->overlay, FALSE);
   gtk_widget_set_visible(pane->placeholder, TRUE);
 }

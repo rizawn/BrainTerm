@@ -38,6 +38,9 @@ gboolean bt_nav_history_can_go_back(const BtNavHistory *history);
 gboolean bt_nav_history_can_go_forward(const BtNavHistory *history);
 void bt_nav_history_set_cursor(BtNavHistory *history, gint cursor);
 void bt_nav_history_remove_at(BtNavHistory *history, gsize index);
+void bt_nav_history_rename_path(BtNavHistory *history, const gchar *old_relpath,
+                                const gchar *new_relpath);
+void bt_nav_history_remove_path(BtNavHistory *history, const gchar *relpath);
 
 G_END_DECLS
 

@@ -18,7 +18,13 @@ static const BtCommandSpec COMMANDS[] = {
   {">gemini here",        "app.launch-gemini",   "Launch Gemini CLI in the vault"},
   {">audit index",        "app.audit-index",     "Differential audit of files vs body_hash (R3)"},
   {">organize vault",     "app.organize-now",    "Run auto-organize batch now (M6)"},
-  {">toggle graph",       "app.toggle-graph",    "Show or hide the 2D Brain Graph (M7)"},
+  {">review ai tags",     "app.review-tags",       "Promote or dismiss pending AI tags (tags_ai)"},
+  {">import chats",       "app.import-notes",      "Import ChatGPT, Claude, or Codex conversations"},
+  {">sync embeddings",    "app.sync-embeddings",   "Build or refresh offline local vector embeddings"},
+  {">backlinks",          "app.show-backlinks",    "Inspect backlinks to current note & orphan notes (Alt+B)"},
+  {">find in note",       "app.find-in-note",      "Find text in the active note (Ctrl+F)"},
+  {">find and replace",   "app.replace-in-note",   "Find and replace in the active note (Ctrl+H)"},
+  {">toggle graph",       "app.toggle-graph",      "Show or hide the Brain Graph (2D, 3D, Galaxy, Timeline)"},
 };
 
 BtAskMode bt_search_detect_mode(const gchar *input, const gchar **trimmed_query)
@@ -67,18 +73,26 @@ static void append_sanitized(GString *dst, const gchar *src)
 {
   for (const gchar *p = src ? src : ""; *p != '\0'; p++) {
     guchar c = (guchar)*p;
-    if (c < 0x20 || c == 0x7F || c == '"' || c == '`' || c == '$' || c == '\\' || c == ';' ||
-        c == '|' || c == '&' || c == '<' || c == '>' || c == '(' || c == ')')
+    if (c < 0x20 || c == 0x7F || c == '"' || c == '\'' || c == '`' || c == '$' || c == '%' ||
+        c == '!' || c == '\\' || c == ';' || c == '|' || c == '&' || c == '<' || c == '>' ||
+        c == '(' || c == ')')
       g_string_append_c(dst, ' ');
     else
       g_string_append_c(dst, (gchar)c);
   }
 }
 
-gchar *bt_search_compose_ask_agent_cmd(const gchar *question, const GPtrArray *hits,
-                                       guint max_refs)
+gchar *bt_search_compose_ask_agent_cmd_for(const gchar *cli_name, const gchar *question,
+                                           const GPtrArray *hits, guint max_refs)
 {
-  GString *s = g_string_new("claude \"Answer using ");
+  const gchar *cli = "claude";
+  if (cli_name != NULL && cli_name[0] != '\0') {
+    if (strcmp(cli_name, "codex") == 0 || strcmp(cli_name, "gemini") == 0 ||
+        strcmp(cli_name, "claude") == 0)
+      cli = cli_name;
+  }
+  GString *s = g_string_new(cli);
+  g_string_append(s, " \"Answer using ");
   guint count = hits ? MIN(hits->len, max_refs > 0 ? max_refs : 5u) : 0;
   for (guint i = 0; i < count; i++) {
     const BtSearchHit *h = g_ptr_array_index(hits, i);
@@ -90,4 +104,10 @@ gchar *bt_search_compose_ask_agent_cmd(const gchar *question, const GPtrArray *h
   append_sanitized(s, question);
   g_string_append(s, "\"\r");
   return g_string_free(s, FALSE);
+}
+
+gchar *bt_search_compose_ask_agent_cmd(const gchar *question, const GPtrArray *hits,
+                                       guint max_refs)
+{
+  return bt_search_compose_ask_agent_cmd_for("claude", question, hits, max_refs);
 }

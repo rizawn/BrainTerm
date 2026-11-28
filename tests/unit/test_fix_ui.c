@@ -383,6 +383,79 @@ static void test_dual_pane_editor_and_graph(void **state)
   bt_editorpane_free(ed);
 }
 
+static GtkWidget *find_descendant_named(GtkWidget *root, const gchar *name)
+{
+  if (root == NULL)
+    return NULL;
+  if (g_strcmp0(gtk_widget_get_name(root), name) == 0)
+    return root;
+  for (GtkWidget *ch = gtk_widget_get_first_child(root); ch != NULL;
+       ch = gtk_widget_get_next_sibling(ch)) {
+    GtkWidget *found = find_descendant_named(ch, name);
+    if (found != NULL)
+      return found;
+  }
+  return NULL;
+}
+
+static void test_graphview_g3_orphans_relayout(void **state)
+{
+  (void)state;
+  if (!init_ui())
+    skip();
+
+  gchar *root = g_dir_make_tmp("bt-fixui-g3-XXXXXX", NULL);
+  bt_test_put(root, "a.md", "---\nid: bt-g1\ntitle: Linked A\nsource: human\n---\n[[b]]\n");
+  bt_test_put(root, "b.md", "---\nid: bt-g2\ntitle: Linked B\nsource: human\n---\nbody\n");
+  bt_test_put(root, "orphan.md", "---\nid: bt-g3\ntitle: Lone Island\nsource: human\n---\nalone\n");
+
+  BtVault *v = vault_open(root, NULL, NULL);
+  BtIndex *idx = bt_index_open(root, NULL, NULL);
+  assert_true(bt_index_rebuild(idx, v, NULL));
+
+  AdwViewStack *stack = NULL;
+  BtEditorPane *ed = NULL;
+  BtGraphView *gv = NULL;
+  BtSessionsPanel *sp = NULL;
+  GtkWidget *win = make_test_shell(&stack, &ed, &gv, &sp);
+  adw_view_stack_set_visible_child_name(stack, "graph");
+  gtk_window_present(GTK_WINDOW(win));
+
+  GtkWidget *area = bt_graphview_widget(gv);
+  assert_true(pump_until_allocated(area, 1500));
+
+  BtGraph *g = bt_graph_build(v, idx, NULL);
+  bt_graph_layout(g, 15);
+  bt_graphview_set_graph(gv, g, FALSE);
+  pump_ms(60);
+
+  GtkWidget *orphans_btn = find_descendant_named(area, "bt-graph-orphans");
+  GtkWidget *relayout_btn = find_descendant_named(area, "bt-graph-relayout");
+  assert_non_null(orphans_btn);
+  assert_non_null(relayout_btn);
+  assert_true(gtk_widget_get_visible(orphans_btn));
+  assert_true(gtk_widget_get_visible(relayout_btn));
+
+  /* Toggle Highlight Orphans ON and verify CSS active state; then click Re-layout. */
+  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(orphans_btn), TRUE);
+  pump_ms(40);
+  assert_true(gtk_widget_has_css_class(orphans_btn, "bt-pill-active"));
+
+  g_signal_emit_by_name(relayout_btn, "clicked");
+  pump_ms(120);
+  assert_true(bt_graphview_has_graph(gv));
+
+  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(orphans_btn), FALSE);
+  pump_ms(30);
+  assert_false(gtk_widget_has_css_class(orphans_btn, "bt-pill-active"));
+
+  destroy_test_shell(win, ed, gv, sp);
+  bt_index_close(idx);
+  vault_free(v);
+  bt_test_rm_rf(root);
+  g_free(root);
+}
+
 static void test_build_stamp(void **state)
 {
   (void)state;
@@ -406,6 +479,7 @@ int main(void)
     cmocka_unit_test(test_editor_mapped),
     cmocka_unit_test(test_graph_mapped),
     cmocka_unit_test(test_dual_pane_editor_and_graph),
+    cmocka_unit_test(test_graphview_g3_orphans_relayout),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

@@ -22,6 +22,7 @@
   <style name="line-numbers"         foreground="faint" background="surface"/>
   <style name="current-line-number"  foreground="ink" background="curline" bold="true"/>
   <style name="bracket-match"        foreground="bright" background="selbg" bold="true"/>
+  <style name="search-match"         foreground="bright" background="selbg" bold="true"/>
 
   <!-- Generic defs (all strictly achromatic) -->
   <style name="def:comment"          foreground="faint" italic="true"/>

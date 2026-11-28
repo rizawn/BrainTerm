@@ -278,6 +278,46 @@ static void test_warm_start_pinning_visibility_and_timecap(void **state)
   free_graph(gt);
 }
 
+static void test_interactive_reheat_after_settle(void **state)
+{
+  (void)state;
+  BtGraph *g = mk_graph(14);
+  for (guint i = 1; i < 14u; i++)
+    add_edge(g, 0u, i);
+
+  BtGraphLayoutOpts opts;
+  bt_graph_layout_default_opts(&opts);
+  opts.max_iterations = 40u;
+  BtGraphLayoutState *st = bt_graph_layout_begin(g, &opts);
+  assert_non_null(st);
+
+  /* Run until completion so iter_done reaches max_iterations. */
+  while (bt_graph_layout_step(st, 10u, 0.0))
+    ;
+  bt_graph_layout_finish(st);
+
+  /* Pin node 0 at an explicit dragged coordinate -> must publish to node immediately. */
+  bt_graph_layout_set_pinned(st, 0u, TRUE);
+  bt_graph_layout_set_pos(st, 0u, 220.0f, -140.0f);
+  const BtGraphNode *n0 = g_ptr_array_index(g->nodes, 0u);
+  assert_true(fabs(n0->x - 220.0) < 1e-4 && fabs(n0->y - (-140.0)) < 1e-4);
+
+  const BtGraphNode *n1 = g_ptr_array_index(g->nodes, 1u);
+  gdouble before_x = n1->x, before_y = n1->y;
+
+  /* Reheat after finish must reset iteration budget and settle neighbor toward pinned node 0. */
+  bt_graph_layout_reheat(st, 0.45f);
+  assert_true(bt_graph_layout_step(st, 5u, 0.0));
+  while (bt_graph_layout_step(st, 15u, 0.0))
+    ;
+  bt_graph_layout_finish(st);
+  bt_graph_layout_free(st);
+
+  assert_true(fabs(n0->x - 220.0) < 1e-4 && fabs(n0->y - (-140.0)) < 1e-4);
+  assert_true(hypot(n1->x - before_x, n1->y - before_y) > 1.0);
+  free_graph(g);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -285,6 +325,7 @@ int main(void)
     cmocka_unit_test(test_determinism_and_topologies),
     cmocka_unit_test(test_edge_cases_and_safety),
     cmocka_unit_test(test_warm_start_pinning_visibility_and_timecap),
+    cmocka_unit_test(test_interactive_reheat_after_settle),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

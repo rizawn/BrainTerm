@@ -27,9 +27,13 @@ gboolean bt_embed_sync_vault(const BtVault *vault, BtIndex *index, gboolean enab
                              guint *similar_edges_out, GError **error);
 
 /* Hybrid search: merges FTS5 + vector cosine via Reciprocal Rank Fusion (RRF)
- * when enabled == TRUE; pure FTS5 when enabled == FALSE. */
+ * when enabled == TRUE; pure FTS5 when enabled == FALSE. Uses cached SQLite
+ * vectors in memory first (only reading vault files when uncached and vault != NULL). */
 GPtrArray *bt_embed_hybrid_search(const BtVault *vault, BtIndex *index, const gchar *query,
                                   guint limit, gboolean enabled, GError **error);
+
+/* Returns count of persisted note embedding vectors currently stored in SQLite. */
+guint bt_embed_count_cached(BtIndex *index);
 
 G_END_DECLS
 

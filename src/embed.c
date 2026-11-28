@@ -54,12 +54,23 @@ void bt_embed_text(const gchar *text, gfloat out_vec[BT_EMBED_DIM])
   }
 }
 
+static gboolean vec_is_finite(const gfloat v[BT_EMBED_DIM])
+{
+  for (guint i = 0; i < BT_EMBED_DIM; i++) {
+    if (!isfinite(v[i]))
+      return FALSE;
+  }
+  return TRUE;
+}
+
 gdouble bt_embed_cosine(const gfloat a[BT_EMBED_DIM], const gfloat b[BT_EMBED_DIM])
 {
+  if (a == NULL || b == NULL || !vec_is_finite(a) || !vec_is_finite(b))
+    return 0.0;
   gdouble dot = 0.0;
   for (guint i = 0; i < BT_EMBED_DIM; i++)
     dot += (gdouble)a[i] * (gdouble)b[i];
-  return dot;
+  return isfinite(dot) ? dot : 0.0;
 }
 
 typedef struct {
@@ -148,9 +159,17 @@ static gint cmp_hit_score_desc(gconstpointer a, gconstpointer b)
   return strcmp(ha->path, hb->path);
 }
 
+guint bt_embed_count_cached(BtIndex *index)
+{
+  return index ? bt_index_embedding_count(index) : 0u;
+}
+
 GPtrArray *bt_embed_hybrid_search(const BtVault *vault, BtIndex *index, const gchar *query,
                                   guint limit, gboolean enabled, GError **error)
 {
+  if (index == NULL)
+    return g_ptr_array_new_with_free_func(bt_search_hit_free);
+
   GPtrArray *fts = bt_index_search_fts(index, query, limit > 0 ? limit : 25, error);
   if (!enabled || fts == NULL || query == NULL || query[0] == '\0')
     return fts;
@@ -166,17 +185,34 @@ GPtrArray *bt_embed_hybrid_search(const BtVault *vault, BtIndex *index, const gc
   gfloat qvec[BT_EMBED_DIM];
   bt_embed_text(query, qvec);
 
+  /* Load persisted vectors from SQLite once to avoid O(N) disk I/O per query. */
+  GPtrArray *cached_rows = bt_index_list_embeddings(index, NULL);
+  GHashTable *cached_by_id = g_hash_table_new(g_str_hash, g_str_equal);
+  for (guint i = 0; cached_rows != NULL && i < cached_rows->len; i++) {
+    BtEmbeddingRow *er = g_ptr_array_index(cached_rows, i);
+    if (er->dim == BT_EMBED_DIM && er->vec != NULL && er->note_id != NULL &&
+        vec_is_finite(er->vec))
+      g_hash_table_insert(cached_by_id, er->note_id, er->vec);
+  }
+
   GPtrArray *notes = bt_index_list_notes(index, NULL);
   for (guint i = 0; notes != NULL && i < notes->len; i++) {
     const BtNoteRow *r = g_ptr_array_index(notes, i);
-    gchar *raw = NULL;
-    gsize len = 0;
-    if (!vault_read(vault, r->path, &raw, &len, NULL))
-      continue;
-    gfloat nvec[BT_EMBED_DIM];
-    bt_embed_text(raw, nvec);
-    gdouble cos = bt_embed_cosine(qvec, nvec);
-    g_free(raw);
+    const gfloat *vec_ptr = g_hash_table_lookup(cached_by_id, r->id);
+    gfloat fallback_vec[BT_EMBED_DIM];
+    if (vec_ptr == NULL) {
+      if (vault == NULL)
+        continue;
+      gchar *raw = NULL;
+      gsize len = 0;
+      if (!vault_read(vault, r->path, &raw, &len, NULL))
+        continue;
+      bt_embed_text(raw, fallback_vec);
+      g_free(raw);
+      vec_ptr = fallback_vec;
+    }
+
+    gdouble cos = bt_embed_cosine(qvec, vec_ptr);
     if (cos < 0.25)
       continue;
 
@@ -195,6 +231,8 @@ GPtrArray *bt_embed_hybrid_search(const BtVault *vault, BtIndex *index, const gc
     }
   }
   g_clear_pointer(&notes, g_ptr_array_unref);
+  g_hash_table_destroy(cached_by_id);
+  g_clear_pointer(&cached_rows, g_ptr_array_unref);
   g_hash_table_destroy(by_path);
 
   g_ptr_array_sort(fts, cmp_hit_score_desc);

@@ -16,11 +16,17 @@ typedef void (*BtEditorLinkFn)(const gchar *target, gpointer user_data);
 typedef void (*BtEditorDirtyFn)(gboolean dirty, gpointer user_data);
 typedef void (*BtEditorDiffFn)(const gchar *relpath, gpointer user_data);
 typedef void (*BtEditorReloadFn)(const gchar *relpath, gpointer user_data);
+typedef void (*BtEditorActionFn)(gpointer user_data);
 
 BtEditorPane *bt_editorpane_new(BtEditorSaveFn on_save, BtEditorLinkFn on_link,
                                 BtEditorDirtyFn on_dirty, gpointer user_data);
 void bt_editorpane_set_conflict_cbs(BtEditorPane *pane, BtEditorDiffFn on_diff,
                                     BtEditorReloadFn on_reload);
+void bt_editorpane_set_onboarding_cbs(BtEditorPane *pane, BtEditorActionFn on_open_vault,
+                                      BtEditorActionFn on_create_vault, gpointer user_data);
+void bt_editorpane_set_has_vault(BtEditorPane *pane, gboolean has_vault);
+void bt_editorpane_show_find(BtEditorPane *pane, gboolean with_replace);
+void bt_editorpane_hide_find(BtEditorPane *pane);
 void bt_editorpane_show_conflict(BtEditorPane *pane, gboolean deleted);
 void bt_editorpane_hide_conflict(BtEditorPane *pane);
 void bt_editorpane_set_dark(BtEditorPane *pane, gboolean dark);

@@ -20,15 +20,24 @@ static cJSON *load_dismissed_json(const gchar *vault_root)
   gchar *p = dismissed_path(vault_root);
   gchar *raw = NULL;
   cJSON *root = NULL;
-  if (g_file_get_contents(p, &raw, NULL, NULL)) {
+  gboolean had_file = g_file_get_contents(p, &raw, NULL, NULL);
+  if (had_file) {
     root = cJSON_Parse(raw);
     g_free(raw);
   }
-  g_free(p);
   if (!cJSON_IsObject(root)) {
+    if (had_file) {
+      gchar *bak = g_strdup_printf("%s.bak", p);
+      if (g_rename(p, bak) == 0)
+        g_warning("BrainTerm: corrupt dismissed_tags.json backed up to %s", bak);
+      else
+        g_warning("BrainTerm: corrupt dismissed_tags.json could not be backed up");
+      g_free(bak);
+    }
     cJSON_Delete(root);
     root = cJSON_CreateObject();
   }
+  g_free(p);
   return root;
 }
 
@@ -40,7 +49,11 @@ static void save_dismissed_json(const gchar *vault_root, cJSON *root)
   g_free(dir);
   char *s = cJSON_Print(root);
   if (s != NULL) {
-    g_file_set_contents(p, s, -1, NULL);
+    GError *err = NULL;
+    if (!g_file_set_contents(p, s, -1, &err)) {
+      g_warning("organizer: cannot write '%s': %s", p, err ? err->message : "unknown error");
+      g_clear_error(&err);
+    }
     free(s);
   }
   g_free(p);
@@ -293,6 +306,13 @@ gboolean bt_organizer_promote_tag(const BtVault *vault, BtIndex *index, const gc
   if (!vault_read(vault, relpath, &raw, &len, error))
     return FALSE;
   BtFrontmatter *fm = bt_frontmatter_parse(raw, len);
+  if (fm->parse_error) {
+    g_set_error(error, BT_ERROR, BT_ERROR_INVALID,
+                "Cannot promote tag on '%s': frontmatter YAML has parse errors (R9)", relpath);
+    bt_frontmatter_free(fm);
+    g_free(raw);
+    return FALSE;
+  }
   const gchar *body = raw + fm->body_offset;
 
   for (guint i = 0; i < fm->tags_ai->len; i++) {
@@ -324,6 +344,13 @@ gboolean bt_organizer_dismiss_tag(const BtVault *vault, BtIndex *index, const gc
   if (!vault_read(vault, relpath, &raw, &len, error))
     return FALSE;
   BtFrontmatter *fm = bt_frontmatter_parse(raw, len);
+  if (fm->parse_error) {
+    g_set_error(error, BT_ERROR, BT_ERROR_INVALID,
+                "Cannot dismiss tag on '%s': frontmatter YAML has parse errors (R9)", relpath);
+    bt_frontmatter_free(fm);
+    g_free(raw);
+    return FALSE;
+  }
   const gchar *body = raw + fm->body_offset;
 
   for (guint i = 0; i < fm->tags_ai->len; i++) {

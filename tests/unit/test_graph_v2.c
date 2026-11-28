@@ -295,7 +295,7 @@ static void test_label_placement_no_overlap_and_caps(void **state)
 
   BtGraphCoreObstacle obs[1] = {{.cx = 290.0f, .cy = 9.0f, .r = 8.0f, .node_idx = 999u}};
   BtGraphLabelCand out[64];
-  guint n = bt_graph_place_labels(cands, 40u, obs, 1u, 20u, 12u, out, 64u);
+  guint n = bt_graph_place_labels(cands, 40u, obs, 1u, 20u, 12u, NULL, out, 64u);
   assert_true(n <= 20u);
   assert_true(n >= 2u);
   /* Focused (39) and selected (38) are placed first */
@@ -327,11 +327,32 @@ static void test_label_placement_no_overlap_and_caps(void **state)
     nbrs[i].priority = 2u;
     nbrs[i].is_neighbor = TRUE;
   }
-  guint nn = bt_graph_place_labels(nbrs, 26u, NULL, 0u, 20u, 12u, out, 64u);
+  guint nn = bt_graph_place_labels(nbrs, 26u, NULL, 0u, 20u, 12u, NULL, out, 64u);
   assert_int_equal(nn, 13u); /* 1 hovered + 12 highest-degree neighbors */
   assert_int_equal(out[0].node_idx, 100u);
   assert_int_equal(out[1].degree, 25u);
   assert_int_equal(out[12].degree, 14u);
+}
+
+static void test_primary_label_at_viewport_edges(void **state)
+{
+  (void)state;
+  const BtGraphLabelViewport viewport = {200.0f, 120.0f};
+  BtGraphLabelCand cands[] = {
+    {.node_idx = 1u, .x = 151.0f, .y = 124.0f, .w = 80.0f, .h = 18.0f,
+     .anchor_x = 191.0f, .anchor_y = 114.0f, .anchor_r = 5.0f,
+     .priority = 5u, .always_show = TRUE},
+    {.node_idx = 2u, .x = -35.0f, .y = 16.0f, .w = 80.0f, .h = 18.0f,
+     .anchor_x = 5.0f, .anchor_y = 6.0f, .anchor_r = 5.0f,
+     .priority = 3u, .always_show = TRUE},
+  };
+  BtGraphLabelCand out[2];
+  guint n = bt_graph_place_labels(cands, 2u, NULL, 0u, 2u, 0u, &viewport, out, 2u);
+  assert_int_equal(n, 2u);
+  assert_true(out[0].x + out[0].w < viewport.width);
+  assert_true(out[0].y + out[0].h < out[0].anchor_y - out[0].anchor_r);
+  assert_true(out[1].x > 0.0f);
+  assert_true(out[1].y == cands[1].y);
 }
 
 static void test_cursor_anchored_zoom(void **state)
@@ -557,6 +578,7 @@ int main(void)
     cmocka_unit_test(test_label_visibility_rules),
     cmocka_unit_test(test_3d_layout_deterministic_and_bounded),
     cmocka_unit_test(test_label_placement_no_overlap_and_caps),
+    cmocka_unit_test(test_primary_label_at_viewport_edges),
     cmocka_unit_test(test_cursor_anchored_zoom),
     cmocka_unit_test(test_spatial_pick_stack_and_spread),
     cmocka_unit_test(test_galaxy_palette_assignment_and_persistence),

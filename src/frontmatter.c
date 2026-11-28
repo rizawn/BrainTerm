@@ -172,6 +172,11 @@ BtFrontmatter *bt_frontmatter_parse(const gchar *doc, gsize len)
   fm->has_frontmatter = TRUE;
   fm->body_offset = boff;
 
+  if (ylen > (256u * 1024u)) {
+    fm->parse_error = TRUE;
+    return fm;
+  }
+
   yaml_parser_t parser;
   yaml_document_t ydoc;
   if (!yaml_parser_initialize(&parser)) {

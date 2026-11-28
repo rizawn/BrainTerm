@@ -142,6 +142,25 @@ void bt_link_res_row_free(gpointer row)
   g_free(r);
 }
 
+void bt_embedding_row_free(gpointer row)
+{
+  BtEmbeddingRow *r = row;
+  if (!r) return;
+  g_free(r->note_id);
+  g_free(r->vec);
+  g_free(r);
+}
+
+void bt_pending_ai_tag_free(gpointer row)
+{
+  BtPendingAiTag *r = row;
+  if (!r) return;
+  g_free(r->path);
+  g_free(r->title);
+  g_free(r->tag);
+  g_free(r);
+}
+
 /* ------------------------------------------- ADR-007 single-writer queue */
 
 typedef void (*DbJobFn)(sqlite3 *db, gpointer ctx);
@@ -1262,9 +1281,27 @@ gboolean bt_index_import_sessions_json(BtIndex *idx, const gchar *vault_root, GE
 
 typedef struct {
   const gchar *arg;
+  guint limit;
   GPtrArray *out;
   gchar *str_out;
 } ListCtx;
+
+static BtNoteRow *read_note_row(sqlite3_stmt *st)
+{
+  BtNoteRow *r = g_new0(BtNoteRow, 1);
+  r->id = g_strdup((const char *)sqlite3_column_text(st, 0));
+  r->path = g_strdup((const char *)sqlite3_column_text(st, 1));
+  r->title = g_strdup((const char *)sqlite3_column_text(st, 2));
+  r->created = sqlite3_column_int64(st, 3);
+  r->updated = sqlite3_column_int64(st, 4);
+  r->source = g_strdup((const char *)sqlite3_column_text(st, 5));
+  const char *ag = (const char *)sqlite3_column_text(st, 6);
+  r->agent = ag ? g_strdup(ag) : NULL;
+  r->fm_hash = g_strdup((const char *)sqlite3_column_text(st, 7));
+  r->body_hash = g_strdup((const char *)sqlite3_column_text(st, 8));
+  r->parse_error = sqlite3_column_int(st, 9) != 0;
+  return r;
+}
 
 static void job_list_notes(sqlite3 *db, gpointer ud)
 {
@@ -1275,30 +1312,71 @@ static void job_list_notes(sqlite3 *db, gpointer ud)
                          "SELECT id, path, title, created, updated, source, agent, fm_hash, body_hash, parse_error "
                          "FROM notes ORDER BY path;",
                          -1, &st, NULL) == SQLITE_OK) {
-    while (sqlite3_step(st) == SQLITE_ROW) {
-      BtNoteRow *r = g_new0(BtNoteRow, 1);
-      r->id = g_strdup((const char *)sqlite3_column_text(st, 0));
-      r->path = g_strdup((const char *)sqlite3_column_text(st, 1));
-      r->title = g_strdup((const char *)sqlite3_column_text(st, 2));
-      r->created = sqlite3_column_int64(st, 3);
-      r->updated = sqlite3_column_int64(st, 4);
-      r->source = g_strdup((const char *)sqlite3_column_text(st, 5));
-      const char *ag = (const char *)sqlite3_column_text(st, 6);
-      r->agent = ag ? g_strdup(ag) : NULL;
-      r->fm_hash = g_strdup((const char *)sqlite3_column_text(st, 7));
-      r->body_hash = g_strdup((const char *)sqlite3_column_text(st, 8));
-      r->parse_error = sqlite3_column_int(st, 9) != 0;
-      g_ptr_array_add(c->out, r);
-    }
+    while (sqlite3_step(st) == SQLITE_ROW)
+      g_ptr_array_add(c->out, read_note_row(st));
     sqlite3_finalize(st);
   }
 }
 
 GPtrArray *bt_index_list_notes(BtIndex *idx, GError **error)
 {
+  g_return_val_if_fail(idx != NULL, NULL);
   (void)error;
   ListCtx c = {0};
   run_on_writer(idx, job_list_notes, &c);
+  return c.out;
+}
+
+static void job_list_recent_notes(sqlite3 *db, gpointer ud)
+{
+  ListCtx *c = ud;
+  c->out = g_ptr_array_new_with_free_func(bt_note_row_free);
+  sqlite3_stmt *st = NULL;
+  if (sqlite3_prepare_v2(db,
+                         "SELECT id, path, title, created, updated, source, agent, fm_hash, body_hash, parse_error "
+                         "FROM notes ORDER BY updated DESC, path ASC LIMIT ?1;",
+                         -1, &st, NULL) == SQLITE_OK) {
+    sqlite3_bind_int(st, 1, (int)(c->limit > 0 ? c->limit : 10u));
+    while (sqlite3_step(st) == SQLITE_ROW)
+      g_ptr_array_add(c->out, read_note_row(st));
+    sqlite3_finalize(st);
+  }
+}
+
+GPtrArray *bt_index_list_recent_notes(BtIndex *idx, guint limit, GError **error)
+{
+  g_return_val_if_fail(idx != NULL, NULL);
+  (void)error;
+  ListCtx c = {.limit = limit};
+  run_on_writer(idx, job_list_recent_notes, &c);
+  return c.out;
+}
+
+static void job_list_orphan_notes(sqlite3 *db, gpointer ud)
+{
+  ListCtx *c = ud;
+  c->out = g_ptr_array_new_with_free_func(bt_note_row_free);
+  const char *sql =
+      "SELECT n.id, n.path, n.title, n.created, n.updated, n.source, n.agent, n.fm_hash, n.body_hash, n.parse_error "
+      "FROM notes n "
+      "WHERE NOT EXISTS (SELECT 1 FROM edges e WHERE e.src = n.id AND e.kind = 'link' AND e.dst != n.id) "
+      "AND NOT EXISTS (SELECT 1 FROM link_resolutions lr WHERE lr.resolved_path = n.path "
+      "AND lr.status = 'resolved' AND lr.src_path != n.path) "
+      "ORDER BY n.path;";
+  sqlite3_stmt *st = NULL;
+  if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) == SQLITE_OK) {
+    while (sqlite3_step(st) == SQLITE_ROW)
+      g_ptr_array_add(c->out, read_note_row(st));
+    sqlite3_finalize(st);
+  }
+}
+
+GPtrArray *bt_index_list_orphan_notes(BtIndex *idx, GError **error)
+{
+  g_return_val_if_fail(idx != NULL, NULL);
+  (void)error;
+  ListCtx c = {0};
+  run_on_writer(idx, job_list_orphan_notes, &c);
   return c.out;
 }
 
@@ -1388,10 +1466,120 @@ static void job_list_link_resolutions(sqlite3 *db, gpointer ud)
 
 GPtrArray *bt_index_list_link_resolutions(BtIndex *idx, const gchar *src_note_id, GError **error)
 {
+  g_return_val_if_fail(idx != NULL, NULL);
   (void)error;
   ListCtx c = {.arg = src_note_id};
   run_on_writer(idx, job_list_link_resolutions, &c);
   return c.out;
+}
+
+static void job_list_backlinks(sqlite3 *db, gpointer ud)
+{
+  ListCtx *c = ud;
+  c->out = g_ptr_array_new_with_free_func(bt_link_res_row_free);
+  if (c->arg == NULL || c->arg[0] == '\0')
+    return;
+  const char *sql =
+      "SELECT src_note_id, src_path, raw_target, resolved_path, status, kind, line_no "
+      "FROM link_resolutions WHERE resolved_path=?1 AND status='resolved' "
+      "ORDER BY src_path, line_no, id;";
+  sqlite3_stmt *st = NULL;
+  if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) == SQLITE_OK) {
+    sqlite3_bind_text(st, 1, c->arg, -1, SQLITE_TRANSIENT);
+    while (sqlite3_step(st) == SQLITE_ROW) {
+      BtLinkResRow *r = g_new0(BtLinkResRow, 1);
+      r->src_note_id = g_strdup((const char *)sqlite3_column_text(st, 0));
+      r->src_path = g_strdup((const char *)sqlite3_column_text(st, 1));
+      r->raw_target = g_strdup((const char *)sqlite3_column_text(st, 2));
+      const char *rp = (const char *)sqlite3_column_text(st, 3);
+      r->resolved_path = rp ? g_strdup(rp) : NULL;
+      r->status = g_strdup((const char *)sqlite3_column_text(st, 4));
+      r->kind = g_strdup((const char *)sqlite3_column_text(st, 5));
+      r->line_no = sqlite3_column_int(st, 6);
+      g_ptr_array_add(c->out, r);
+    }
+    sqlite3_finalize(st);
+  }
+}
+
+GPtrArray *bt_index_list_backlinks(BtIndex *idx, const gchar *resolved_path, GError **error)
+{
+  g_return_val_if_fail(idx != NULL, NULL);
+  (void)error;
+  ListCtx c = {.arg = resolved_path};
+  run_on_writer(idx, job_list_backlinks, &c);
+  return c.out;
+}
+
+static void job_list_pending_ai_tags(sqlite3 *db, gpointer ud)
+{
+  ListCtx *c = ud;
+  c->out = g_ptr_array_new_with_free_func(bt_pending_ai_tag_free);
+  const char *sql =
+      "SELECT n.path, n.title, t.tag, COALESCE(t.confidence, 0.0) "
+      "FROM tags t JOIN notes n ON n.id = t.note_id "
+      "WHERE t.origin = 'ai' ORDER BY n.path, t.tag;";
+  sqlite3_stmt *st = NULL;
+  if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) == SQLITE_OK) {
+    while (sqlite3_step(st) == SQLITE_ROW) {
+      BtPendingAiTag *r = g_new0(BtPendingAiTag, 1);
+      r->path = g_strdup((const char *)sqlite3_column_text(st, 0));
+      r->title = g_strdup((const char *)sqlite3_column_text(st, 1));
+      r->tag = g_strdup((const char *)sqlite3_column_text(st, 2));
+      r->confidence = sqlite3_column_double(st, 3);
+      g_ptr_array_add(c->out, r);
+    }
+    sqlite3_finalize(st);
+  }
+}
+
+GPtrArray *bt_index_list_pending_ai_tags(BtIndex *idx, GError **error)
+{
+  g_return_val_if_fail(idx != NULL, NULL);
+  (void)error;
+  ListCtx c = {0};
+  run_on_writer(idx, job_list_pending_ai_tags, &c);
+  return c.out;
+}
+
+static void job_list_embeddings(sqlite3 *db, gpointer ud)
+{
+  ListCtx *c = ud;
+  c->out = g_ptr_array_new_with_free_func(bt_embedding_row_free);
+  sqlite3_stmt *st = NULL;
+  if (sqlite3_prepare_v2(db, "SELECT note_id, chunk, vec FROM embeddings WHERE chunk=0 ORDER BY note_id;",
+                         -1, &st, NULL) == SQLITE_OK) {
+    while (sqlite3_step(st) == SQLITE_ROW) {
+      const void *blob = sqlite3_column_blob(st, 2);
+      int bytes = sqlite3_column_bytes(st, 2);
+      if (blob == NULL || bytes <= 0 || (bytes % (int)sizeof(gfloat)) != 0)
+        continue;
+      BtEmbeddingRow *r = g_new0(BtEmbeddingRow, 1);
+      r->note_id = g_strdup((const char *)sqlite3_column_text(st, 0));
+      r->chunk = sqlite3_column_int(st, 1);
+      r->dim = (gsize)bytes / sizeof(gfloat);
+      r->vec = g_memdup2(blob, (gsize)bytes);
+      g_ptr_array_add(c->out, r);
+    }
+    sqlite3_finalize(st);
+  }
+}
+
+GPtrArray *bt_index_list_embeddings(BtIndex *idx, GError **error)
+{
+  g_return_val_if_fail(idx != NULL, NULL);
+  (void)error;
+  ListCtx c = {0};
+  run_on_writer(idx, job_list_embeddings, &c);
+  return c.out;
+}
+
+guint bt_index_embedding_count(BtIndex *idx)
+{
+  g_return_val_if_fail(idx != NULL, 0u);
+  IntQueryCtx c = {.val = 0, .sql = "SELECT COUNT(*) FROM embeddings WHERE chunk=0;", .arg = NULL};
+  run_on_writer(idx, job_int_query, &c);
+  return (guint)MAX(c.val, 0);
 }
 
 static void job_body_hash(sqlite3 *db, gpointer ud)

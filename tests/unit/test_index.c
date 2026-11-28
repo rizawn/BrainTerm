@@ -207,12 +207,60 @@ static void test_migration_v1_to_v2(void **state)
   g_free(root);
 }
 
+static void test_recent_backlinks_orphans_and_ai_tags(void **state)
+{
+  (void)state;
+  gchar *root = g_dir_make_tmp("bt-idx-ext-XXXXXX", NULL);
+  bt_test_put(root, "alpha.md",
+              "---\nid: bt-a\ntitle: \"Alpha\"\ncreated: 2026-11-20T00:00:00Z\n"
+              "updated: 2026-11-21T00:00:00Z\nsource: human\ntags_ai: [pending-tag]\n---\nLinks [[beta]].\n");
+  bt_test_put(root, "beta.md",
+              "---\nid: bt-b\ntitle: \"Beta\"\ncreated: 2026-11-22T00:00:00Z\n"
+              "updated: 2026-11-25T00:00:00Z\nsource: human\n---\nTarget note.\n");
+  bt_test_put(root, "orphan.md",
+              "---\nid: bt-o\ntitle: \"Orphan\"\ncreated: 2026-11-19T00:00:00Z\n"
+              "updated: 2026-11-20T00:00:00Z\nsource: human\n---\nAlone.\n");
+
+  BtVault *v = vault_open(root, NULL, NULL);
+  BtIndex *idx = bt_index_open(root, NULL, NULL);
+  assert_non_null(idx);
+  assert_true(bt_index_rebuild(idx, v, NULL));
+
+  GPtrArray *recent = bt_index_list_recent_notes(idx, 2, NULL);
+  assert_int_equal(recent->len, 2);
+  assert_string_equal(((const BtNoteRow *)g_ptr_array_index(recent, 0))->path, "beta.md");
+  g_ptr_array_unref(recent);
+
+  GPtrArray *bls = bt_index_list_backlinks(idx, "beta.md", NULL);
+  assert_int_equal(bls->len, 1);
+  assert_string_equal(((const BtLinkResRow *)g_ptr_array_index(bls, 0))->src_path, "alpha.md");
+  g_ptr_array_unref(bls);
+
+  GPtrArray *orphans = bt_index_list_orphan_notes(idx, NULL);
+  assert_int_equal(orphans->len, 1);
+  assert_string_equal(((const BtNoteRow *)g_ptr_array_index(orphans, 0))->path, "orphan.md");
+  g_ptr_array_unref(orphans);
+
+  GPtrArray *pending = bt_index_list_pending_ai_tags(idx, NULL);
+  assert_int_equal(pending->len, 1);
+  const BtPendingAiTag *pt = g_ptr_array_index(pending, 0);
+  assert_string_equal(pt->path, "alpha.md");
+  assert_string_equal(pt->tag, "pending-tag");
+  g_ptr_array_unref(pending);
+
+  bt_index_close(idx);
+  vault_free(v);
+  bt_test_rm_rf(root);
+  g_free(root);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
     cmocka_unit_test(test_schema_fts_and_golden_rebuild),
     cmocka_unit_test(test_r2_corrupt_and_higher_version_refused),
     cmocka_unit_test(test_migration_v1_to_v2),
+    cmocka_unit_test(test_recent_backlinks_orphans_and_ai_tags),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

@@ -69,6 +69,7 @@ struct BtGraphGL {
   gboolean bloom_supported;
   gboolean bloom_ready;
   gboolean graph_dirty;
+  gboolean pos_dirty;
   gboolean layout3d_dirty;
   gboolean state_dirty;
   gboolean atlas_dirty;
@@ -600,9 +601,64 @@ static void upload_layout3d_buffers(BtGraphGL *gl)
   glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
+static void upload_graph_edges(BtGraphGL *gl, guint nn)
+{
+  const BtGraph *g = gl->graph;
+  guint ne = (g != NULL && g->edges != NULL) ? g->edges->len : 0u;
+  if (ne > 0u) {
+    g_autofree EdgeInst *ebuf = g_new(EdgeInst, ne);
+    guint out_e = 0;
+    for (guint i = 0; i < ne; i++) {
+      const BtGraphEdge *e = &g_array_index(g->edges, BtGraphEdge, i);
+      if (e->src_idx >= nn || e->dst_idx >= nn)
+        continue;
+      const BtGraphNode *a = g_ptr_array_index(g->nodes, e->src_idx);
+      const BtGraphNode *b = g_ptr_array_index(g->nodes, e->dst_idx);
+      if (!a->visible || !b->visible)
+        continue;
+      ebuf[out_e].ax = (float)a->x;
+      ebuf[out_e].ay = (float)a->y;
+      ebuf[out_e].bx = (float)b->x;
+      ebuf[out_e].by = (float)b->y;
+      ebuf[out_e].curve_sign = ((e->src_idx ^ e->dst_idx) & 1u) ? 1.0f : -1.0f;
+      ebuf[out_e].src_idx = (float)e->src_idx;
+      ebuf[out_e].dst_idx = (float)e->dst_idx;
+      ebuf[out_e].kind = (float)e->kind;
+      out_e++;
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, gl->vbo_edge);
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(out_e * sizeof(EdgeInst)), ebuf, GL_STATIC_DRAW);
+    gl->edge_count = out_e;
+  } else {
+    gl->edge_count = 0;
+  }
+}
+
+static void upload_graph_positions(BtGraphGL *gl)
+{
+  gl->pos_dirty = FALSE;
+  const BtGraph *g = gl->graph;
+  if (g == NULL || g->nodes == NULL || gl->node_static_src == NULL)
+    return;
+  guint nn = MIN(g->nodes->len, gl->node_count);
+  NodeInst *nbuf = gl->node_static_src;
+  for (guint i = 0; i < nn; i++) {
+    const BtGraphNode *nd = g_ptr_array_index(g->nodes, i);
+    nbuf[i].x = (float)nd->x;
+    nbuf[i].y = (float)nd->y;
+    nbuf[i].radius = (float)nd->radius;
+  }
+  glBindBuffer(GL_ARRAY_BUFFER, gl->vbo_node_static);
+  glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)(nn * sizeof(NodeInst)), nbuf);
+  gl->last_drawn_sorted = FALSE;
+  upload_graph_edges(gl, nn);
+  glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
 static void upload_graph_buffers(BtGraphGL *gl)
 {
   gl->graph_dirty = FALSE;
+  gl->pos_dirty = FALSE;
   const BtGraph *g = gl->graph;
   if (g == NULL || g->nodes == NULL || g->nodes->len == 0) {
     gl->node_count = 0;
@@ -656,34 +712,7 @@ static void upload_graph_buffers(BtGraphGL *gl)
                GL_DYNAMIC_DRAW);
   gl->node_count = nn;
 
-  guint ne = (g->edges != NULL) ? g->edges->len : 0u;
-  if (ne > 0u) {
-    g_autofree EdgeInst *ebuf = g_new(EdgeInst, ne);
-    guint out_e = 0;
-    for (guint i = 0; i < ne; i++) {
-      const BtGraphEdge *e = &g_array_index(g->edges, BtGraphEdge, i);
-      if (e->src_idx >= nn || e->dst_idx >= nn)
-        continue;
-      const BtGraphNode *a = g_ptr_array_index(g->nodes, e->src_idx);
-      const BtGraphNode *b = g_ptr_array_index(g->nodes, e->dst_idx);
-      if (!a->visible || !b->visible)
-        continue;
-      ebuf[out_e].ax = (float)a->x;
-      ebuf[out_e].ay = (float)a->y;
-      ebuf[out_e].bx = (float)b->x;
-      ebuf[out_e].by = (float)b->y;
-      ebuf[out_e].curve_sign = ((e->src_idx ^ e->dst_idx) & 1u) ? 1.0f : -1.0f;
-      ebuf[out_e].src_idx = (float)e->src_idx;
-      ebuf[out_e].dst_idx = (float)e->dst_idx;
-      ebuf[out_e].kind = (float)e->kind;
-      out_e++;
-    }
-    glBindBuffer(GL_ARRAY_BUFFER, gl->vbo_edge);
-    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(out_e * sizeof(EdgeInst)), ebuf, GL_STATIC_DRAW);
-    gl->edge_count = out_e;
-  } else {
-    gl->edge_count = 0;
-  }
+  upload_graph_edges(gl, nn);
 
   glBindBuffer(GL_ARRAY_BUFFER, 0);
   gl->state_dirty = TRUE;
@@ -773,6 +802,8 @@ void bt_graph_gl_render_state(BtGraphGL *gl, const BtGraphRenderState *st)
   }
   if (gl->graph_dirty)
     upload_graph_buffers(gl);
+  else if (gl->pos_dirty)
+    upload_graph_positions(gl);
   if (gl->layout3d_dirty)
     upload_layout3d_buffers(gl);
 
@@ -874,8 +905,9 @@ void bt_graph_gl_render_state(BtGraphGL *gl, const BtGraphRenderState *st)
   gint focus_idx = (st->hover_idx >= 0)
                        ? st->hover_idx
                        : ((st->focus_idx >= 0) ? st->focus_idx : st->selected_idx);
-  gboolean has_focus = (focus_idx >= 0 && (guint)focus_idx < gl->node_count);
-  float hf = has_focus ? (float)CLAMP(st->hover_fade, 0.0, 1.0) : 0.0f;
+  gboolean orphan_mode = (st->highlight_orphans && focus_idx < 0);
+  gboolean has_focus = (focus_idx >= 0 && (guint)focus_idx < gl->node_count) || orphan_mode;
+  float hf = orphan_mode ? 1.0f : (has_focus ? (float)CLAMP(st->hover_fade, 0.0, 1.0) : 0.0f);
   if (st->hover_idx < 0 && (st->focus_idx >= 0 || st->selected_idx >= 0))
     hf = 1.0f;
 
@@ -895,7 +927,10 @@ void bt_graph_gl_render_state(BtGraphGL *gl, const BtGraphRenderState *st)
       glUniform1f(gl->u_edge_hf, hf);
       glUniform1i(gl->u_edge_segs, segs);
       glUniform1i(gl->u_edge_curved, (high && !clean_2d) ? 1 : 0);
-      glUniform1f(gl->u_edge_ba, clean_2d ? 0.40f : (high ? (mode_3d ? 0.16f : 0.20f) : 0.14f));
+      float edge_ba = clean_2d ? 0.40f : (high ? (mode_3d ? 0.16f : 0.20f) : 0.14f);
+      if (orphan_mode)
+        edge_ba *= 0.22f;
+      glUniform1f(gl->u_edge_ba, edge_ba);
       glUniform1f(gl->u_edge_hw, clean_2d ? 0.55f : (high ? 0.85f : 0.70f));
       bt_theme_unpack_f(BT_COL_GRAPH_EDGE_DIM, &r, &g, &b);
       glUniform3f(gl->u_edge_dim_col, r, g, b);
@@ -942,7 +977,8 @@ void bt_graph_gl_render_state(BtGraphGL *gl, const BtGraphRenderState *st)
     glUniformMatrix4fv(gl->u_node_mvp, 1, GL_FALSE, mvp);
     glUniform2f(gl->u_node_mouse, (float)st->mouse_x, (float)st->mouse_y);
     glUniform1f(gl->u_node_spread, (mode_3d && !st->reduce_motion) ? (float)st->spread_str : 0.0f);
-    glUniform1f(gl->u_node_dim_alpha, st->focus_isolated ? 0.08f : 0.25f);
+    glUniform1f(gl->u_node_dim_alpha,
+                st->focus_isolated ? 0.08f : (orphan_mode ? 0.16f : 0.25f));
     glUniform1f(gl->u_node_gal_time, is_galaxy ? (float)st->gal_time : 0.0f);
     glUniform1i(gl->u_node_clean, clean_2d ? 1 : 0);
     bt_theme_unpack_f(BT_COL_GRAPH_BG, &r, &g, &b);
@@ -1103,8 +1139,10 @@ void bt_graph_gl_render_state(BtGraphGL *gl, const BtGraphRenderState *st)
     }
 
     guint max_labels = bt_graph_label_cap_for_zoom(eff_zoom);
+    const BtGraphLabelViewport viewport = {vp_w, vp_h};
     guint lbl_n = bt_graph_place_labels(gl->lbl_cands, cand_n, gl->obs_scratch, obs_n,
-                                        max_labels, 12u, gl->lbl_placed, BT_GL_LABEL_CAP);
+                                        max_labels, 12u, clean_2d ? &viewport : NULL,
+                                        gl->lbl_placed, BT_GL_LABEL_CAP);
     gl->last_label_count = lbl_n;
     guint ov_cnt = 0;
     for (guint i = 0; i < lbl_n; i++) {
@@ -1418,9 +1456,16 @@ void bt_graph_gl_mark_graph_dirty(BtGraphGL *gl)
 {
   if (gl != NULL) {
     gl->graph_dirty = TRUE;
+    gl->pos_dirty = FALSE;
     gl->atlas_dirty = TRUE;
     gl->state_dirty = TRUE;
   }
+}
+
+void bt_graph_gl_mark_positions_dirty(BtGraphGL *gl)
+{
+  if (gl != NULL)
+    gl->pos_dirty = TRUE;
 }
 
 void bt_graph_gl_mark_state_dirty(BtGraphGL *gl)

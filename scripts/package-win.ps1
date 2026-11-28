@@ -1,4 +1,4 @@
-﻿# package-win.ps1 — Lock-safe, atomic Windows packager for BrainTerm.
+# package-win.ps1 — Lock-safe, atomic Windows packager for BrainTerm.
 # Stages into dist\.staging, swaps into dist\brainterm, verifies SHA-256 + build
 # stamp, and optionally runs the §11.7 isolated-PATH smoke test.
 # Compatible with Windows PowerShell 5.1 and PowerShell 7+.
@@ -55,6 +55,45 @@ function Test-FileUnlocked {
     return $true
   } catch {
     return $false
+  }
+}
+
+function Invoke-BundledCheck {
+  param(
+    [string]$FilePath,
+    [string]$Arguments,
+    [int]$TimeoutMs,
+    [string]$InputLine
+  )
+
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = $FilePath
+  $psi.Arguments = $Arguments
+  $psi.UseShellExecute = $false
+  $psi.CreateNoWindow = $true
+  $psi.RedirectStandardInput = [bool]$InputLine
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  $process = [System.Diagnostics.Process]::Start($psi)
+  try {
+    $stdout = $process.StandardOutput.ReadToEndAsync()
+    $stderr = $process.StandardError.ReadToEndAsync()
+    if ($InputLine) {
+      $process.StandardInput.WriteLine($InputLine)
+      $process.StandardInput.Close()
+    }
+    if (-not $process.WaitForExit($TimeoutMs)) {
+      $process.Kill()
+      throw "Packaged command timed out after $TimeoutMs ms: $FilePath $Arguments"
+    }
+    $text = ($stdout.GetAwaiter().GetResult() + [Environment]::NewLine +
+             $stderr.GetAwaiter().GetResult()).Trim()
+    if ($process.ExitCode -ne 0) {
+      throw "Packaged command failed with exit code $($process.ExitCode): $FilePath $Arguments`n$text"
+    }
+    return $text
+  } finally {
+    $process.Dispose()
   }
 }
 
@@ -122,6 +161,7 @@ foreach ($tmp in @($stageDir, $backupDir)) {
 
 New-Item -ItemType Directory -Force -Path `
   $stageDir, `
+  (Join-Path $stageDir "licenses"), `
   (Join-Path $stageDir "share\brainterm\language-specs"), `
   (Join-Path $stageDir "share\brainterm\styles"), `
   (Join-Path $stageDir "share\brainterm\fonts"), `
@@ -131,8 +171,11 @@ New-Item -ItemType Directory -Force -Path `
 
 Copy-FileStrict -Source $exeFull -Destination (Join-Path $stageDir "bt.exe")
 $mcpExe = Join-Path $BuildDir "src\bt-mcp.exe"
-if (Test-Path -LiteralPath $mcpExe) {
-  Copy-FileStrict -Source $mcpExe -Destination (Join-Path $stageDir "bt-mcp.exe")
+$hasMcp = Test-Path -LiteralPath $mcpExe
+$mcpFull = $null
+if ($hasMcp) {
+  $mcpFull = (Resolve-Path -LiteralPath $mcpExe).Path
+  Copy-FileStrict -Source $mcpFull -Destination (Join-Path $stageDir "bt-mcp.exe")
 }
 Copy-FileStrict -Source "data\language-specs\bt-markdown.lang" -Destination (Join-Path $stageDir "share\brainterm\language-specs\bt-markdown.lang")
 foreach ($st in (Get-ChildItem -Path "data\styles" -Filter "bt-ink-*.xml")) {
@@ -141,7 +184,13 @@ foreach ($st in (Get-ChildItem -Path "data\styles" -Filter "bt-ink-*.xml")) {
 if (Test-Path -LiteralPath "data\fonts") {
   foreach ($f in (Get-ChildItem -Path "data\fonts" -File)) {
     Copy-FileStrict -Source $f.FullName -Destination (Join-Path $stageDir ("share\brainterm\fonts\" + $f.Name))
+    if ($f.Name -match "^(LICENSE-|OFL-)") {
+      Copy-FileStrict -Source $f.FullName -Destination (Join-Path $stageDir ("licenses\" + $f.Name))
+    }
   }
+}
+if (Test-Path -LiteralPath "docs\THIRD_PARTY_LICENSES.md") {
+  Copy-FileStrict -Source "docs\THIRD_PARTY_LICENSES.md" -Destination (Join-Path $stageDir "licenses\THIRD_PARTY_LICENSES.md")
 }
 
 # Recursively resolve UCRT64 DLL dependencies via objdump.
@@ -155,6 +204,10 @@ $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringC
 
 $queue.Enqueue($exeFull)
 $seen.Add("bt.exe") | Out-Null
+if ($hasMcp) {
+  $queue.Enqueue($mcpFull)
+  $seen.Add("bt-mcp.exe") | Out-Null
+}
 
 $pixbufSrc = Join-Path $MsysRoot "lib\gdk-pixbuf-2.0"
 if (Test-Path -LiteralPath $pixbufSrc) {
@@ -231,6 +284,14 @@ Write-Host ("SHA-256 dist : {0}" -f $dstHash)
 if ($srcHash -ne $dstHash) {
   throw ("SHA-256 mismatch! build='{0}' vs dist='{1}'" -f $srcHash, $dstHash)
 }
+if ($hasMcp) {
+  $bundledMcp = Join-Path $outFull "bt-mcp.exe"
+  $mcpSrcHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $mcpFull).Hash
+  $mcpDstHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $bundledMcp).Hash
+  if ($mcpSrcHash -ne $mcpDstHash) {
+    throw ("bt-mcp SHA-256 mismatch! build='{0}' vs dist='{1}'" -f $mcpSrcHash, $mcpDstHash)
+  }
+}
 
 # ---- 6. Capture build stamp (isolated PATH) & optional §11.7 smoke test -----
 $savedPath = $env:PATH
@@ -240,34 +301,30 @@ try {
   $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
   $env:XDG_DATA_DIRS = Join-Path $outFull "share"
 
-  $prevEap = $ErrorActionPreference
-  $ErrorActionPreference = "Continue"
-  $verOut = & $bundledExe --version 2>&1
-  $verCode = $LASTEXITCODE
-  $ErrorActionPreference = $prevEap
-  if ($verCode -ne 0) {
-    $verText = ($verOut | ForEach-Object { "$_" }) -join [Environment]::NewLine
-    throw ("Packaged bt.exe --version failed with exit code {0}: {1}" -f $verCode, $verText)
+  $buildStamp = Invoke-BundledCheck -FilePath $bundledExe -Arguments "--version" -TimeoutMs 30000
+  if ($buildStamp -notmatch '^BrainTerm .+\(build .+\)') {
+    throw "Unexpected packaged version output: $buildStamp"
   }
-  $buildStamp = (($verOut | ForEach-Object { "$_" }) -join [Environment]::NewLine).Trim()
 
   if ($SmokeTest) {
     $fixture = (Resolve-Path -LiteralPath "tests\fixtures\vault").Path
-    $prevEap = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    $out = & $bundledExe --vault $fixture --smoke-test 2>&1
-    $code = $LASTEXITCODE
-    $ErrorActionPreference = $prevEap
-    $text = ($out | ForEach-Object { "$_" }) -join [Environment]::NewLine
+    $vaultArgs = ('--vault "{0}"' -f $fixture)
+    $text = Invoke-BundledCheck -FilePath $bundledExe -Arguments "$vaultArgs --smoke-test" -TimeoutMs 60000
     Write-Host $text
-    if ($code -ne 0) {
-      throw "Packaging smoke test failed with exit code $code"
-    }
     if ($text -notmatch "BT_SMOKE ok notes=2 lang=bt-markdown term=alive ui=adw-ink scheme=dark tabs=1 checkpoint=ok sessions=\d+ index=ok ask=search graph=nodes:2") {
       throw "Unexpected smoke test output"
     }
     if ($text -match "GtkSourceView-WARNING") {
       throw "GtkSourceView emitted a warning while loading bt-markdown.lang"
+    }
+    if ($hasMcp) {
+      $bundledMcp = Join-Path $outFull "bt-mcp.exe"
+      $mcpOut = Invoke-BundledCheck -FilePath $bundledMcp -Arguments $vaultArgs -TimeoutMs 5000 `
+                                  -InputLine '{"jsonrpc":"2.0","id":1,"method":"initialize"}'
+      if ($mcpOut -notmatch '"readOnly":true') {
+        throw "Unexpected packaged bt-mcp.exe smoke output: $mcpOut"
+      }
+      Write-Host "BT_MCP_SMOKE ok readOnly=true"
     }
   }
 } finally {

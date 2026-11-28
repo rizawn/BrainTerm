@@ -1137,6 +1137,11 @@ void bt_graph_layout_set_pos(BtGraphLayoutState *s, guint node_index, float x, f
     s->y[vi] = y;
     s->vx[vi] = 0.0f;
     s->vy[vi] = 0.0f;
+    if (s->g != NULL && s->g->nodes != NULL && node_index < s->g->nodes->len) {
+      BtGraphNode *nd = g_ptr_array_index(s->g->nodes, node_index);
+      nd->x = (gdouble)x;
+      nd->y = (gdouble)y;
+    }
   }
 }
 
@@ -1145,6 +1150,9 @@ void bt_graph_layout_reheat(BtGraphLayoutState *s, float alpha)
   if (s == NULL)
     return;
   s->alpha = CLAMP(alpha, 0.05f, 1.0f);
+  s->alpha_decay = powf(s->alpha_min / s->alpha,
+                        1.0f / (float)MAX(s->opts.max_iterations, 1u));
+  s->iter_done = 0u;
   s->quiet_streak = 0u;
   s->finished = FALSE;
 }

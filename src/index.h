@@ -62,11 +62,27 @@ typedef struct {
   gint line_no;
 } BtLinkResRow;
 
+typedef struct {
+  gchar *note_id;
+  gint chunk;
+  gfloat *vec;
+  gsize dim;
+} BtEmbeddingRow;
+
+typedef struct {
+  gchar *path;
+  gchar *title;
+  gchar *tag;
+  gdouble confidence;
+} BtPendingAiTag;
+
 void bt_search_hit_free(gpointer hit);
 void bt_note_row_free(gpointer row);
 void bt_tag_row_free(gpointer row);
 void bt_edge_row_free(gpointer row);
 void bt_link_res_row_free(gpointer row);
+void bt_embedding_row_free(gpointer row);
+void bt_pending_ai_tag_free(gpointer row);
 
 /* Opens vault/.bt/index.db on a dedicated single-writer thread (ADR-007).
  * Checks PRAGMA integrity_check (R2: if corrupt, deletes DB and sets
@@ -111,9 +127,15 @@ gboolean bt_index_session_end(BtIndex *idx, const gchar *id, gint64 ended, GErro
 
 /* Note / tag / edge / embedding query helpers used by M5–M8 & bt-mcp. */
 GPtrArray *bt_index_list_notes(BtIndex *idx, GError **error);
+GPtrArray *bt_index_list_recent_notes(BtIndex *idx, guint limit, GError **error);
+GPtrArray *bt_index_list_orphan_notes(BtIndex *idx, GError **error);
 GPtrArray *bt_index_list_tags(BtIndex *idx, const gchar *note_id, GError **error);
+GPtrArray *bt_index_list_pending_ai_tags(BtIndex *idx, GError **error);
 GPtrArray *bt_index_list_edges(BtIndex *idx, GError **error);
 GPtrArray *bt_index_list_link_resolutions(BtIndex *idx, const gchar *src_note_id, GError **error);
+GPtrArray *bt_index_list_backlinks(BtIndex *idx, const gchar *resolved_path, GError **error);
+GPtrArray *bt_index_list_embeddings(BtIndex *idx, GError **error);
+guint bt_index_embedding_count(BtIndex *idx);
 gchar *bt_index_get_body_hash(BtIndex *idx, const gchar *relpath);
 
 /* Tag governance helpers (M6 human lock). */

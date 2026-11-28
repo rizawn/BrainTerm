@@ -156,3 +156,29 @@ void bt_nav_history_remove_at(BtNavHistory *history, gsize index)
     history->cursor = (gint)history->entries->len - 1;
   }
 }
+
+void bt_nav_history_rename_path(BtNavHistory *history, const gchar *old_relpath,
+                                const gchar *new_relpath)
+{
+  if (history == NULL || old_relpath == NULL || new_relpath == NULL || new_relpath[0] == '\0')
+    return;
+  for (guint i = 0; i < history->entries->len; i++) {
+    BtNavEntry *e = &g_array_index(history->entries, BtNavEntry, i);
+    if (g_strcmp0(e->relpath, old_relpath) == 0) {
+      g_free(e->relpath);
+      e->relpath = g_strdup(new_relpath);
+    }
+  }
+}
+
+void bt_nav_history_remove_path(BtNavHistory *history, const gchar *relpath)
+{
+  if (history == NULL || relpath == NULL)
+    return;
+  for (guint i = history->entries->len; i > 0; i--) {
+    guint idx = i - 1;
+    const BtNavEntry *e = &g_array_index(history->entries, BtNavEntry, idx);
+    if (g_strcmp0(e->relpath, relpath) == 0)
+      bt_nav_history_remove_at(history, idx);
+  }
+}

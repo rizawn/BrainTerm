@@ -95,6 +95,16 @@ static void test_50_notes_no_ai_and_human_lock(void **state)
   assert_non_null(err);
   g_error_free(err);
 
+  /* R9: malformed YAML frontmatter refuses promote/dismiss without corruption. */
+  bt_test_put(root, "corrupt.md", "---\ntitle: \"a\ntitle: \"b\n---\nBody\n");
+  err = NULL;
+  assert_false(bt_organizer_promote_tag(v, idx, "corrupt.md", "foo", &err));
+  assert_non_null(err);
+  g_clear_error(&err);
+  assert_false(bt_organizer_dismiss_tag(v, idx, "corrupt.md", "foo", &err));
+  assert_non_null(err);
+  g_clear_error(&err);
+
   bt_index_close(idx);
   vault_free(v);
   bt_test_rm_rf(root);
@@ -102,10 +112,46 @@ static void test_50_notes_no_ai_and_human_lock(void **state)
   bt_checkpoint_shutdown();
 }
 
+static void test_corrupt_dismissed_tags_backed_up(void **state)
+{
+  (void)state;
+  gchar *root = g_dir_make_tmp("bt-org-bak-XXXXXX", NULL);
+  bt_test_put(root, "a.md", "---\nid: bt-ob1\ntitle: \"A\"\ncreated: 2026-11-22T00:00:00Z\nsource: human\ntags_ai: [noise]\n---\nBody\n");
+  bt_test_put(root, ".bt/dismissed_tags.json", "{corrupt json!!!");
+
+  BtVault *v = vault_open(root, NULL, NULL);
+  BtIndex *idx = bt_index_open(root, NULL, NULL);
+  assert_true(bt_index_rebuild(idx, v, NULL));
+
+  GError *err = NULL;
+  assert_true(bt_organizer_dismiss_tag(v, idx, "a.md", "noise", &err));
+  assert_null(err);
+
+  gchar *bak_path = g_build_filename(root, ".bt", "dismissed_tags.json.bak", NULL);
+  gchar *bak_raw = NULL;
+  assert_true(g_file_get_contents(bak_path, &bak_raw, NULL, NULL));
+  assert_string_equal(bak_raw, "{corrupt json!!!");
+  g_free(bak_raw);
+  g_free(bak_path);
+
+  gchar *cur_path = g_build_filename(root, ".bt", "dismissed_tags.json", NULL);
+  gchar *cur_raw = NULL;
+  assert_true(g_file_get_contents(cur_path, &cur_raw, NULL, NULL));
+  assert_non_null(strstr(cur_raw, "\"noise\""));
+  g_free(cur_raw);
+  g_free(cur_path);
+
+  bt_index_close(idx);
+  vault_free(v);
+  bt_test_rm_rf(root);
+  g_free(root);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
     cmocka_unit_test(test_50_notes_no_ai_and_human_lock),
+    cmocka_unit_test(test_corrupt_dismissed_tags_backed_up),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

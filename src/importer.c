@@ -3,7 +3,10 @@
 #include "frontmatter.h"
 
 #include <cjson/cJSON.h>
+#include <glib/gstdio.h>
 #include <string.h>
+
+#define BT_IMPORT_MAX_FILE_BYTES (64u * 1024u * 1024u)
 
 gchar *bt_importer_slug(const gchar *title)
 {
@@ -25,9 +28,33 @@ gchar *bt_importer_slug(const gchar *title)
     g_string_truncate(s, s->len - 1);
   if (s->len == 0) {
     g_string_free(s, TRUE);
-    return g_strdup("untitled");
+    gchar *h = bt_fnv1a_hex(title, strlen(title));
+    gchar *res = g_strdup_printf("untitled-%.6s", h);
+    g_free(h);
+    return res;
   }
   return g_string_free(s, FALSE);
+}
+
+static gboolean read_import_file_bounded(const gchar *path, gchar **out_raw, GError **error)
+{
+  GStatBuf st_file;
+  if (g_stat(path, &st_file) == 0 &&
+      (st_file.st_size < 0 || (guint64)st_file.st_size > BT_IMPORT_MAX_FILE_BYTES)) {
+    g_set_error(error, BT_ERROR, BT_ERROR_INVALID,
+                "Import file '%s' exceeds 64 MiB safety limit", path);
+    return FALSE;
+  }
+  gsize raw_len = 0;
+  if (!g_file_get_contents(path, out_raw, &raw_len, error))
+    return FALSE;
+  if (raw_len > BT_IMPORT_MAX_FILE_BYTES) {
+    g_clear_pointer(out_raw, g_free);
+    g_set_error(error, BT_ERROR, BT_ERROR_INVALID,
+                "Import file '%s' exceeds 64 MiB safety limit", path);
+    return FALSE;
+  }
+  return TRUE;
 }
 
 static gchar *format_date_ymd(gint64 unix_sec)
@@ -46,6 +73,38 @@ static gchar *format_iso_utc(gint64 unix_sec)
   gchar *iso = g_date_time_format(dt, "%Y-%m-%dT%H:%M:%SZ");
   g_date_time_unref(dt);
   return iso;
+}
+
+static void append_yaml_escaped(GString *dst, const gchar *s)
+{
+  for (const gchar *p = s ? s : ""; *p != '\0'; p++) {
+    guchar c = (guchar)*p;
+    if (c == '\\')
+      g_string_append(dst, "\\\\");
+    else if (c == '"')
+      g_string_append(dst, "\\\"");
+    else if (c == '\n')
+      g_string_append(dst, "\\n");
+    else if (c == '\r')
+      g_string_append(dst, "\\r");
+    else if (c == '\t')
+      g_string_append(dst, "\\t");
+    else if (c < 0x20 || c == 0x7F)
+      g_string_append_c(dst, ' ');
+    else
+      g_string_append_c(dst, (gchar)c);
+  }
+}
+
+static void append_h1_safe(GString *dst, const gchar *s)
+{
+  for (const gchar *p = s ? s : ""; *p != '\0'; p++) {
+    guchar c = (guchar)*p;
+    if (c < 0x20 || c == 0x7F)
+      g_string_append_c(dst, ' ');
+    else
+      g_string_append_c(dst, (gchar)c);
+  }
 }
 
 static gboolean write_imported_note(const BtVault *vault, BtIndex *index, const gchar *tool_name,
@@ -83,13 +142,14 @@ static gboolean write_imported_note(const BtVault *vault, BtIndex *index, const 
   }
   g_free(abs);
 
+  const gchar *safe_title = (title && title[0]) ? title : slug;
   gchar *h = bt_fnv1a_hex(rel, strlen(rel));
   GString *doc = g_string_new(NULL);
+  g_string_append_printf(doc, "---\nid: bt-imp-%.6s\ntitle: \"", h);
+  append_yaml_escaped(doc, safe_title);
   g_string_append_printf(
       doc,
-      "---\n"
-      "id: bt-imp-%.6s\n"
-      "title: \"%s\"\n"
+      "\"\n"
       "created: %s\n"
       "updated: %s\n"
       "source: import\n"
@@ -97,9 +157,10 @@ static gboolean write_imported_note(const BtVault *vault, BtIndex *index, const 
       "tags: []\n"
       "tags_ai: [%s]\n"
       "links: []\n"
-      "---\n\n"
-      "# %s\n\n",
-      h, title ? title : slug, iso, iso, safe_tool, safe_tool, title ? title : slug);
+      "---\n\n# ",
+      iso, iso, safe_tool, safe_tool);
+  append_h1_safe(doc, safe_title);
+  g_string_append(doc, "\n\n");
   g_free(h);
 
   /* P3 structural separation: user prompts in body, AI responses in ## AI draft. */
@@ -132,7 +193,7 @@ gboolean bt_import_conversations_json(const BtVault *vault, BtIndex *index,
 {
   g_return_val_if_fail(vault != NULL && tool_name != NULL && json_path != NULL, FALSE);
   gchar *raw = NULL;
-  if (!g_file_get_contents(json_path, &raw, NULL, error))
+  if (!read_import_file_bounded(json_path, &raw, error))
     return FALSE;
   cJSON *root = cJSON_Parse(raw);
   g_free(raw);
@@ -206,7 +267,7 @@ gboolean bt_import_session_jsonl(const BtVault *vault, BtIndex *index, const gch
 {
   g_return_val_if_fail(vault != NULL && tool_name != NULL && jsonl_path != NULL, FALSE);
   gchar *raw = NULL;
-  if (!g_file_get_contents(jsonl_path, &raw, NULL, error))
+  if (!read_import_file_bounded(jsonl_path, &raw, error))
     return FALSE;
 
   gchar **lines = g_strsplit(raw, "\n", -1);
@@ -216,9 +277,14 @@ gboolean bt_import_session_jsonl(const BtVault *vault, BtIndex *index, const gch
   GString *ai = g_string_new(NULL);
   gint64 first_ts = 0;
   gchar *title = g_path_get_basename(jsonl_path);
+  gboolean has_nonempty_line = FALSE;
+  guint parsed_objs = 0;
 
   for (guint i = 0; lines[i] != NULL; i++) {
     g_strstrip(lines[i]);
+    if (lines[i][0] == '\0')
+      continue;
+    has_nonempty_line = TRUE;
     if (lines[i][0] != '{')
       continue;
     cJSON *obj = cJSON_Parse(lines[i]);
@@ -226,6 +292,7 @@ gboolean bt_import_session_jsonl(const BtVault *vault, BtIndex *index, const gch
       cJSON_Delete(obj);
       continue;
     }
+    parsed_objs++;
     const cJSON *ts = cJSON_GetObjectItemCaseSensitive(obj, "timestamp");
     if (first_ts == 0 && cJSON_IsString(ts))
       first_ts = bt_parse_rfc3339_ms(ts->valuestring) / 1000;
@@ -241,6 +308,16 @@ gboolean bt_import_session_jsonl(const BtVault *vault, BtIndex *index, const gch
         g_string_append_printf(ai, "%s\n\n", content->valuestring);
     }
     cJSON_Delete(obj);
+  }
+
+  if (has_nonempty_line && parsed_objs == 0) {
+    g_free(title);
+    g_string_free(human, TRUE);
+    g_string_free(ai, TRUE);
+    g_strfreev(lines);
+    g_set_error(error, BT_ERROR, BT_ERROR_INVALID,
+                "Expected JSONL object records in '%s'", jsonl_path);
+    return FALSE;
   }
 
   BtImportStats st = {0};

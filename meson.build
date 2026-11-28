@@ -51,8 +51,10 @@ install_data('data/language-specs/bt-markdown.lang', install_dir: langspec_insta
 install_data('data/styles/bt-ink-dark.xml', 'data/styles/bt-ink-light.xml', install_dir: styles_install_dir)
 install_data(
   'data/fonts/InterVariable.ttf',
+  'data/fonts/LICENSE-Inter.txt',
   'data/fonts/JetBrainsMono-Regular.ttf',
   'data/fonts/JetBrainsMono-Bold.ttf',
+  'data/fonts/OFL-JetBrainsMono.txt',
   'data/fonts/STIXTwoMath-Regular.otf',
   'data/fonts/LICENSE-STIXTwoMath.txt',
   install_dir: fonts_install_dir,

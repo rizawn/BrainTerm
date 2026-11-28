@@ -387,6 +387,8 @@ BtFileTree *bt_filetree_new(BtFileTreeSelectFn on_select, BtFileTreeOpenTermFn o
 
   tree->list_view = gtk_list_view_new(GTK_SELECTION_MODEL(g_object_ref(tree->selection)), factory);
   gtk_widget_add_css_class(tree->list_view, "navigation-sidebar");
+  gtk_accessible_update_property(GTK_ACCESSIBLE(tree->list_view),
+                                 GTK_ACCESSIBLE_PROPERTY_LABEL, "Vault notes", -1);
   g_signal_connect(tree->selection, "notify::selected-item", G_CALLBACK(on_selection_changed), tree);
   g_signal_connect(tree->list_view, "activate", G_CALLBACK(on_row_activate), tree);
 

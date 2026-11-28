@@ -165,12 +165,28 @@ static void test_duplicate_and_malformed(void **state)
   bt_frontmatter_free(fm);
 }
 
+static void test_oversized_frontmatter_rejected(void **state)
+{
+  (void)state;
+  GString *doc = g_string_new("---\ntitle: Big\n");
+  for (guint i = 0; doc->len < 270000; i++)
+    g_string_append_printf(doc, "k%u: val\n", i);
+  g_string_append(doc, "---\nbody\n");
+
+  BtFrontmatter *fm = bt_frontmatter_parse(doc->str, doc->len);
+  assert_true(fm->has_frontmatter);
+  assert_true(fm->parse_error);
+  bt_frontmatter_free(fm);
+  g_string_free(doc, TRUE);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
     cmocka_unit_test(test_valid_and_unknown_preserved),
     cmocka_unit_test(test_aliases_and_unknown_roundtrip),
     cmocka_unit_test(test_duplicate_and_malformed),
+    cmocka_unit_test(test_oversized_frontmatter_rejected),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

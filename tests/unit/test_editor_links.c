@@ -1876,6 +1876,96 @@ static void test_l3_6a_links_demo_template(void **state)
 
 static guint ui_log_warnings = 0;
 
+static GtkWidget *find_descendant_named(GtkWidget *root, const gchar *name)
+{
+  if (root == NULL)
+    return NULL;
+  if (g_strcmp0(gtk_widget_get_name(root), name) == 0)
+    return root;
+  for (GtkWidget *ch = gtk_widget_get_first_child(root); ch != NULL;
+       ch = gtk_widget_get_next_sibling(ch)) {
+    GtkWidget *found = find_descendant_named(ch, name);
+    if (found != NULL)
+      return found;
+  }
+  return NULL;
+}
+
+static void test_find_and_replace_bar(void **state)
+{
+  (void)state;
+  if (!gtk_init_check()) {
+    skip();
+    return;
+  }
+  BtEditorPane *pane = bt_editorpane_new(NULL, NULL, NULL, NULL);
+  const char *doc = "alpha beta alpha gamma alpha\n";
+  bt_editorpane_load(pane, "findtest.md", doc, strlen(doc));
+
+  GtkWidget *root = bt_editorpane_widget(pane);
+  GtkWidget *fbar = find_descendant_named(root, "bt-find-bar");
+  GtkWidget *rrow = find_descendant_named(root, "bt-replace-row");
+  GtkWidget *fentry = find_descendant_named(root, "bt-find-entry");
+  GtkWidget *rentry = find_descendant_named(root, "bt-replace-entry");
+  GtkWidget *rep_all = find_descendant_named(root, "bt-replace-all");
+  assert_non_null(fbar);
+  assert_non_null(rrow);
+  assert_non_null(fentry);
+  assert_non_null(rentry);
+  assert_non_null(rep_all);
+
+  bt_editorpane_show_find(pane, TRUE);
+  assert_true(gtk_widget_get_visible(fbar));
+  assert_true(gtk_widget_get_visible(rrow));
+
+  gtk_editable_set_text(GTK_EDITABLE(fentry), "alpha");
+  gtk_editable_set_text(GTK_EDITABLE(rentry), "omega");
+  while (g_main_context_pending(NULL))
+    g_main_context_iteration(NULL, FALSE);
+
+  g_signal_emit_by_name(rep_all, "clicked");
+  while (g_main_context_pending(NULL))
+    g_main_context_iteration(NULL, FALSE);
+
+  g_autofree gchar *after = pane_buffer_text(pane);
+  assert_string_equal(after, "omega beta omega gamma omega\n");
+
+  /* Switching back to plain Find (with_replace=FALSE) must hide Replace row. */
+  bt_editorpane_show_find(pane, FALSE);
+  assert_true(gtk_widget_get_visible(fbar));
+  assert_false(gtk_widget_get_visible(rrow));
+
+  bt_editorpane_hide_find(pane);
+  assert_false(gtk_widget_get_visible(fbar));
+  bt_editorpane_free(pane);
+}
+
+static void test_nav_history_rename_and_remove_path(void **state)
+{
+  (void)state;
+  BtNavHistory *h = bt_nav_history_new();
+  bt_nav_history_push_jump(h, "a.md", 10, 1.0, "b.md", 0, 0.0);
+  bt_nav_history_push_jump(h, "b.md", 25, 2.0, "c.md", 0, 0.0);
+  assert_int_equal((int)bt_nav_history_count(h), 3);
+  assert_int_equal(bt_nav_history_cursor(h), 2);
+
+  bt_nav_history_rename_path(h, "b.md", "sub/b_renamed.md");
+  assert_string_equal(bt_nav_history_at(h, 1)->relpath, "sub/b_renamed.md");
+  assert_int_equal(bt_nav_history_cursor(h), 2);
+  assert_true(bt_nav_history_can_go_back(h));
+
+  bt_nav_history_remove_path(h, "sub/b_renamed.md");
+  assert_int_equal((int)bt_nav_history_count(h), 2);
+  assert_int_equal(bt_nav_history_cursor(h), 1);
+  assert_string_equal(bt_nav_history_at(h, 1)->relpath, "c.md");
+
+  bt_nav_history_remove_path(h, "c.md");
+  assert_int_equal((int)bt_nav_history_count(h), 1);
+  assert_int_equal(bt_nav_history_cursor(h), 0);
+  assert_string_equal(bt_nav_history_at(h, 0)->relpath, "a.md");
+  bt_nav_history_free(h);
+}
+
 static void on_ui_test_log(const gchar *domain, GLogLevelFlags level, const gchar *msg, gpointer ud)
 {
   (void)level;
@@ -1915,6 +2005,8 @@ int main(void)
     cmocka_unit_test(test_ck12_shortcut_audit_no_unresolved_conflict),
     cmocka_unit_test(test_l3_4_confirm_external_urls_settings),
     cmocka_unit_test(test_l3_6a_links_demo_template),
+    cmocka_unit_test(test_find_and_replace_bar),
+    cmocka_unit_test(test_nav_history_rename_and_remove_path),
   };
   int rc = cmocka_run_group_tests(tests, NULL, NULL);
   if (ui_log_warnings > 0)

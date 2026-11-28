@@ -46,6 +46,7 @@ typedef struct {
   gboolean pulse_enabled;
   gboolean show_links;
   gboolean focus_isolated; /* TRUE when user clicked Focus neighbors (others fade to 8%) */
+  gboolean highlight_orphans; /* TRUE when Orphan highlight filter is active */
   gdouble mouse_x;
   gdouble mouse_y;
   gdouble spread_str;      /* [0..1] local fisheye hover spread in 3D/Galaxy */

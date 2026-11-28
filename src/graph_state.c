@@ -273,9 +273,48 @@ static gboolean placement_collides(const BtGraphLabelCand *c,
   return FALSE;
 }
 
+static BtGraphLabelCand place_primary_label(BtGraphLabelCand c,
+                                            const BtGraphLabelViewport *viewport,
+                                            const BtGraphLabelCand *placed, guint placed_count,
+                                            const BtGraphCoreObstacle *obstacles, guint obstacle_count)
+{
+  const float max_x = MAX(0.0f, viewport->width - c.w - 1.0f);
+  const float max_y = MAX(0.0f, viewport->height - c.h - 1.0f);
+  const float min_x = MIN(1.0f, max_x);
+  const float min_y = MIN(1.0f, max_y);
+  const float positions[][2] = {
+    {c.x, c.y},
+    {c.x, floorf(c.anchor_y - c.anchor_r - c.h - 5.0f)},
+    {floorf(c.anchor_x + c.anchor_r + 6.0f), floorf(c.anchor_y - c.h * 0.5f)},
+    {floorf(c.anchor_x - c.anchor_r - c.w - 6.0f), floorf(c.anchor_y - c.h * 0.5f)},
+  };
+  BtGraphLabelCand fallback = c;
+  fallback.x = CLAMP(c.x, min_x, max_x);
+  fallback.y = CLAMP(c.y, min_y, max_y);
+  gboolean found_fit = FALSE;
+
+  for (guint i = 0; i < G_N_ELEMENTS(positions); i++) {
+    BtGraphLabelCand trial = c;
+    trial.x = CLAMP(positions[i][0], min_x, max_x);
+    trial.y = positions[i][1];
+    if (i >= 2u && trial.x != positions[i][0])
+      continue; /* Clamping a side position can move the label over its own node. */
+    if (trial.y < min_y || trial.y > max_y)
+      continue;
+    if (!placement_collides(&trial, placed, placed_count, obstacles, obstacle_count))
+      return trial;
+    if (!found_fit) {
+      fallback = trial;
+      found_fit = TRUE;
+    }
+  }
+  return fallback;
+}
+
 guint bt_graph_place_labels(BtGraphLabelCand *cands, guint cand_count,
                             const BtGraphCoreObstacle *obstacles, guint obstacle_count,
                             guint max_labels, guint max_neighbors,
+                            const BtGraphLabelViewport *viewport,
                             BtGraphLabelCand *out, guint out_cap)
 {
   if (cands == NULL || cand_count == 0 || out == NULL || out_cap == 0)
@@ -300,6 +339,14 @@ guint bt_graph_place_labels(BtGraphLabelCand *cands, guint cand_count,
   for (guint i = 0; i < cand_count && placed < out_cap; i++) {
     BtGraphLabelCand c = cands[i];
     if (c.always_show) {
+      if (viewport != NULL && c.anchor_r > 0.0f &&
+          c.anchor_x + c.anchor_r >= 0.0f && c.anchor_x - c.anchor_r <= viewport->width &&
+          c.anchor_y + c.anchor_r >= 0.0f && c.anchor_y - c.anchor_r <= viewport->height) {
+        out[placed] = place_primary_label(c, viewport, out, placed, obstacles, obstacle_count);
+        placed++;
+        continue;
+      }
+
       /* Always show focused/selected/hovered; nudge down if colliding with prior always_show. */
       for (guint tries = 0; tries < 4u; tries++) {
         gboolean hit = FALSE;

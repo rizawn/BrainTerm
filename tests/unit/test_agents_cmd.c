@@ -9,12 +9,13 @@
 #include <string.h>
 
 #include "agents.h"
+#include "search.h"
 #include "testutil.h"
 
 static void test_hostile_titles(void **state)
 {
   (void)state;
-  const gchar *hostile = "evil\"; rm -rf /; $(whoami) `id`\n\r|cat .env";
+  const gchar *hostile = "evil\"; 'rm' %USERPROFILE% !PATH! $(whoami) `id`\n\r|cat .env";
   gchar *cmd = bt_agents_format_launch_cmd(BT_AGENT_CLAUDE, hostile);
   assert_true(g_str_has_prefix(cmd, "claude \"Read "));
   assert_true(g_str_has_suffix(cmd, " as context.\"\r"));
@@ -24,8 +25,8 @@ static void test_hostile_titles(void **state)
   const gchar *inner_end = strrchr(cmd, '"');
   assert_true(inner_end > inner_start);
   for (const gchar *p = inner_start; p < inner_end; p++) {
-    assert_true(*p != '"' && *p != '`' && *p != '$' && *p != '\\' && *p != '\n' && *p != '\r' &&
-                *p != ';' && *p != '|' && *p != '&');
+    assert_true(*p != '"' && *p != '\'' && *p != '`' && *p != '$' && *p != '%' && *p != '!' &&
+                *p != '\\' && *p != '\n' && *p != '\r' && *p != ';' && *p != '|' && *p != '&');
   }
   g_free(cmd);
 
@@ -36,6 +37,15 @@ static void test_hostile_titles(void **state)
   gchar *gemini = bt_agents_format_launch_cmd(BT_AGENT_GEMINI, "Daily");
   assert_string_equal(gemini, "gemini \"Read Daily as context.\"\r");
   g_free(gemini);
+
+  gchar *ask = bt_search_compose_ask_agent_cmd_for(
+      "claude", "why %USERPROFILE% 'quote' !bang $(id)", NULL, 3);
+  assert_non_null(ask);
+  assert_null(strchr(ask, '%'));
+  assert_null(strchr(ask, '\''));
+  assert_null(strchr(ask, '!'));
+  assert_null(strchr(ask, '$'));
+  g_free(ask);
 }
 
 static void test_vault_template_no_overwrite(void **state)

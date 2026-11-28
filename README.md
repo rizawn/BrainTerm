@@ -36,21 +36,23 @@ Most knowledge tools either keep notes isolated from developer workflows or rely
   - Fast plain-Markdown vault scanner with ignore rules and `vault_resolve()` path containment guard.
   - Atomic writes with `.md.tmp` crash recovery and `GFileMonitor` external-change detection with a non-destructive conflict banner (`Review diff`, `Keep mine`, `Reload`).
 - **Markdown Editor (`GtkSourceView 5`)**
-  - Custom `bt-markdown.lang` syntax highlighting, live-preview styling (`Inter` / `JetBrains Mono`), centered reading column, and `1 s` debounced autosave.
-  - **Clickable Links (L1–L3):** Single-click or `Ctrl+Click` navigation for `[[wikilinks]]`, Markdown links, headings (`#anchor`), local files, and external URLs. Includes a create-note preview popover for unresolved targets, an ambiguity chooser popover for duplicate note names, keyboard link navigation (`Ctrl+Alt+Left/Right`, `Ctrl+Enter`), history navigation (`Alt+Left/Right`), credential-stripping warnings, and a configurable external URL confirmation toggle.
+  - Custom `bt-markdown.lang` syntax highlighting, live-preview styling (`Inter` / `JetBrains Mono`), centered reading column, persisted line-number toggle, and `1 s` debounced autosave.
+  - **Starter Vault & Find/Replace:** Interactive empty-vault onboarding plus primary-menu **New Starter Vault…** (`Open Vault…` and `Create Starter Vault…` from `vault-template/`) and in-document Find & Replace (`Ctrl+F` / `Ctrl+H`, match counter, case toggle, `Replace`, `Replace All`, `Esc` close).
+  - **Clickable Links (L1–L3):** Single-click or `Ctrl+Click` navigation for `[[wikilinks]]`, Markdown links, headings (`#anchor`), local files, and external URLs. Includes a create-note preview popover for unresolved targets, an ambiguity chooser popover for duplicate note names, keyboard link navigation (`Ctrl+Alt+Left/Right`, `Ctrl+Enter`), history navigation (`Alt+Left/Right`), Backlinks & Orphans inspector (`Alt+B`), credential-stripping warnings, and a configurable external URL confirmation toggle.
   - **Live Auto-Compiling LaTeX Math (M1–M5):** Built-in LaTeX subset parser, HarfBuzz OpenType `MATH` layout engine (`STIXTwoMath-Regular.otf`), and Cairo-FreeType renderer. Formulas (`$...$` and `$$...$$`) auto-compile in place when the cursor leaves the span or when pressing `Enter`/`Esc`, while clicking a formula reveals raw LaTeX with a floating live preview. Underlying Markdown files remain unmodified plain LaTeX.
 - **Embedded Real Terminal**
-  - Multi-tab terminal (up to 8 tabs) backed by Windows ConPTY (`CreatePseudoConsole` + Win32 Job Object `KILL_ON_JOB_CLOSE`) and POSIX `forkpty`, `libvterm` emulation, 10,000-line scrollback ring, scrollback search (`Ctrl+Shift+F`), and bracketed paste.
-  - One-click detection and sanitized launch for `claude`, `codex`, and `gemini` CLIs with `TERM_PROGRAM=brainterm` and `BT_ACTIVE_NOTE` context.
+  - Multi-tab terminal (up to 8 tabs, middle-click or close button, automatic active focus on switch/close) backed by Windows ConPTY (`CreatePseudoConsole` + Win32 Job Object `KILL_ON_JOB_CLOSE`) and POSIX `forkpty`, `libvterm` emulation, 10,000-line scrollback ring, scrollback search (`Ctrl+Shift+F`), and bracketed paste.
+  - One-click detection, preflight availability checks, and sanitized launch for `claude`, `codex`, and `gemini` CLIs with `TERM_PROGRAM=brainterm` and `BT_ACTIVE_NOTE` context.
 - **Memory Engine, Search & Importers**
   - SQLite FTS5 full-text index with external-content triggers, schema migrations (`migrations/0001_init.sql`, `migrations/0002_links_resolution.sql`), and automatic corruption rebuild.
-  - Unified Quick Open (`Ctrl+P`) and Ask / Search / Command bar (`Ctrl+E`).
-  - Auto-organizer with deterministic no-AI rules backend (default) and human-lock protection.
-  - Built-in idempotent importers for ChatGPT, Claude, Claude Code, and Codex history, plus optional offline embeddings and RRF hybrid search.
-- **Interactive Brain Graph (2D & 3D)**
-  - Every `.md` file maps to one node, with ghost nodes for unresolved links, brainstem/cortex layout, filtering, and dual Cairo / OpenGL (`GtkGLArea` + GLSL shaders) rendering.
+  - Unified Quick Open (`Ctrl+P`) and Ask / Search / Command bar (`Ctrl+E`) with keyboard row/history navigation, **Hybrid** FTS5 + offline vector search toggle (`embed.c`, cached in SQLite `embeddings`), and selectable AI agent target (`claude` / `codex` / `gemini`).
+  - Auto-organizer with deterministic no-AI rules backend (default), human-lock protection (`R9` malformed-YAML refusal), and interactive AI tag review dialog (`Promote` / `Dismiss` via `>review ai tags`).
+  - GUI Chat Importer dialog (`>import chats` via `importer.c`) for idempotent ChatGPT/Claude/Codex JSON & JSONL transcripts, plus explicit embedding index sync (`>sync embeddings`).
+- **Interactive Brain Graph (2D, 3D, Galaxy & Timeline)**
+  - Every `.md` file maps to one node, with folder parent nodes, ghost nodes for unresolved links, **Clean** (Obsidian-style) and **Glow** presets in 2D, 3D radial cortex, **Galaxy** spiral disk, and **Timeline** (`Organic` / `Kept` + ledger) views, plus spatial picking, filtering, and dual Cairo / OpenGL (`GtkGLArea` + GLSL shaders) rendering.
+  - **Graph G3 Interaction:** 2D live spring settling (zero idle CPU once converged), node drag-to-pin with context-menu Pin/Unpin, `Re-layout` (`R`), and `Highlight Orphans` (`O`) mode highlighting unlinked notes across both OpenGL and Cairo.
 - **Standalone Read-Only MCP Server (`bt-mcp`)**
-  - Stdio JSON-RPC 2.0 server exposing `search_memory`, `ask_memory`, `recent`, and `get_note` against `vault/.bt/index.db` opened strictly read-only.
+  - Stdio JSON-RPC 2.0 server (`capabilities`, `inputSchema`, dynamic >64 KB request reader) exposing read-only tools `search_memory` (with optional `hybrid` vector fusion), `ask_memory`, `recent` (`ORDER BY updated DESC`), `get_note`, and `backlinks` against `vault/.bt/index.db` opened strictly read-only.
 
 ### In Development / Unverified
 
@@ -307,9 +309,10 @@ meson test -C build --print-errorlogs
 | `Ctrl+O` | Open vault |
 | `Ctrl+N` / `F2` | New note / Rename active note |
 | `Ctrl+S` | Save active note atomically |
+| `Ctrl+F` / `Ctrl+H` | Find / Find and Replace in active note |
 | `Ctrl+P` | Quick Open note (fuzzy search) |
-| `Ctrl+E` | Open Search / Ask (`?`) / Command (`>`) bar |
-| `Ctrl+G` | Toggle Brain Graph pane |
+| `Ctrl+E` | Open Search (`Hybrid` toggle) / Ask (`?`) / Command (`>`) bar |
+| `Ctrl+G` | Toggle Brain Graph pane (`R` re-layout, `O` highlight orphans) |
 | `Ctrl+Shift+F` | Toggle Brain Graph frame-time debug overlay (or terminal scrollback search when terminal is focused) |
 | `F9` / `F5` | Toggle sidebar / Rescan vault |
 | `` Ctrl+` `` | Toggle embedded terminal pane |
@@ -317,7 +320,9 @@ meson test -C build --print-errorlogs
 | `Ctrl+Enter` | Open link at cursor |
 | `Ctrl+Alt+Right` / `Left` | Jump to next / previous link in active note |
 | `Alt+Left` / `Alt+Right` | Navigate back / forward in note history |
+| `Alt+B` | Show backlinks & vault orphans dialog |
 | `Enter` / `Esc` (in inline math) | Exit inline `$...$` span and auto-compile rendered math |
+| `F1` | Open Keyboard Shortcuts reference dialog |
 | `Ctrl+Q` | Quit application |
 
 ### Standalone Read-Only MCP Server (`bt-mcp`)
@@ -339,10 +344,11 @@ Configure Claude Desktop, Cursor, or any MCP-compatible client to launch `bt-mcp
 
 | Tool | Arguments | Description |
 |---|---|---|
-| `search_memory` | `query` (string), `top_k` (int, 1–50) | Full-text search over `vault/.bt/index.db` returning ranked citations and snippets |
+| `search_memory` | `query` (string), `top_k` (int, 1–50), `hybrid` (bool, optional) | Full-text FTS5 search over `vault/.bt/index.db`, with optional RRF offline vector fusion |
 | `ask_memory` | `query` (string), `top_k` (int, 1–50) | Evidence-mode retrieval returning matching notes and snippets |
-| `recent` | `limit` (int, 1–100) | Lists indexed notes from the vault |
+| `recent` | `limit` (int, 1–100) | Lists indexed notes ordered newest-updated first |
 | `get_note` | `path` (string) | Reads the plain-Markdown contents of a note inside the vault |
+| `backlinks` | `path` (string) | Lists incoming wiki/Markdown links targeting `path` |
 
 Write operations are refused by design (`bt-mcp` opens the SQLite database strictly read-only).
 
@@ -368,6 +374,9 @@ Stored under `BT_CONFIG_DIR` (or the default user config directory):
 
 - `[vault] last_path` — Last opened vault directory.
 - `[editor] confirm_external_urls` — Prompt before opening external HTTP/HTTPS links (`true` by default).
+- `[editor] show_line_numbers` — Persisted line-number gutter visibility toggle.
+- `[search] hybrid_enabled` — Persisted FTS5 + offline vector Hybrid search toggle in the Ask/Search bar.
+- `[agent] preferred_cli` — Preferred AI agent CLI (`claude`, `codex`, or `gemini`) for "Open in agent" actions.
 - Primary menu toggles also control **Open links with single click** and dark/light theme selection.
 
 ---
@@ -384,18 +393,18 @@ Stored under `BT_CONFIG_DIR` (or the default user config directory):
 
 - `scripts/gen_build_stamp.py` — Invoked by Meson to embed the current git short hash and UTC/local build timestamp into `bt_build_stamp.h`.
 - `scripts/gen_icons.py` — Regenerates symbolic SVG icons in `data/icons/`.
-- `scripts/package-win.ps1` — Stages `bt.exe`, `bt-mcp.exe`, required MSYS2 UCRT64 DLLs (resolved via `objdump`), GTK schemas, icons, language specs, styles, and bundled fonts into `dist\brainterm`, verifies SHA-256 parity, and optionally runs `-SmokeTest` under an isolated `PATH`. Use `-KillRunning` to stop a running `bt.exe` before replacing the bundle.
+- `scripts/package-win.ps1` — Stages `bt.exe`, `bt-mcp.exe`, required MSYS2 UCRT64 DLLs for both binaries (resolved via `objdump`), GTK schemas, icons, language specs, styles, bundled fonts, and `licenses/` (`THIRD_PARTY_LICENSES.md` + font `OFL-1.1` texts) into `dist\brainterm`, verifies SHA-256 parity, and optionally runs isolated-`PATH` smoke tests for both `bt.exe` (`--smoke-test`) and `bt-mcp.exe` (`initialize`). Use `-KillRunning` to stop a running process inside `dist\brainterm` before replacing the bundle.
 
 ---
 
 ## Testing
 
-BrainTerm uses **CMocka** and **Meson Test** across 35 test targets covering four suites:
+BrainTerm uses **CMocka** and **Meson Test** across 37 test targets covering four suites:
 
-- **`unit`** — Vault path guard, atomic writes, scanning, frontmatter, MD4C parsing, SQLite FTS5 indexing, watcher conflict handling, auto-organizer, link resolution, create-note planner, chooser model, math tokenizer, live math highlighting & auto-compile, editor link shortcuts/settings, importers, embeddings, MCP server, theme loader, and UI checks.
+- **`unit`** — Vault path guard, atomic writes, scanning, frontmatter, MD4C parsing, SQLite FTS5 indexing, watcher conflict handling, auto-organizer, 2D clean graph layout, link resolution, create-note planner, chooser model, math tokenizer, live math highlighting & auto-compile, editor link shortcuts/settings, importers, embeddings, MCP server, theme loader, and UI checks.
 - **`crash-rig`** — Simulated crash recovery for `.md.tmp` atomic writes.
 - **`vtcorpus`** — Terminal VT escape sequence conformance corpus.
-- **`bench`** — Performance benchmarks for vault scanning (`1k` notes), FTS5 search (`1k` notes), `libvterm` rendering, create-note planning, and 2D/GL graph frame times.
+- **`bench`** — Performance benchmarks for vault scanning (`1k` notes), FTS5 search (`1k` notes), `libvterm` rendering, create-note planning, 2D clean graph layout, and 2D/GL graph frame times.
 
 Run all suites:
 
@@ -404,21 +413,31 @@ $env:PATH = "C:\msys64\ucrt64\bin;$env:PATH"
 meson test -C build --print-errorlogs -j 1
 ```
 
-Run a specific suite or test:
+Run a specific suite or test (`-j 1` avoids GL/GTK race flakiness on GUI tests):
 
 ```powershell
-meson test -C build --suite unit --print-errorlogs
-meson test -C build math_highlight editor_links --print-errorlogs
+meson test -C build --suite unit --print-errorlogs -j 1
+meson test -C build math_highlight editor_links --print-errorlogs -j 1
 ```
 
 ---
 
-## Roadmap
+## Roadmap & Documentation
 
+Detailed project planning and release engineering records live under `docs/`:
+
+- [Development Status & Technical Audit](docs/DEVELOPMENT_STATUS.md)
+- [Roadmap](docs/ROADMAP.md)
+- [Known Limitations](docs/KNOWN_LIMITATIONS.md)
+- [Release Checklist](docs/RELEASE_CHECKLIST.md)
+- [Third-Party Licenses](docs/THIRD_PARTY_LICENSES.md)
+
+Key remaining items before public release:
+
+- Choose and add an explicit open-source `LICENSE` file at the repository root.
 - Verify `pty_unix.c` interactive desktop workflows on Linux (X11/Wayland) and add Linux packaging (Flatpak / AppImage).
 - Complete manual interactive verification of Windows IME composition and TUI resize behavior (`vim`, `htop`, `claude`).
-- Expand LaTeX math rendering controls (font size scaling, error diagnostics tooltip, and export support).
-- Add an explicit open-source `LICENSE` file at the repository root.
+- Implement `docs/logseq-parity.md` phases `P1–P9` (tasks, queries, link-aware rename, static export).
 
 ---
 
@@ -443,7 +462,7 @@ meson test -C build math_highlight editor_links --print-errorlogs
 
 **Clarification required:** No top-level `LICENSE` file is currently present in this repository. Until a project license is added at the root, all rights are reserved by the author.
 
-Bundled fonts are distributed under the **SIL Open Font License 1.1**:
+Bundled fonts (`OFL-1.1`) and dynamically linked third-party libraries are itemized in [docs/THIRD_PARTY_LICENSES.md](docs/THIRD_PARTY_LICENSES.md):
 - [Inter](data/fonts/LICENSE-Inter.txt)
 - [JetBrains Mono](data/fonts/OFL-JetBrainsMono.txt)
 - [STIX Two Math](data/fonts/LICENSE-STIXTwoMath.txt)

@@ -25,6 +25,7 @@
   <style name="line-numbers"         foreground="muted" background="surface"/>
   <style name="current-line-number"  foreground="secondary" background="curline"/>
   <style name="bracket-match"        foreground="accent" background="selbg" bold="true"/>
+  <style name="search-match"         foreground="primary" background="accent" bold="true"/>
 
   <!-- Generic defs -->
   <style name="def:comment"          foreground="muted" italic="true"/>

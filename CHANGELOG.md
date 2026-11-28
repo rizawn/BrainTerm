@@ -1,6 +1,25 @@
 # Changelog — BrainTerm v0.1.0-mvp
 
-## Unreleased (v0.2.0 — Clickable Links & Math Tokenizer)
+## Unreleased (v0.2.0-prebeta — Full Feature Integration, Graph G3 & Hardening)
+### Interactive Workspace, Editor & Memory UI
+- Added in-document **Find & Replace** (`Ctrl+F` / `Ctrl+H`) in the editor with match counting, case sensitivity toggle, `Replace` / `Replace All`, `search-match` style definitions in `bt-ink-dark.xml` & `bt-ink-light.xml`, and clean empty-vault **Starter Vault** onboarding (`Open Vault…` / `Create Starter Vault…` from `vault-template/`).
+- Wired **Chat Importer** (`>import chats`) for idempotent ChatGPT/Claude/Codex JSON & JSONL transcripts, **Review AI Tags** (`>review ai tags`) with `Promote`/`Dismiss` backed by `bt_organizer_*` and `R9` malformed-YAML refusal, **Sync Embeddings** (`>sync embeddings`), and **Backlinks & Orphans** (`Alt+B`).
+- Upgraded Ask / Search Bar (`Ctrl+E`) with keyboard Up/Down navigation, `Alt+Up/Down` query history, a **Hybrid** FTS5 + offline vector search toggle showing cached vector count, and configurable AI CLI target (`claude` / `codex` / `gemini`) with preflight availability warnings before checkpoint/tab spawn.
+- Added post-rollback vault synchronization so session rollback immediately updates the SQLite index, editor buffer, and link snapshot; persisted `[editor] show_line_numbers`, `[search] hybrid_enabled`, and `[agent] preferred_cli` in `state.ini`.
+- Added an in-app **Keyboard Shortcuts** dialog (`F1` / menu), a **New Starter Vault…** menu entry (`app.create-starter-vault`), accessible labels (`GTK_ACCESSIBLE_PROPERTY_LABEL`) on icon-only header/sidebar/graph buttons, and automatic Back/Forward navigation history updates when notes are renamed or deleted (`bt_nav_history_rename_path`, `bt_nav_history_remove_path`).
+
+### Brain Graph G3 & Terminal Polish
+- Added **Brain Graph G3** interactions in 2D: interactive **drag-to-pin** with neighbor spring reheat, incremental live force settling (automatically stopping at 0 idle redraws once converged), fast GPU VBO position-only updates (no Pango atlas rebuild during drag/settle), **`Re-layout`** (`R`), context-menu Pin/Unpin/Unpin All, and **`Highlight Orphans`** (`O`) across both OpenGL and Cairo renderers.
+- Added automatic terminal focus preservation on tab switch/close, middle-click tab close, and screen-reader/tooltip labels on terminal close buttons and the vault tree view.
+
+### Core Database, Embeddings, MCP v2 & Release Packaging
+- Expanded `BtIndex` with `bt_index_list_recent_notes()` (`ORDER BY updated DESC`), `bt_index_list_orphan_notes()`, `bt_index_list_backlinks()`, `bt_index_list_pending_ai_tags()`, `bt_index_list_embeddings()`, and `bt_index_embedding_count()`; updated `bt_embed_hybrid_search()` to load persisted SQLite vectors without redundant disk reads and guard against non-finite (`NaN`/`Inf`) vector components.
+- Hardened input bounds and fault isolation across core modules: bounded YAML frontmatter parsing (256 KiB cap), bounded importer reads (64 MiB cap), unique hashed fallback slugs for non-ASCII titles (`untitled-<hash>`), malformed-JSONL error reporting without empty note creation, `%`/`'`/`!` shell metacharacter sanitization alongside POSIX metacharacters, `.bak` backup on corrupt `dismissed_tags.json`, and `top_k` schema exposure on `bt-mcp` `search_memory`.
+- Upgraded `bt-mcp` to read dynamic >64 KB JSON-RPC lines (up to 8 MiB), advertise `capabilities` and tool `inputSchema`, sort `recent` by newest update, expose read-only `backlinks`, and support optional `hybrid` vector fusion on `search_memory`.
+- Hardened `scripts/package-win.ps1` to resolve DLLs for `bt-mcp.exe`, verify `bt-mcp.exe` SHA-256 and isolated-PATH JSON-RPC initialization alongside `bt.exe --smoke-test`, and bundle `docs/THIRD_PARTY_LICENSES.md` + font licenses into `dist/brainterm/licenses/`.
+- Added `docs/THIRD_PARTY_LICENSES.md`, `docs/ROADMAP.md`, `docs/KNOWN_LIMITATIONS.md`, and `docs/RELEASE_CHECKLIST.md`.
+
+### Clickable Links & Math Tokenizer (v0.2.0 Baseline)
 - Click any `[[wikilink]]`, Markdown link, or URL directly in the editor to open it; when the cursor is already inside a link, clicking edits the link text instead (`Alt+Click` always places the cursor, `Ctrl+Click` always opens).
 - Clicking a link to a note that does not exist yet now opens a preview popover showing the exact path and any new folders to be created before creating the note.
 - Clicking a link that matches multiple notes with the same name opens a chooser popover so you can pick the right folder or copy the full `[[folder/note]]` link with `Ctrl+C`.

@@ -5,9 +5,11 @@
 #include "bt_build_stamp.h"
 #include "checkpoint.h"
 #include "createnote.h"
+#include "embed.h"
 #include "frontmatter.h"
 #include "graph.h"
 #include "graphview.h"
+#include "importer.h"
 #include "index.h"
 #include "linkresolve.h"
 #include "navhistory.h"
@@ -109,6 +111,9 @@ struct BtApp {
   BtNavHistory *nav;
   gboolean nav_replaying;
   gboolean links_open_on_click;
+  gboolean show_line_numbers;
+  gboolean hybrid_search_enabled;
+  gchar *preferred_agent_cli;
 
   BtCreatePopover *create_popover;
   BtChooserPopover *chooser_popover;
@@ -488,6 +493,52 @@ void bt_app_set_confirm_external_urls(BtApp *app, gboolean enabled, gboolean per
 gboolean bt_app_get_confirm_external_urls(const BtApp *app)
 {
   return app ? app->confirm_external_urls : TRUE;
+}
+
+static gboolean load_saved_pref_bool(const gchar *group, const gchar *key, gboolean def_val)
+{
+  gchar *path = bt_app_state_file_path();
+  GKeyFile *kf = g_key_file_new();
+  gboolean val = def_val;
+  if (g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL)) {
+    gchar *v = g_key_file_get_string(kf, group, key, NULL);
+    if (v != NULL) {
+      val = (g_strcmp0(v, "1") == 0 || g_ascii_strcasecmp(v, "true") == 0);
+      g_free(v);
+    }
+  }
+  g_key_file_unref(kf);
+  g_free(path);
+  return val;
+}
+
+static gchar *load_saved_pref_str(const gchar *group, const gchar *key, const gchar *def_val)
+{
+  gchar *path = bt_app_state_file_path();
+  GKeyFile *kf = g_key_file_new();
+  gchar *val = NULL;
+  if (g_key_file_load_from_file(kf, path, G_KEY_FILE_NONE, NULL))
+    val = g_key_file_get_string(kf, group, key, NULL);
+  g_key_file_unref(kf);
+  g_free(path);
+  return (val && val[0]) ? val : (g_free(val), g_strdup(def_val));
+}
+
+static const gchar *resolve_ask_agent_cli(BtApp *app)
+{
+  if (app == NULL)
+    return "claude";
+  bt_agents_clear(&app->agents);
+  bt_agents_detect(&app->agents);
+  if (app->preferred_agent_cli != NULL && g_strcmp0(app->preferred_agent_cli, "auto") != 0)
+    return app->preferred_agent_cli;
+  static const BtAgentKind order[] = {BT_AGENT_CLAUDE, BT_AGENT_CODEX, BT_AGENT_GEMINI};
+  for (guint i = 0; i < G_N_ELEMENTS(order); i++) {
+    const BtAgentInfo *inf = bt_agents_get(&app->agents, order[i]);
+    if (inf != NULL && inf->resolved_path != NULL)
+      return inf->cli_name;
+  }
+  return "claude";
 }
 
 gpointer bt_app_application(const BtApp *app)
@@ -1536,8 +1587,12 @@ gboolean bt_app_open_vault(BtApp *app, const gchar *path, GError **error)
       bt_sessionspanel_refresh(app->sessions_panel, app->sessions);
   }
 
-  if (app->editor != NULL)
+  if (app->editor != NULL) {
+    bt_editorpane_set_has_vault(app->editor, TRUE);
     bt_editorpane_clear(app->editor);
+  }
+  if (app->hybrid_search_enabled && app->index != NULL && app->vault != NULL && !ro_verify)
+    bt_embed_sync_vault(app->vault, app->index, TRUE, NULL, NULL);
   if (app->nav != NULL)
     bt_nav_history_clear(app->nav);
   if (app->tree != NULL)
@@ -1828,9 +1883,20 @@ static void launch_agent(BtApp *app, BtAgentKind kind)
 {
   if (app->vault == NULL)
     return;
+  bt_agents_clear(&app->agents);
+  bt_agents_detect(&app->agents);
   const BtAgentInfo *info = bt_agents_get(&app->agents, kind);
   if (info == NULL)
     return;
+
+  if (!app->smoke_test && info->resolved_path == NULL) {
+    g_autofree gchar *detail = g_strdup_printf(
+        "The '%s' CLI executable was not found in your PATH.\n\n"
+        "Install '%s' and verify it launches from a terminal, or select another installed agent in Agent menu / Preferences.",
+        info->cli_name, info->cli_name);
+    bt_app_show_error(app, "Agent CLI Not Found", detail);
+    return;
+  }
 
   if (app->editor != NULL && bt_editorpane_is_dirty(app->editor))
     bt_editorpane_flush_save(app->editor);
@@ -1997,6 +2063,37 @@ static void on_session_resume(const gchar *session_id, gpointer ud)
   set_term_visible(app, TRUE);
 }
 
+static void sync_after_vault_mutation(BtApp *app)
+{
+  if (app == NULL || app->vault == NULL)
+    return;
+  gchar *cur_rel = (app->editor && bt_editorpane_relpath(app->editor))
+                       ? g_strdup(bt_editorpane_relpath(app->editor))
+                       : NULL;
+  vault_rescan(app->vault, NULL, NULL);
+  if (app->index != NULL)
+    bt_index_rebuild(app->index, app->vault, NULL);
+  if (app->tree != NULL)
+    bt_filetree_populate(app->tree, app->vault);
+  rebuild_link_snapshot(app);
+  if (cur_rel != NULL && app->editor != NULL) {
+    gchar *disk = NULL;
+    gsize len = 0;
+    if (vault_read(app->vault, cur_rel, &disk, &len, NULL)) {
+      bt_editorpane_load(app->editor, cur_rel, disk, len);
+      bt_editorpane_hide_conflict(app->editor);
+      g_free(disk);
+    } else {
+      bt_editorpane_clear(app->editor);
+    }
+  }
+  g_free(cur_rel);
+  if (app->hybrid_search_enabled && app->index != NULL)
+    bt_embed_sync_vault(app->vault, app->index, TRUE, NULL, NULL);
+  refresh_graph(app, FALSE);
+  update_header(app);
+}
+
 static void on_session_rollback(const gchar *session_id, gpointer ud)
 {
   BtApp *app = ud;
@@ -2009,9 +2106,7 @@ static void on_session_rollback(const gchar *session_id, gpointer ud)
     g_error_free(err);
     return;
   }
-  vault_rescan(app->vault, NULL, NULL);
-  bt_filetree_populate(app->tree, app->vault);
-  refresh_graph(app, FALSE);
+  sync_after_vault_mutation(app);
   show_toast(app, "Rolled back vault to checkpoint", 3);
 }
 
@@ -2044,6 +2139,71 @@ static void prompt_open_vault(BtApp *app)
   gtk_file_dialog_select_folder(dlg, app->window, NULL, on_folder_chosen, app);
   g_object_unref(dlg);
 }
+
+static void on_starter_folder_chosen(GObject *src, GAsyncResult *res, gpointer ud)
+{
+  BtApp *app = ud;
+  GError *err = NULL;
+  GFile *folder = gtk_file_dialog_select_folder_finish(GTK_FILE_DIALOG(src), res, &err);
+  if (folder == NULL) {
+    if (err != NULL && !g_error_matches(err, GTK_DIALOG_ERROR, GTK_DIALOG_ERROR_DISMISSED))
+      bt_app_show_error(app, "Folder selection failed", err->message);
+    g_clear_error(&err);
+    return;
+  }
+  gchar *path = g_file_get_path(folder);
+  g_object_unref(folder);
+  if (path == NULL)
+    return;
+
+  BtVault *tv = vault_open(path, NULL, &err);
+  if (tv == NULL) {
+    bt_app_show_error(app, "Cannot initialize starter vault", err ? err->message : "");
+    g_clear_error(&err);
+    g_free(path);
+    return;
+  }
+  bt_agents_apply_vault_template(tv, NULL, NULL);
+  g_autofree gchar *welcome_abs = vault_resolve(tv, "welcome.md", NULL);
+  if (welcome_abs != NULL && !g_file_test(welcome_abs, G_FILE_TEST_EXISTS)) {
+    const gchar *welcome_md =
+        "---\n"
+        "id: bt-welcome\n"
+        "title: \"Welcome to BrainTerm\"\n"
+        "created: 2026-11-27T00:00:00Z\n"
+        "updated: 2026-11-27T00:00:00Z\n"
+        "source: human\n"
+        "tags: [getting-started]\n"
+        "---\n\n"
+        "# Welcome to BrainTerm\n\n"
+        "Your notes stay plain Markdown on disk with instant FTS5 search (`Ctrl+E`),\n"
+        "fuzzy quick open (`Ctrl+P`), and an interactive knowledge graph (`Ctrl+G`).\n\n"
+        "- Press `Ctrl+N` to create a note or link with `[[Topic Name]]`.\n"
+        "- Use `Ctrl+F` to search within a note or `Alt+B` to view backlinks.\n"
+        "- Inline math works automatically: $E = mc^2$ and $$\\int_0^\\infty e^{-x^2} dx = \\frac{\\sqrt{\\pi}}{2}$$.\n";
+    vault_atomic_write(tv, "welcome.md", welcome_md, strlen(welcome_md), NULL, NULL);
+  }
+  vault_free(tv);
+
+  if (!bt_app_open_vault(app, path, &err)) {
+    bt_app_show_error(app, "Cannot open starter vault", err ? err->message : "");
+    g_clear_error(&err);
+  } else {
+    bt_app_open_note(app, "welcome.md", NULL);
+  }
+  g_free(path);
+}
+
+static void prompt_create_starter_vault(BtApp *app)
+{
+  GtkFileDialog *dlg = gtk_file_dialog_new();
+  gtk_file_dialog_set_title(dlg, "Choose Folder for New Starter Vault");
+  gtk_file_dialog_select_folder(dlg, app->window, NULL, on_starter_folder_chosen, app);
+  g_object_unref(dlg);
+}
+
+static void on_editor_open_vault_cb(gpointer ud) { prompt_open_vault((BtApp *)ud); }
+static void on_editor_create_vault_cb(gpointer ud) { prompt_create_starter_vault((BtApp *)ud); }
 
 static void on_missing_vault_response(GObject *src, GAsyncResult *res, gpointer ud)
 {
@@ -2283,6 +2443,8 @@ static gboolean rename_note_in_app(BtApp *app, const gchar *old_relpath,
     bt_index_delete_path(app->index, old_relpath, NULL);
     bt_index_upsert_note(app->index, app->vault, new_rel, NULL, NULL);
   }
+  if (app->nav != NULL)
+    bt_nav_history_rename_path(app->nav, old_relpath, new_rel);
   vault_rescan(app->vault, NULL, NULL);
   if (app->tree != NULL)
     bt_filetree_populate(app->tree, app->vault);
@@ -2700,6 +2862,8 @@ static void on_delete_confirm_response(GObject *src, GAsyncResult *res, gpointer
     } else {
       if (ctx->app->index != NULL)
         bt_index_delete_path(ctx->app->index, ctx->relpath, NULL);
+      if (ctx->app->nav != NULL)
+        bt_nav_history_remove_path(ctx->app->nav, ctx->relpath);
       if (ctx->app->editor != NULL &&
           g_strcmp0(bt_editorpane_relpath(ctx->app->editor), ctx->relpath) == 0) {
         bt_editorpane_clear(ctx->app->editor);
@@ -2823,7 +2987,7 @@ static void on_term_status(const gchar *msg, gpointer ud)
   show_toast(ud, msg, 2);
 }
 
-/* ------------------------------------------- Preferences & About (M-UI) -- */
+/* ------------------------------- Preferences, Importer, Tag Review, Backlinks -- */
 
 static void on_pref_scheme_selected(GObject *obj, GParamSpec *pspec, gpointer ud)
 {
@@ -2834,36 +2998,574 @@ static void on_pref_scheme_selected(GObject *obj, GParamSpec *pspec, gpointer ud
   apply_scheme_runtime(app, sc, TRUE);
 }
 
+static void on_pref_linenos_toggled(GObject *obj, GParamSpec *pspec, gpointer ud)
+{
+  (void)pspec;
+  BtApp *app = ud;
+  app->show_line_numbers = adw_switch_row_get_active(ADW_SWITCH_ROW(obj));
+  if (app->editor != NULL)
+    bt_editorpane_set_line_numbers(app->editor, app->show_line_numbers);
+  if (!app->smoke_test)
+    save_state_str("editor", "show_line_numbers", app->show_line_numbers ? "true" : "false", NULL);
+}
+
+static void on_pref_single_click_toggled(GObject *obj, GParamSpec *pspec, gpointer ud)
+{
+  (void)pspec;
+  bt_app_set_links_open_on_click((BtApp *)ud, adw_switch_row_get_active(ADW_SWITCH_ROW(obj)), TRUE);
+}
+
+static void on_pref_confirm_urls_toggled(GObject *obj, GParamSpec *pspec, gpointer ud)
+{
+  (void)pspec;
+  bt_app_set_confirm_external_urls((BtApp *)ud, adw_switch_row_get_active(ADW_SWITCH_ROW(obj)), TRUE);
+}
+
+static void on_pref_hybrid_toggled(GObject *obj, GParamSpec *pspec, gpointer ud)
+{
+  (void)pspec;
+  BtApp *app = ud;
+  app->hybrid_search_enabled = adw_switch_row_get_active(ADW_SWITCH_ROW(obj));
+  if (!app->smoke_test)
+    save_state_str("search", "hybrid_enabled", app->hybrid_search_enabled ? "true" : "false", NULL);
+  if (app->vault != NULL && app->index != NULL) {
+    guint edges = 0;
+    GError *err = NULL;
+    if (bt_embed_sync_vault(app->vault, app->index, app->hybrid_search_enabled, &edges, &err)) {
+      g_autofree gchar *msg = app->hybrid_search_enabled
+                                  ? g_strdup_printf("Embeddings synced (%u vectors, %u similarity links)",
+                                                    bt_embed_count_cached(app->index), edges)
+                                  : g_strdup("Cleared local embedding vectors (FTS5 unaffected)");
+      show_toast(app, msg, 3);
+    } else if (err != NULL) {
+      bt_app_show_error(app, "Embedding sync failed", err->message);
+      g_error_free(err);
+    }
+  }
+}
+
+static void on_pref_sync_emb_clicked(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  BtApp *app = ud;
+  if (app->vault == NULL || app->index == NULL)
+    return;
+  guint edges = 0;
+  GError *err = NULL;
+  if (bt_embed_sync_vault(app->vault, app->index, TRUE, &edges, &err)) {
+    app->hybrid_search_enabled = TRUE;
+    if (!app->smoke_test)
+      save_state_str("search", "hybrid_enabled", "true", NULL);
+    g_autofree gchar *msg = g_strdup_printf("Indexed %u note vectors (%u similarity edges)",
+                                            bt_embed_count_cached(app->index), edges);
+    show_toast(app, msg, 3);
+  } else {
+    bt_app_show_error(app, "Embedding sync failed", err ? err->message : "");
+    g_clear_error(&err);
+  }
+}
+
+static void on_pref_agent_selected(GObject *obj, GParamSpec *pspec, gpointer ud)
+{
+  (void)pspec;
+  BtApp *app = ud;
+  static const gchar *const ids[] = {"auto", "claude", "codex", "gemini"};
+  guint idx = adw_combo_row_get_selected(ADW_COMBO_ROW(obj));
+  if (idx >= G_N_ELEMENTS(ids))
+    idx = 0;
+  g_free(app->preferred_agent_cli);
+  app->preferred_agent_cli = g_strdup(ids[idx]);
+  if (!app->smoke_test)
+    save_state_str("agent", "preferred_cli", app->preferred_agent_cli, NULL);
+}
+
 static void show_preferences_dialog(BtApp *app)
 {
+  bt_agents_clear(&app->agents);
+  bt_agents_detect(&app->agents);
+
   GtkWidget *win = adw_window_new();
   gtk_window_set_title(GTK_WINDOW(win), "Preferences");
   gtk_window_set_transient_for(GTK_WINDOW(win), app->window);
   gtk_window_set_modal(GTK_WINDOW(win), TRUE);
-  gtk_window_set_default_size(GTK_WINDOW(win), 420, 220);
+  gtk_window_set_default_size(GTK_WINDOW(win), 500, 520);
 
   GtkWidget *tv = adw_toolbar_view_new();
   adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(tv), adw_header_bar_new());
 
-  GtkWidget *grp = adw_preferences_group_new();
-  adw_preferences_group_set_title(ADW_PREFERENCES_GROUP(grp), "Ink Appearance");
-  gtk_widget_set_margin_top(grp, 16);
-  gtk_widget_set_margin_bottom(grp, 16);
-  gtk_widget_set_margin_start(grp, 16);
-  gtk_widget_set_margin_end(grp, 16);
+  GtkWidget *page = adw_preferences_page_new();
 
-  GtkWidget *row = adw_combo_row_new();
-  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), "Color Scheme");
-  const gchar *const opts[] = {"Follow System", "Dark (Ink)", "Light (Paper)", NULL};
+  GtkWidget *grp_app = adw_preferences_group_new();
+  adw_preferences_group_set_title(ADW_PREFERENCES_GROUP(grp_app), "Appearance");
+  adw_preferences_group_set_description(ADW_PREFERENCES_GROUP(grp_app),
+                                        "BrainTerm Dusk uses a unified dark palette across chrome, editor, graph, and terminal.");
+  GtkWidget *row_scheme = adw_combo_row_new();
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row_scheme), "Color Scheme");
+  const gchar *const opts[] = {"Follow System", "Dark (Ink)", "Light (Paper — planned)", NULL};
   GtkStringList *sl = gtk_string_list_new(opts);
-  adw_combo_row_set_model(ADW_COMBO_ROW(row), G_LIST_MODEL(sl));
+  adw_combo_row_set_model(ADW_COMBO_ROW(row_scheme), G_LIST_MODEL(sl));
   g_object_unref(sl);
   guint cur = (app->scheme == BT_SCHEME_SYSTEM) ? 0 : ((app->scheme == BT_SCHEME_DARK) ? 1 : 2);
-  adw_combo_row_set_selected(ADW_COMBO_ROW(row), cur);
-  g_signal_connect(row, "notify::selected", G_CALLBACK(on_pref_scheme_selected), app);
-  adw_preferences_group_add(ADW_PREFERENCES_GROUP(grp), row);
+  adw_combo_row_set_selected(ADW_COMBO_ROW(row_scheme), cur);
+  g_signal_connect(row_scheme, "notify::selected", G_CALLBACK(on_pref_scheme_selected), app);
+  adw_preferences_group_add(ADW_PREFERENCES_GROUP(grp_app), row_scheme);
+  adw_preferences_page_add(ADW_PREFERENCES_PAGE(page), ADW_PREFERENCES_GROUP(grp_app));
 
-  adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(tv), grp);
+  GtkWidget *grp_ed = adw_preferences_group_new();
+  adw_preferences_group_set_title(ADW_PREFERENCES_GROUP(grp_ed), "Editor & Links");
+  GtkWidget *row_ln = adw_switch_row_new();
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row_ln), "Show line numbers");
+  adw_switch_row_set_active(ADW_SWITCH_ROW(row_ln), app->show_line_numbers);
+  g_signal_connect(row_ln, "notify::active", G_CALLBACK(on_pref_linenos_toggled), app);
+  adw_preferences_group_add(ADW_PREFERENCES_GROUP(grp_ed), row_ln);
+
+  GtkWidget *row_sc = adw_switch_row_new();
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row_sc), "Open links on single click");
+  adw_action_row_set_subtitle(ADW_ACTION_ROW(row_sc), "When off, use Ctrl+Click or Ctrl+Enter to follow links");
+  adw_switch_row_set_active(ADW_SWITCH_ROW(row_sc), app->links_open_on_click);
+  g_signal_connect(row_sc, "notify::active", G_CALLBACK(on_pref_single_click_toggled), app);
+  adw_preferences_group_add(ADW_PREFERENCES_GROUP(grp_ed), row_sc);
+
+  GtkWidget *row_cu = adw_switch_row_new();
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row_cu), "Confirm external URLs before opening");
+  adw_switch_row_set_active(ADW_SWITCH_ROW(row_cu), app->confirm_external_urls);
+  g_signal_connect(row_cu, "notify::active", G_CALLBACK(on_pref_confirm_urls_toggled), app);
+  adw_preferences_group_add(ADW_PREFERENCES_GROUP(grp_ed), row_cu);
+  adw_preferences_page_add(ADW_PREFERENCES_PAGE(page), ADW_PREFERENCES_GROUP(grp_ed));
+
+  GtkWidget *grp_ai = adw_preferences_group_new();
+  adw_preferences_group_set_title(ADW_PREFERENCES_GROUP(grp_ai), "Search & AI Agents");
+  GtkWidget *row_hyb = adw_switch_row_new();
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row_hyb), "Offline Hybrid Search (FTS5 + Local Vectors)");
+  guint cached = app->index ? bt_embed_count_cached(app->index) : 0u;
+  g_autofree gchar *sub_hyb = g_strdup_printf("%u local note vectors cached in SQLite (zero network calls)", cached);
+  adw_action_row_set_subtitle(ADW_ACTION_ROW(row_hyb), sub_hyb);
+  adw_switch_row_set_active(ADW_SWITCH_ROW(row_hyb), app->hybrid_search_enabled);
+  g_signal_connect(row_hyb, "notify::active", G_CALLBACK(on_pref_hybrid_toggled), app);
+  adw_preferences_group_add(ADW_PREFERENCES_GROUP(grp_ai), row_hyb);
+
+  GtkWidget *row_sync = adw_action_row_new();
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row_sync), "Local Vector Index");
+  adw_action_row_set_subtitle(ADW_ACTION_ROW(row_sync), "Rebuild hashed n-gram embeddings for instant hybrid search");
+  GtkWidget *b_sync = gtk_button_new_with_label("Sync Now");
+  gtk_widget_set_valign(b_sync, GTK_ALIGN_CENTER);
+  gtk_widget_set_sensitive(b_sync, app->vault != NULL && app->index != NULL);
+  g_signal_connect(b_sync, "clicked", G_CALLBACK(on_pref_sync_emb_clicked), app);
+  adw_action_row_add_suffix(ADW_ACTION_ROW(row_sync), b_sync);
+  adw_preferences_group_add(ADW_PREFERENCES_GROUP(grp_ai), row_sync);
+
+  GtkWidget *row_ag = adw_combo_row_new();
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row_ag), "Default Ask Agent CLI");
+  const BtAgentInfo *ic = bt_agents_get(&app->agents, BT_AGENT_CLAUDE);
+  const BtAgentInfo *ix = bt_agents_get(&app->agents, BT_AGENT_CODEX);
+  const BtAgentInfo *ig = bt_agents_get(&app->agents, BT_AGENT_GEMINI);
+  g_autofree gchar *ag_sub = g_strdup_printf("Detected in PATH: claude (%s), codex (%s), gemini (%s)",
+                                             (ic && ic->resolved_path) ? "yes" : "no",
+                                             (ix && ix->resolved_path) ? "yes" : "no",
+                                             (ig && ig->resolved_path) ? "yes" : "no");
+  adw_action_row_set_subtitle(ADW_ACTION_ROW(row_ag), ag_sub);
+  const gchar *const ag_opts[] = {"Auto (first installed)", "claude", "codex", "gemini", NULL};
+  GtkStringList *asl = gtk_string_list_new(ag_opts);
+  adw_combo_row_set_model(ADW_COMBO_ROW(row_ag), G_LIST_MODEL(asl));
+  g_object_unref(asl);
+  guint ag_sel = 0;
+  if (g_strcmp0(app->preferred_agent_cli, "claude") == 0) ag_sel = 1;
+  else if (g_strcmp0(app->preferred_agent_cli, "codex") == 0) ag_sel = 2;
+  else if (g_strcmp0(app->preferred_agent_cli, "gemini") == 0) ag_sel = 3;
+  adw_combo_row_set_selected(ADW_COMBO_ROW(row_ag), ag_sel);
+  g_signal_connect(row_ag, "notify::selected", G_CALLBACK(on_pref_agent_selected), app);
+  adw_preferences_group_add(ADW_PREFERENCES_GROUP(grp_ai), row_ag);
+  adw_preferences_page_add(ADW_PREFERENCES_PAGE(page), ADW_PREFERENCES_GROUP(grp_ai));
+
+  adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(tv), page);
+  adw_window_set_content(ADW_WINDOW(win), tv);
+  gtk_window_present(GTK_WINDOW(win));
+}
+
+typedef struct {
+  BtApp *app;
+  GtkWindow *win;
+  GtkWidget *drop;
+  GtkWidget *status_lbl;
+} BtImportUiCtx;
+
+static void on_import_file_picked(GObject *src, GAsyncResult *res, gpointer ud)
+{
+  BtImportUiCtx *ctx = ud;
+  GError *err = NULL;
+  GFile *f = gtk_file_dialog_open_finish(GTK_FILE_DIALOG(src), res, &err);
+  if (f == NULL) {
+    if (err != NULL && !g_error_matches(err, GTK_DIALOG_ERROR, GTK_DIALOG_ERROR_DISMISSED))
+      gtk_label_set_text(GTK_LABEL(ctx->status_lbl), err->message);
+    g_clear_error(&err);
+    return;
+  }
+  gchar *path = g_file_get_path(f);
+  g_object_unref(f);
+  if (path == NULL)
+    return;
+
+  guint sel = gtk_drop_down_get_selected(GTK_DROP_DOWN(ctx->drop));
+  const gchar *tool = (sel == 0) ? "chatgpt" : (sel == 1 ? "claude" : (sel == 2 ? "claude-code" : "codex"));
+  gboolean is_jsonl = (sel >= 2);
+  BtImportStats st = {0};
+  gboolean ok = is_jsonl
+                    ? bt_import_session_jsonl(ctx->app->vault, ctx->app->index, tool, path, &st, &err)
+                    : bt_import_conversations_json(ctx->app->vault, ctx->app->index, tool, path, &st, &err);
+  g_free(path);
+  if (!ok) {
+    gtk_label_set_text(GTK_LABEL(ctx->status_lbl), err ? err->message : "Import failed");
+    g_clear_error(&err);
+    return;
+  }
+  sync_after_vault_mutation(ctx->app);
+  g_autofree gchar *msg = g_strdup_printf("Imported %u, skipped %u existing, rejected %u",
+                                          st.imported, st.skipped, st.rejected);
+  gtk_label_set_text(GTK_LABEL(ctx->status_lbl), msg);
+  show_toast(ctx->app, msg, 3);
+}
+
+static void on_import_choose_clicked(GtkButton *b, gpointer ud)
+{
+  (void)b;
+  BtImportUiCtx *ctx = ud;
+  if (ctx->app->vault == NULL)
+    return;
+  GtkFileDialog *dlg = gtk_file_dialog_new();
+  gtk_file_dialog_set_title(dlg, "Select Export File (.json or .jsonl)");
+  gtk_file_dialog_open(dlg, ctx->win, NULL, on_import_file_picked, ctx);
+  g_object_unref(dlg);
+}
+
+static void show_import_dialog(BtApp *app)
+{
+  if (app == NULL || app->window == NULL || app->vault == NULL || app->smoke_test)
+    return;
+  GtkWidget *win = adw_window_new();
+  gtk_window_set_title(GTK_WINDOW(win), "Import Chats & Agent Sessions");
+  gtk_window_set_transient_for(GTK_WINDOW(win), app->window);
+  gtk_window_set_modal(GTK_WINDOW(win), TRUE);
+  gtk_window_set_default_size(GTK_WINDOW(win), 460, 260);
+
+  BtImportUiCtx *ctx = g_new0(BtImportUiCtx, 1);
+  ctx->app = app;
+  ctx->win = GTK_WINDOW(win);
+  g_object_set_data_full(G_OBJECT(win), "bt-import-ctx", ctx, g_free);
+
+  GtkWidget *tv = adw_toolbar_view_new();
+  adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(tv), adw_header_bar_new());
+  GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
+  gtk_widget_set_margin_top(box, 16);
+  gtk_widget_set_margin_bottom(box, 16);
+  gtk_widget_set_margin_start(box, 16);
+  gtk_widget_set_margin_end(box, 16);
+
+  GtkWidget *desc = gtk_label_new(
+      "Import conversations idempotently into inbox/import/<source>/ with original timestamps "
+      "and strict P3 separation (human prompts in body, AI replies under ## AI draft).");
+  gtk_label_set_wrap(GTK_LABEL(desc), TRUE);
+  gtk_label_set_xalign(GTK_LABEL(desc), 0.0f);
+  gtk_box_append(GTK_BOX(box), desc);
+
+  const gchar *const srcs[] = {
+      "ChatGPT (conversations.json)",
+      "Claude Web (conversations.json)",
+      "Claude Code (.jsonl)",
+      "Codex (.jsonl)",
+      NULL,
+  };
+  ctx->drop = gtk_drop_down_new_from_strings(srcs);
+  gtk_box_append(GTK_BOX(box), ctx->drop);
+
+  ctx->status_lbl = gtk_label_new("Choose an export file to begin.");
+  gtk_label_set_xalign(GTK_LABEL(ctx->status_lbl), 0.0f);
+  gtk_label_set_wrap(GTK_LABEL(ctx->status_lbl), TRUE);
+  gtk_widget_add_css_class(ctx->status_lbl, "dim-label");
+  gtk_box_append(GTK_BOX(box), ctx->status_lbl);
+
+  GtkWidget *btns = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+  gtk_widget_set_halign(btns, GTK_ALIGN_END);
+  GtkWidget *b_choose = gtk_button_new_with_label("Choose File & Import…");
+  gtk_widget_add_css_class(b_choose, "suggested-action");
+  g_signal_connect(b_choose, "clicked", G_CALLBACK(on_import_choose_clicked), ctx);
+  gtk_box_append(GTK_BOX(btns), b_choose);
+  gtk_box_append(GTK_BOX(box), btns);
+
+  adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(tv), box);
+  adw_window_set_content(ADW_WINDOW(win), tv);
+  gtk_window_present(GTK_WINDOW(win));
+}
+
+typedef struct {
+  BtApp *app;
+  GtkWindow *win;
+  GtkWidget *list_box;
+  GtkWidget *summary_lbl;
+} BtTagReviewCtx;
+
+static void populate_tag_review_list(BtTagReviewCtx *ctx);
+
+static void sync_single_note_if_open(BtApp *app, const gchar *relpath)
+{
+  if (app->editor != NULL && g_strcmp0(bt_editorpane_relpath(app->editor), relpath) == 0 &&
+      !bt_editorpane_is_dirty(app->editor)) {
+    gchar *txt = NULL;
+    gsize len = 0;
+    if (vault_read(app->vault, relpath, &txt, &len, NULL)) {
+      bt_editorpane_load(app->editor, relpath, txt, len);
+      g_free(txt);
+    }
+  }
+  refresh_graph(app, FALSE);
+}
+
+static void on_tag_promote_clicked(GtkButton *btn, gpointer ud)
+{
+  BtTagReviewCtx *ctx = ud;
+  const gchar *path = g_object_get_data(G_OBJECT(btn), "bt-path");
+  const gchar *tag = g_object_get_data(G_OBJECT(btn), "bt-tag");
+  if (!path || !tag || ctx->app->vault == NULL)
+    return;
+  GError *err = NULL;
+  if (bt_organizer_promote_tag(ctx->app->vault, ctx->app->index, path, tag, &err)) {
+    sync_single_note_if_open(ctx->app, path);
+    g_autofree gchar *msg = g_strdup_printf("Promoted #%s to human tags on %s", tag, path);
+    show_toast(ctx->app, msg, 2);
+    populate_tag_review_list(ctx);
+  } else {
+    bt_app_show_error(ctx->app, "Promote failed", err ? err->message : "");
+    g_clear_error(&err);
+  }
+}
+
+static void on_tag_dismiss_clicked(GtkButton *btn, gpointer ud)
+{
+  BtTagReviewCtx *ctx = ud;
+  const gchar *path = g_object_get_data(G_OBJECT(btn), "bt-path");
+  const gchar *tag = g_object_get_data(G_OBJECT(btn), "bt-tag");
+  if (!path || !tag || ctx->app->vault == NULL)
+    return;
+  GError *err = NULL;
+  if (bt_organizer_dismiss_tag(ctx->app->vault, ctx->app->index, path, tag, &err)) {
+    sync_single_note_if_open(ctx->app, path);
+    g_autofree gchar *msg = g_strdup_printf("Dismissed #%s on %s", tag, path);
+    show_toast(ctx->app, msg, 2);
+    populate_tag_review_list(ctx);
+  } else {
+    bt_app_show_error(ctx->app, "Dismiss failed", err ? err->message : "");
+    g_clear_error(&err);
+  }
+}
+
+static void on_tag_open_note_clicked(GtkButton *btn, gpointer ud)
+{
+  BtTagReviewCtx *ctx = ud;
+  const gchar *path = g_object_get_data(G_OBJECT(btn), "bt-path");
+  if (path != NULL)
+    on_tree_select(path, ctx->app);
+}
+
+static void populate_tag_review_list(BtTagReviewCtx *ctx)
+{
+  GtkWidget *child;
+  while ((child = gtk_widget_get_first_child(ctx->list_box)) != NULL)
+    gtk_list_box_remove(GTK_LIST_BOX(ctx->list_box), child);
+
+  GPtrArray *items = ctx->app->index ? bt_index_list_pending_ai_tags(ctx->app->index, NULL) : NULL;
+  guint n = items ? items->len : 0u;
+  g_autofree gchar *sum = g_strdup_printf(
+      n > 0 ? "%u pending AI tag proposal(s). Promote moves to human tags (locked); Dismiss hides permanently."
+            : "No pending AI tag proposals. Run Organize Vault to propose tags from note contents.",
+      n);
+  gtk_label_set_text(GTK_LABEL(ctx->summary_lbl), sum);
+
+  for (guint i = 0; i < n; i++) {
+    const BtPendingAiTag *it = g_ptr_array_index(items, i);
+    GtkWidget *row_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_widget_set_margin_top(row_box, 6);
+    gtk_widget_set_margin_bottom(row_box, 6);
+    gtk_widget_set_margin_start(row_box, 10);
+    gtk_widget_set_margin_end(row_box, 10);
+
+    GtkWidget *info = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    gtk_widget_set_hexpand(info, TRUE);
+    g_autofree gchar *top = g_strdup_printf("#%s", it->tag);
+    GtkWidget *l1 = gtk_label_new(top);
+    gtk_label_set_xalign(GTK_LABEL(l1), 0.0f);
+    gtk_widget_add_css_class(l1, "heading");
+    g_autofree gchar *sub = g_strdup_printf("%s  (%s)", it->title, it->path);
+    GtkWidget *l2 = gtk_label_new(sub);
+    gtk_label_set_xalign(GTK_LABEL(l2), 0.0f);
+    gtk_label_set_ellipsize(GTK_LABEL(l2), PANGO_ELLIPSIZE_END);
+    gtk_widget_add_css_class(l2, "dim-label");
+    gtk_box_append(GTK_BOX(info), l1);
+    gtk_box_append(GTK_BOX(info), l2);
+
+    GtkWidget *b_open = gtk_button_new_with_label("Open");
+    gtk_widget_add_css_class(b_open, "bt-hairline");
+    g_object_set_data_full(G_OBJECT(b_open), "bt-path", g_strdup(it->path), g_free);
+    g_signal_connect(b_open, "clicked", G_CALLBACK(on_tag_open_note_clicked), ctx);
+
+    GtkWidget *b_prom = gtk_button_new_with_label("Promote");
+    gtk_widget_add_css_class(b_prom, "suggested-action");
+    g_object_set_data_full(G_OBJECT(b_prom), "bt-path", g_strdup(it->path), g_free);
+    g_object_set_data_full(G_OBJECT(b_prom), "bt-tag", g_strdup(it->tag), g_free);
+    g_signal_connect(b_prom, "clicked", G_CALLBACK(on_tag_promote_clicked), ctx);
+
+    GtkWidget *b_dis = gtk_button_new_with_label("Dismiss");
+    gtk_widget_add_css_class(b_dis, "bt-hairline");
+    g_object_set_data_full(G_OBJECT(b_dis), "bt-path", g_strdup(it->path), g_free);
+    g_object_set_data_full(G_OBJECT(b_dis), "bt-tag", g_strdup(it->tag), g_free);
+    g_signal_connect(b_dis, "clicked", G_CALLBACK(on_tag_dismiss_clicked), ctx);
+
+    gtk_box_append(GTK_BOX(row_box), info);
+    gtk_box_append(GTK_BOX(row_box), b_open);
+    gtk_box_append(GTK_BOX(row_box), b_prom);
+    gtk_box_append(GTK_BOX(row_box), b_dis);
+    gtk_list_box_append(GTK_LIST_BOX(ctx->list_box), row_box);
+  }
+  g_clear_pointer(&items, g_ptr_array_unref);
+}
+
+static void show_tag_review_dialog(BtApp *app)
+{
+  if (app == NULL || app->window == NULL || app->vault == NULL || app->index == NULL ||
+      app->smoke_test) {
+    return;
+  }
+  GtkWidget *win = adw_window_new();
+  gtk_window_set_title(GTK_WINDOW(win), "Review AI Tag Proposals (tags_ai)");
+  gtk_window_set_transient_for(GTK_WINDOW(win), app->window);
+  gtk_window_set_modal(GTK_WINDOW(win), TRUE);
+  gtk_window_set_default_size(GTK_WINDOW(win), 620, 440);
+
+  BtTagReviewCtx *ctx = g_new0(BtTagReviewCtx, 1);
+  ctx->app = app;
+  ctx->win = GTK_WINDOW(win);
+  g_object_set_data_full(G_OBJECT(win), "bt-tag-review", ctx, g_free);
+
+  GtkWidget *tv = adw_toolbar_view_new();
+  adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(tv), adw_header_bar_new());
+  GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+  gtk_widget_set_margin_top(box, 12);
+  gtk_widget_set_margin_bottom(box, 12);
+  gtk_widget_set_margin_start(box, 12);
+  gtk_widget_set_margin_end(box, 12);
+
+  ctx->summary_lbl = gtk_label_new("");
+  gtk_label_set_xalign(GTK_LABEL(ctx->summary_lbl), 0.0f);
+  gtk_label_set_wrap(GTK_LABEL(ctx->summary_lbl), TRUE);
+  gtk_widget_add_css_class(ctx->summary_lbl, "dim-label");
+  gtk_box_append(GTK_BOX(box), ctx->summary_lbl);
+
+  ctx->list_box = gtk_list_box_new();
+  gtk_list_box_set_selection_mode(GTK_LIST_BOX(ctx->list_box), GTK_SELECTION_NONE);
+  GtkWidget *scr = gtk_scrolled_window_new();
+  gtk_widget_set_vexpand(scr, TRUE);
+  gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scr), ctx->list_box);
+  gtk_box_append(GTK_BOX(box), scr);
+
+  populate_tag_review_list(ctx);
+  adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(tv), box);
+  adw_window_set_content(ADW_WINDOW(win), tv);
+  gtk_window_present(GTK_WINDOW(win));
+}
+
+typedef struct {
+  BtApp *app;
+  GtkWindow *win;
+} BtBacklinkCtx;
+
+static void on_backlink_row_activated(GtkListBox *lb, GtkListBoxRow *row, gpointer ud)
+{
+  (void)lb;
+  BtBacklinkCtx *ctx = ud;
+  const gchar *path = row ? g_object_get_data(G_OBJECT(row), "bt-path") : NULL;
+  if (path != NULL) {
+    gtk_window_close(ctx->win);
+    on_tree_select(path, ctx->app);
+  }
+}
+
+static void show_backlinks_dialog(BtApp *app)
+{
+  if (app == NULL || app->window == NULL || app->index == NULL || app->smoke_test)
+    return;
+  const gchar *active = app->editor ? bt_editorpane_relpath(app->editor) : NULL;
+
+  GtkWidget *win = adw_window_new();
+  gtk_window_set_title(GTK_WINDOW(win), "Knowledge Links & Orphans (Alt+B)");
+  gtk_window_set_transient_for(GTK_WINDOW(win), app->window);
+  gtk_window_set_modal(GTK_WINDOW(win), TRUE);
+  gtk_window_set_default_size(GTK_WINDOW(win), 560, 440);
+
+  BtBacklinkCtx *ctx = g_new0(BtBacklinkCtx, 1);
+  ctx->app = app;
+  ctx->win = GTK_WINDOW(win);
+  g_object_set_data_full(G_OBJECT(win), "bt-bl-ctx", ctx, g_free);
+
+  GtkWidget *tv = adw_toolbar_view_new();
+  adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(tv), adw_header_bar_new());
+  GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+  gtk_widget_set_margin_top(box, 12);
+  gtk_widget_set_margin_bottom(box, 12);
+  gtk_widget_set_margin_start(box, 12);
+  gtk_widget_set_margin_end(box, 12);
+
+  GtkWidget *lb = gtk_list_box_new();
+  g_signal_connect(lb, "row-activated", G_CALLBACK(on_backlink_row_activated), ctx);
+  GtkWidget *scr = gtk_scrolled_window_new();
+  gtk_widget_set_vexpand(scr, TRUE);
+  gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scr), lb);
+
+  GPtrArray *bls = active ? bt_index_list_backlinks(app->index, active, NULL) : NULL;
+  GPtrArray *orphans = bt_index_list_orphan_notes(app->index, NULL);
+
+  g_autofree gchar *hdr_txt = g_strdup_printf(
+      "Active note: %s · %u backlink(s) · %u vault orphan note(s)",
+      active ? active : "(none)", bls ? bls->len : 0u, orphans ? orphans->len : 0u);
+  GtkWidget *hdr = gtk_label_new(hdr_txt);
+  gtk_label_set_xalign(GTK_LABEL(hdr), 0.0f);
+  gtk_label_set_ellipsize(GTK_LABEL(hdr), PANGO_ELLIPSIZE_END);
+  gtk_widget_add_css_class(hdr, "dim-label");
+  gtk_box_append(GTK_BOX(box), hdr);
+
+  for (guint i = 0; bls != NULL && i < bls->len; i++) {
+    const BtLinkResRow *r = g_ptr_array_index(bls, i);
+    g_autofree gchar *t = g_strdup_printf("Backlink: %s (line %d · [[%s]])",
+                                          r->src_path, r->line_no, r->raw_target);
+    GtkWidget *lbl = gtk_label_new(t);
+    gtk_label_set_xalign(GTK_LABEL(lbl), 0.0f);
+    gtk_widget_set_margin_top(lbl, 6);
+    gtk_widget_set_margin_bottom(lbl, 6);
+    gtk_widget_set_margin_start(lbl, 8);
+    gtk_widget_set_margin_end(lbl, 8);
+    GtkWidget *row = gtk_list_box_row_new();
+    gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), lbl);
+    g_object_set_data_full(G_OBJECT(row), "bt-path", g_strdup(r->src_path), g_free);
+    gtk_list_box_append(GTK_LIST_BOX(lb), row);
+  }
+  for (guint i = 0; orphans != NULL && i < orphans->len; i++) {
+    const BtNoteRow *nr = g_ptr_array_index(orphans, i);
+    g_autofree gchar *t = g_strdup_printf("Orphan note (no links): %s (%s)", nr->title, nr->path);
+    GtkWidget *lbl = gtk_label_new(t);
+    gtk_label_set_xalign(GTK_LABEL(lbl), 0.0f);
+    gtk_widget_add_css_class(lbl, "dim-label");
+    gtk_widget_set_margin_top(lbl, 6);
+    gtk_widget_set_margin_bottom(lbl, 6);
+    gtk_widget_set_margin_start(lbl, 8);
+    gtk_widget_set_margin_end(lbl, 8);
+    GtkWidget *row = gtk_list_box_row_new();
+    gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), lbl);
+    g_object_set_data_full(G_OBJECT(row), "bt-path", g_strdup(nr->path), g_free);
+    gtk_list_box_append(GTK_LIST_BOX(lb), row);
+  }
+
+  g_clear_pointer(&bls, g_ptr_array_unref);
+  g_clear_pointer(&orphans, g_ptr_array_unref);
+
+  gtk_box_append(GTK_BOX(box), scr);
+  adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(tv), box);
   adw_window_set_content(ADW_WINDOW(win), tv);
   gtk_window_present(GTK_WINDOW(win));
 }
@@ -2890,6 +3592,7 @@ static void on_ask_send_agent(const gchar *cmd_line, gpointer ud)
 }
 
 static void act_open_vault(GSimpleAction *a, GVariant *p, gpointer ud) { (void)a; (void)p; prompt_open_vault(ud); }
+static void act_create_starter_vault(GSimpleAction *a, GVariant *p, gpointer ud) { (void)a; (void)p; prompt_create_starter_vault(ud); }
 static void act_open_note(GSimpleAction *a, GVariant *p, gpointer ud) { (void)a; if (p) on_tree_select(g_variant_get_string(p, NULL), ud); }
 static void act_save_active(GSimpleAction *a, GVariant *p, gpointer ud) { (void)a; (void)p; bt_app_save_active(ud, NULL); }
 static void act_term_spawn(GSimpleAction *a, GVariant *p, gpointer ud) { (void)a; (void)p; on_tree_open_term(NULL, ud); }
@@ -3046,9 +3749,7 @@ static void act_rollback_latest(GSimpleAction *a, GVariant *p, gpointer ud)
   if (app->vault == NULL) return;
   GError *err = NULL;
   if (bt_checkpoint_rollback(vault_root(app->vault), "HEAD", &err)) {
-    vault_rescan(app->vault, NULL, NULL);
-    bt_filetree_populate(app->tree, app->vault);
-    refresh_graph(app, FALSE);
+    sync_after_vault_mutation(app);
     show_toast(app, "Rolled back to HEAD checkpoint", 3);
   } else {
     bt_app_show_error(app, "Rollback failed", err->message);
@@ -3056,11 +3757,26 @@ static void act_rollback_latest(GSimpleAction *a, GVariant *p, gpointer ud)
   }
 }
 
+static void on_ask_hybrid_toggle(gboolean enabled, gpointer ud)
+{
+  BtApp *app = ud;
+  if (app == NULL)
+    return;
+  app->hybrid_search_enabled = enabled;
+  if (!app->smoke_test)
+    save_state_str("search", "hybrid_enabled", enabled ? "true" : "false", NULL);
+  if (enabled && app->vault != NULL && app->index != NULL && bt_embed_count_cached(app->index) == 0u)
+    bt_embed_sync_vault(app->vault, app->index, TRUE, NULL, NULL);
+}
+
 static void act_ask(GSimpleAction *a, GVariant *p, gpointer ud)
 {
   (void)a; (void)p;
   BtApp *app = ud;
-  bt_askbar_show(app->window, app->index, on_tree_select, on_ask_run_action, on_ask_send_agent, app);
+  const gchar *cli = resolve_ask_agent_cli(app);
+  bt_askbar_show_ex(app->window, app->vault, app->index, cli, app->hybrid_search_enabled,
+                    on_ask_hybrid_toggle, on_tree_select, on_ask_run_action,
+                    on_ask_send_agent, app);
 }
 
 static void act_rebuild_index(GSimpleAction *a, GVariant *p, gpointer ud)
@@ -3070,6 +3786,9 @@ static void act_rebuild_index(GSimpleAction *a, GVariant *p, gpointer ud)
   if (app->vault == NULL || app->index == NULL) return;
   vault_rescan(app->vault, NULL, NULL);
   if (bt_index_rebuild(app->index, app->vault, NULL)) {
+    if (app->hybrid_search_enabled)
+      bt_embed_sync_vault(app->vault, app->index, TRUE, NULL, NULL);
+    rebuild_link_snapshot(app);
     refresh_graph(app, FALSE);
     gchar *msg = g_strdup_printf("Index rebuilt (%u notes)", bt_index_note_count(app->index));
     show_toast(app, msg, 2);
@@ -3099,7 +3818,15 @@ static void act_organize_now(GSimpleAction *a, GVariant *p, gpointer ud)
   if (bt_organizer_run_batch(app->vault, app->index, NULL, BT_ORG_NO_AI, NULL, NULL, NULL, &st, &err)) {
     refresh_graph(app, TRUE);
     gchar *msg = g_strdup_printf("Organized %u notes (%u tags proposed)", st.notes_processed, st.tags_proposed);
-    show_toast(app, msg, 3);
+    if (app->toast_overlay != NULL && !app->smoke_test && st.tags_proposed > 0) {
+      AdwToast *t = adw_toast_new(msg);
+      adw_toast_set_timeout(t, 5);
+      adw_toast_set_button_label(t, "Review Tags");
+      adw_toast_set_action_name(t, "app.review-tags");
+      adw_toast_overlay_add_toast(app->toast_overlay, t);
+    } else {
+      show_toast(app, msg, 3);
+    }
     g_free(msg);
   } else {
     bt_app_show_error(app, "Organize failed", err ? err->message : "");
@@ -3107,12 +3834,140 @@ static void act_organize_now(GSimpleAction *a, GVariant *p, gpointer ud)
   }
 }
 
+static void act_import_notes(GSimpleAction *a, GVariant *p, gpointer ud) { (void)a; (void)p; show_import_dialog(ud); }
+static void act_review_tags(GSimpleAction *a, GVariant *p, gpointer ud) { (void)a; (void)p; show_tag_review_dialog(ud); }
+static void act_show_backlinks(GSimpleAction *a, GVariant *p, gpointer ud) { (void)a; (void)p; show_backlinks_dialog(ud); }
+static void act_find_in_note(GSimpleAction *a, GVariant *p, gpointer ud)
+{
+  (void)a; (void)p;
+  BtApp *app = ud;
+  if (app->editor != NULL)
+    bt_editorpane_show_find(app->editor, FALSE);
+}
+static void act_replace_in_note(GSimpleAction *a, GVariant *p, gpointer ud)
+{
+  (void)a; (void)p;
+  BtApp *app = ud;
+  if (app->editor != NULL)
+    bt_editorpane_show_find(app->editor, TRUE);
+}
+static void act_sync_embeddings(GSimpleAction *a, GVariant *p, gpointer ud)
+{
+  (void)a; (void)p;
+  BtApp *app = ud;
+  if (app->vault == NULL || app->index == NULL)
+    return;
+  guint edges = 0;
+  GError *err = NULL;
+  if (bt_embed_sync_vault(app->vault, app->index, TRUE, &edges, &err)) {
+    app->hybrid_search_enabled = TRUE;
+    if (!app->smoke_test)
+      save_state_str("search", "hybrid_enabled", "true", NULL);
+    refresh_graph(app, FALSE);
+    g_autofree gchar *msg = g_strdup_printf("Embeddings synced (%u vectors, %u similarity links)",
+                                            bt_embed_count_cached(app->index), edges);
+    show_toast(app, msg, 3);
+  } else {
+    bt_app_show_error(app, "Embedding sync failed", err ? err->message : "");
+    g_clear_error(&err);
+  }
+}
+
+static void add_shortcut_row(AdwPreferencesGroup *grp, const char *title, const char *accel)
+{
+  GtkWidget *row = adw_action_row_new();
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), title);
+  GtkWidget *lbl = gtk_label_new(accel);
+  gtk_widget_add_css_class(lbl, "monospace");
+  gtk_widget_add_css_class(lbl, "dim-label");
+  adw_action_row_add_suffix(ADW_ACTION_ROW(row), lbl);
+  adw_preferences_group_add(grp, row);
+}
+
+static gboolean on_shortcuts_win_key(GtkEventControllerKey *ctrl, guint keyval, guint keycode,
+                                   GdkModifierType state, gpointer ud)
+{
+  (void)ctrl;
+  (void)keycode;
+  (void)state;
+  if (keyval == GDK_KEY_Escape) {
+    gtk_window_close(GTK_WINDOW(ud));
+    return TRUE;
+  }
+  return FALSE;
+}
+
+static void show_shortcuts_dialog(BtApp *app)
+{
+  if (app == NULL || app->window == NULL || app->smoke_test)
+    return;
+  GtkWidget *win = adw_window_new();
+  gtk_window_set_title(GTK_WINDOW(win), "Keyboard Shortcuts");
+  gtk_window_set_transient_for(GTK_WINDOW(win), app->window);
+  gtk_window_set_modal(GTK_WINDOW(win), TRUE);
+  gtk_window_set_default_size(GTK_WINDOW(win), 560, 620);
+
+  GtkEventController *kc = gtk_event_controller_key_new();
+  g_signal_connect(kc, "key-pressed", G_CALLBACK(on_shortcuts_win_key), win);
+  gtk_widget_add_controller(win, kc);
+
+  GtkWidget *tv = adw_toolbar_view_new();
+  adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(tv), adw_header_bar_new());
+
+  GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 18);
+  gtk_widget_set_margin_top(box, 16);
+  gtk_widget_set_margin_bottom(box, 16);
+  gtk_widget_set_margin_start(box, 16);
+  gtk_widget_set_margin_end(box, 16);
+
+  GtkWidget *g_notes = adw_preferences_group_new();
+  adw_preferences_group_set_title(ADW_PREFERENCES_GROUP(g_notes), "Notes & Navigation");
+  add_shortcut_row(ADW_PREFERENCES_GROUP(g_notes), "Open Vault", "Ctrl+O");
+  add_shortcut_row(ADW_PREFERENCES_GROUP(g_notes), "New Note", "Ctrl+N");
+  add_shortcut_row(ADW_PREFERENCES_GROUP(g_notes), "Save Active Note", "Ctrl+S");
+  add_shortcut_row(ADW_PREFERENCES_GROUP(g_notes), "Rename Active Note", "F2");
+  add_shortcut_row(ADW_PREFERENCES_GROUP(g_notes), "Quick Open Note", "Ctrl+P");
+  add_shortcut_row(ADW_PREFERENCES_GROUP(g_notes), "Ask / Search & Commands", "Ctrl+E");
+  add_shortcut_row(ADW_PREFERENCES_GROUP(g_notes), "Navigate Back / Forward", "Alt+Left / Alt+Right");
+  add_shortcut_row(ADW_PREFERENCES_GROUP(g_notes), "Follow / Create Wikilink", "Ctrl+Enter");
+  add_shortcut_row(ADW_PREFERENCES_GROUP(g_notes), "Next / Previous Link", "Ctrl+Alt+Right / Left");
+  add_shortcut_row(ADW_PREFERENCES_GROUP(g_notes), "Find / Replace in Note", "Ctrl+F / Ctrl+H");
+  gtk_box_append(GTK_BOX(box), g_notes);
+
+  GtkWidget *g_ws = adw_preferences_group_new();
+  adw_preferences_group_set_title(ADW_PREFERENCES_GROUP(g_ws), "Workspace, Graph & Terminal");
+  add_shortcut_row(ADW_PREFERENCES_GROUP(g_ws), "Toggle Sidebar", "F9");
+  add_shortcut_row(ADW_PREFERENCES_GROUP(g_ws), "Rescan Vault", "F5");
+  add_shortcut_row(ADW_PREFERENCES_GROUP(g_ws), "Toggle Terminal Pane", "Ctrl+`");
+  add_shortcut_row(ADW_PREFERENCES_GROUP(g_ws), "Switch Terminal Tabs", "Ctrl+Tab / Ctrl+Shift+Tab / Ctrl+1..8");
+  add_shortcut_row(ADW_PREFERENCES_GROUP(g_ws), "Toggle Brain Graph", "Ctrl+G");
+  add_shortcut_row(ADW_PREFERENCES_GROUP(g_ws), "Backlinks & Orphans", "Alt+B");
+  add_shortcut_row(ADW_PREFERENCES_GROUP(g_ws), "Graph Controls (focused)", "F Center · R Re-layout · O Orphans · Space Folder");
+  add_shortcut_row(ADW_PREFERENCES_GROUP(g_ws), "Graph Frame-Time Overlay", "Ctrl+Shift+F");
+  add_shortcut_row(ADW_PREFERENCES_GROUP(g_ws), "Keyboard Shortcuts", "F1");
+  add_shortcut_row(ADW_PREFERENCES_GROUP(g_ws), "Quit BrainTerm", "Ctrl+Q");
+  gtk_box_append(GTK_BOX(box), g_ws);
+
+  GtkWidget *scr = gtk_scrolled_window_new();
+  gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scr), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+  gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scr), box);
+  adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(tv), scr);
+  adw_window_set_content(ADW_WINDOW(win), tv);
+  gtk_window_present(GTK_WINDOW(win));
+}
+
+static void act_shortcuts(GSimpleAction *a, GVariant *p, gpointer ud)
+{
+  (void)a; (void)p;
+  show_shortcuts_dialog(ud);
+}
+
 static void act_about(GSimpleAction *a, GVariant *p, gpointer ud)
 {
   (void)a; (void)p;
   BtApp *app = ud;
   bt_app_show_error(app, "BrainTerm 0.1.0",
-                    "Local-first Markdown second-brain with embedded ConPTY/libvterm terminal and 2D Brain Graph.\n"
+                    "Local-first Markdown second-brain with embedded ConPTY/libvterm terminal and Brain Graph (2D, 3D, Galaxy, Timeline).\n"
                     "Build: " BT_BUILD_STAMP);
 }
 
@@ -3128,6 +3983,7 @@ static void act_quit(GSimpleAction *a, GVariant *p, gpointer ud)
 
 static const GActionEntry app_actions[] = {
   {"open-vault", act_open_vault, NULL, NULL, NULL, {0}},
+  {"create-starter-vault", act_create_starter_vault, NULL, NULL, NULL, {0}},
   {"new-note", act_new_note, NULL, NULL, NULL, {0}},
   {"rename-active", act_rename_active, NULL, NULL, NULL, {0}},
   {"open-note", act_open_note, "s", NULL, NULL, {0}},
@@ -3147,6 +4003,12 @@ static const GActionEntry app_actions[] = {
   {"rebuild-index", act_rebuild_index, NULL, NULL, NULL, {0}},
   {"audit-index", act_audit_index, NULL, NULL, NULL, {0}},
   {"organize-now", act_organize_now, NULL, NULL, NULL, {0}},
+  {"review-tags", act_review_tags, NULL, NULL, NULL, {0}},
+  {"import-notes", act_import_notes, NULL, NULL, NULL, {0}},
+  {"sync-embeddings", act_sync_embeddings, NULL, NULL, NULL, {0}},
+  {"show-backlinks", act_show_backlinks, NULL, NULL, NULL, {0}},
+  {"find-in-note", act_find_in_note, NULL, NULL, NULL, {0}},
+  {"replace-in-note", act_replace_in_note, NULL, NULL, NULL, {0}},
   {"toggle-graph", act_toggle_graph, NULL, NULL, NULL, {0}},
   {"toggle-graph-debug", act_toggle_graph_debug, NULL, NULL, NULL, {0}},
   {"nav-back", act_nav_back, NULL, NULL, NULL, {0}},
@@ -3154,6 +4016,7 @@ static const GActionEntry app_actions[] = {
   {"links-single-click", NULL, NULL, "true", act_links_single_click_state, {0}},
   {"confirm-external-urls", NULL, NULL, "true", act_confirm_external_urls_state, {0}},
   {"preferences", act_preferences, NULL, NULL, NULL, {0}},
+  {"shortcuts", act_shortcuts, NULL, NULL, NULL, {0}},
   {"about", act_about, NULL, NULL, NULL, {0}},
   {"quit", act_quit, NULL, NULL, NULL, {0}},
 };
@@ -3843,13 +4706,18 @@ static GMenu *build_primary_menu(void)
   GMenu *m = g_menu_new();
   GMenu *s1 = g_menu_new();
   g_menu_append(s1, "Open Vault…", "app.open-vault");
+  g_menu_append(s1, "New Starter Vault…", "app.create-starter-vault");
   g_menu_append(s1, "New Note", "app.new-note");
+  g_menu_append(s1, "Import Chats / Sessions…", "app.import-notes");
   g_menu_append_section(m, NULL, G_MENU_MODEL(s1));
 
   GMenu *s2 = g_menu_new();
+  g_menu_append(s2, "Backlinks & Orphans…", "app.show-backlinks");
   g_menu_append(s2, "Rebuild Index", "app.rebuild-index");
   g_menu_append(s2, "Audit Index", "app.audit-index");
   g_menu_append(s2, "Organize Vault", "app.organize-now");
+  g_menu_append(s2, "Review AI Tags…", "app.review-tags");
+  g_menu_append(s2, "Sync Embeddings", "app.sync-embeddings");
   g_menu_append(s2, "Checkpoint", "app.checkpoint");
   g_menu_append(s2, "Rollback…", "app.rollback");
   g_menu_append_section(m, NULL, G_MENU_MODEL(s2));
@@ -3858,6 +4726,7 @@ static GMenu *build_primary_menu(void)
   g_menu_append(s3, "Open links with single click", "app.links-single-click");
   g_menu_append(s3, "Confirm external URLs", "app.confirm-external-urls");
   g_menu_append(s3, "Preferences", "app.preferences");
+  g_menu_append(s3, "Keyboard Shortcuts", "app.shortcuts");
   g_menu_append(s3, "About BrainTerm", "app.about");
   g_menu_append_section(m, NULL, G_MENU_MODEL(s3));
 
@@ -3897,16 +4766,34 @@ static GtkWidget *wrap_in_card(GtkWidget *child, const gchar *name)
   return card;
 }
 
-static GtkWidget *make_nav_toggle(const gchar *icon_name, const gchar *label, const gchar *tooltip)
+static void update_nav_label(GdkSurface *surface, gint width, gint height, GtkWidget *label)
+{
+  (void)surface;
+  (void)height;
+  gtk_widget_set_visible(label, width >= 960);
+}
+
+static void on_nav_window_realize(GtkWidget *window, GtkWidget *label)
+{
+  GdkSurface *surface = gtk_native_get_surface(GTK_NATIVE(window));
+  g_signal_connect_object(surface, "layout", G_CALLBACK(update_nav_label), label, 0);
+  update_nav_label(surface, gdk_surface_get_width(surface), 0, label);
+}
+
+static GtkWidget *make_nav_toggle(GtkWindow *window, const gchar *icon_name,
+                                  const gchar *label, const gchar *tooltip)
 {
   GtkWidget *btn = gtk_toggle_button_new();
   GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
   GtkWidget *img = gtk_image_new_from_icon_name(icon_name);
+  GtkWidget *text = gtk_label_new(label);
   gtk_image_set_pixel_size(GTK_IMAGE(img), 16);
   gtk_box_append(GTK_BOX(box), img);
-  gtk_box_append(GTK_BOX(box), gtk_label_new(label));
+  gtk_box_append(GTK_BOX(box), text);
   gtk_button_set_child(GTK_BUTTON(btn), box);
   gtk_widget_set_tooltip_text(btn, tooltip);
+  gtk_accessible_update_property(GTK_ACCESSIBLE(btn), GTK_ACCESSIBLE_PROPERTY_LABEL, label, -1);
+  g_signal_connect_object(window, "realize", G_CALLBACK(on_nav_window_realize), text, G_CONNECT_AFTER);
   return btn;
 }
 
@@ -3959,6 +4846,8 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
   GtkWidget *sb_btn = gtk_button_new_from_icon_name("bt-sidebar-symbolic");
   gtk_widget_add_css_class(sb_btn, "bt-iconbtn");
   gtk_widget_set_tooltip_text(sb_btn, "Toggle Sidebar (F9)");
+  gtk_accessible_update_property(GTK_ACCESSIBLE(sb_btn), GTK_ACCESSIBLE_PROPERTY_LABEL,
+                                 "Toggle Sidebar", -1);
   gtk_actionable_set_action_name(GTK_ACTIONABLE(sb_btn), "app.toggle-sidebar");
   adw_header_bar_pack_start(ADW_HEADER_BAR(header), sb_btn);
 
@@ -3970,6 +4859,8 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
   gtk_widget_add_css_class(menu_btn, "bt-iconbtn");
   gtk_menu_button_set_icon_name(GTK_MENU_BUTTON(menu_btn), "bt-menu-symbolic");
   gtk_widget_set_tooltip_text(menu_btn, "Menu");
+  gtk_accessible_update_property(GTK_ACCESSIBLE(menu_btn), GTK_ACCESSIBLE_PROPERTY_LABEL,
+                                 "Main Menu", -1);
   GMenu *pmenu = build_primary_menu();
   gtk_menu_button_set_menu_model(GTK_MENU_BUTTON(menu_btn), G_MENU_MODEL(pmenu));
   g_object_unref(pmenu);
@@ -3994,6 +4885,17 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
   bt_filetree_set_action_cb(app->tree, on_tree_action, app);
   app->editor = bt_editorpane_new(on_editor_save, on_editor_link, on_editor_dirty, app);
   bt_editorpane_set_conflict_cbs(app->editor, on_editor_conflict_diff, on_editor_conflict_reload);
+  bt_editorpane_set_onboarding_cbs(app->editor, on_editor_open_vault_cb,
+                                   on_editor_create_vault_cb, app);
+  app->show_line_numbers = (app->capture_dir == NULL && !app_is_ro_bench(app))
+                               ? load_saved_pref_bool("editor", "show_line_numbers", TRUE)
+                               : TRUE;
+  bt_editorpane_set_line_numbers(app->editor, app->show_line_numbers);
+  app->hybrid_search_enabled = (app->capture_dir == NULL && !app_is_ro_bench(app))
+                                   ? load_saved_pref_bool("search", "hybrid_enabled", FALSE)
+                                   : FALSE;
+  g_free(app->preferred_agent_cli);
+  app->preferred_agent_cli = load_saved_pref_str("agent", "preferred_cli", "auto");
   if (app->capture_dir == NULL && !app_is_ro_bench(app)) {
     bt_app_set_links_open_on_click(app, bt_app_load_links_open_on_click(), FALSE);
     gboolean corrupt_confirm = FALSE;
@@ -4050,9 +4952,9 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
   GtkWidget *seg = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
   gtk_widget_set_name(seg, "bt-segmented");
   gtk_widget_add_css_class(seg, "bt-segmented");
-  app->seg_editor = make_nav_toggle("bt-editor-symbolic", "Editor", "Markdown Editor");
-  app->seg_sessions = make_nav_toggle("bt-sessions-symbolic", "Sessions", "Agent Sessions");
-  app->seg_graph = make_nav_toggle("bt-graph-symbolic", "Graph", "Toggle Side-by-Side Graph (Ctrl+G)");
+  app->seg_editor = make_nav_toggle(app->window, "bt-editor-symbolic", "Editor", "Markdown Editor");
+  app->seg_sessions = make_nav_toggle(app->window, "bt-sessions-symbolic", "Sessions", "Agent Sessions");
+  app->seg_graph = make_nav_toggle(app->window, "bt-graph-symbolic", "Graph", "Toggle Side-by-Side Graph (Ctrl+G)");
   gtk_box_append(GTK_BOX(seg), app->seg_editor);
   gtk_box_append(GTK_BOX(seg), app->seg_sessions);
   gtk_box_append(GTK_BOX(seg), app->seg_graph);
@@ -4117,11 +5019,15 @@ static void on_activate(GtkApplication *gtk_app, gpointer ud)
   GtkWidget *sb_new = gtk_button_new_from_icon_name("bt-plus-symbolic");
   gtk_widget_add_css_class(sb_new, "bt-iconbtn");
   gtk_widget_set_tooltip_text(sb_new, "New Note");
+  gtk_accessible_update_property(GTK_ACCESSIBLE(sb_new), GTK_ACCESSIBLE_PROPERTY_LABEL,
+                                 "New Note", -1);
   gtk_actionable_set_action_name(GTK_ACTIONABLE(sb_new), "app.new-note");
 
   GtkWidget *sb_col = gtk_button_new_from_icon_name("bt-sidebar-symbolic");
   gtk_widget_add_css_class(sb_col, "bt-iconbtn");
   gtk_widget_set_tooltip_text(sb_col, "Collapse Sidebar (F9)");
+  gtk_accessible_update_property(GTK_ACCESSIBLE(sb_col), GTK_ACCESSIBLE_PROPERTY_LABEL,
+                                 "Collapse Sidebar", -1);
   gtk_actionable_set_action_name(GTK_ACTIONABLE(sb_col), "app.toggle-sidebar");
 
   gtk_box_append(GTK_BOX(sb_hdr), app->sidebar_vault_lbl);
@@ -4337,6 +5243,8 @@ static void on_startup(GApplication *gapp, gpointer ud)
   static const gchar *const nav_back_accels[] = {"<Alt>Left", NULL};
   static const gchar *const nav_forward_accels[] = {"<Alt>Right", NULL};
   static const gchar *const term_accels[] = {"<Primary>grave", NULL};
+  static const gchar *const backlinks_accels[] = {"<Alt>b", NULL};
+  static const gchar *const shortcuts_accels[] = {"F1", NULL};
   static const gchar *const quit_accels[] = {"<Primary>q", NULL};
   gtk_application_set_accels_for_action(GTK_APPLICATION(app->adw_app), "app.save-active", save_accels);
   gtk_application_set_accels_for_action(GTK_APPLICATION(app->adw_app), "app.new-note", new_accels);
@@ -4351,6 +5259,8 @@ static void on_startup(GApplication *gapp, gpointer ud)
   gtk_application_set_accels_for_action(GTK_APPLICATION(app->adw_app), "app.nav-back", nav_back_accels);
   gtk_application_set_accels_for_action(GTK_APPLICATION(app->adw_app), "app.nav-forward", nav_forward_accels);
   gtk_application_set_accels_for_action(GTK_APPLICATION(app->adw_app), "app.toggle-terminal", term_accels);
+  gtk_application_set_accels_for_action(GTK_APPLICATION(app->adw_app), "app.show-backlinks", backlinks_accels);
+  gtk_application_set_accels_for_action(GTK_APPLICATION(app->adw_app), "app.shortcuts", shortcuts_accels);
   gtk_application_set_accels_for_action(GTK_APPLICATION(app->adw_app), "app.quit", quit_accels);
 }
 
@@ -4443,6 +5353,7 @@ void bt_app_free(BtApp *app)
   if (app->bench_fo_warm_frames != NULL)
     g_array_free(app->bench_fo_warm_frames, TRUE);
   g_free(app->last_statusbar_notice);
+  g_free(app->preferred_agent_cli);
   g_clear_object(&app->adw_app);
   g_free(app);
   bt_checkpoint_shutdown();

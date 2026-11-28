@@ -27,10 +27,12 @@ BtAskMode bt_search_detect_mode(const gchar *input, const gchar **trimmed_query)
 GPtrArray *bt_search_match_commands(const gchar *query);
 
 /* Composes the visible fixed-form terminal command for Ask mode (§6.B4, §8.1):
- *   claude "Answer using [[Note1]] [[Note2]]: <sanitized question>"\r
+ *   <cli> "Answer using [[Note1]] [[Note2]]: <sanitized question>"\r
  * Never builds a chat UI (P6) and never leaves raw shell metacharacters. */
 gchar *bt_search_compose_ask_agent_cmd(const gchar *question, const GPtrArray *hits,
                                        guint max_refs);
+gchar *bt_search_compose_ask_agent_cmd_for(const gchar *cli_name, const gchar *question,
+                                           const GPtrArray *hits, guint max_refs);
 
 G_END_DECLS
 
