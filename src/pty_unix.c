@@ -10,17 +10,20 @@
 
 #include <errno.h>
 #include <fcntl.h>
-#ifdef __APPLE__
-#include <util.h>
-#else
-#include <pty.h>
-#endif
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/wait.h>
+#include <termios.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <util.h>
+#else
+/* Declare forkpty explicitly because -I../src shadows system <pty.h>. */
+extern int forkpty(int *amaster, char *name, const struct termios *termp,
+                   const struct winsize *winp);
+#endif
 
 struct BtPty {
   int master_fd;

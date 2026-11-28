@@ -3966,7 +3966,7 @@ static void act_about(GSimpleAction *a, GVariant *p, gpointer ud)
 {
   (void)a; (void)p;
   BtApp *app = ud;
-  bt_app_show_error(app, "BrainTerm 0.1.0",
+  bt_app_show_error(app, "BrainTerm 1.0.0",
                     "Local-first Markdown second-brain with embedded ConPTY/libvterm terminal and Brain Graph (2D, 3D, Galaxy, Timeline).\n"
                     "Build: " BT_BUILD_STAMP);
 }
@@ -5149,7 +5149,7 @@ static gint on_handle_local_options(GApplication *gapp, GVariantDict *opts, gpoi
   (void)gapp;
   BtApp *app = ud;
   if (g_variant_dict_contains(opts, "version")) {
-    printf("BrainTerm 0.1.0 (build %s)\n", BT_BUILD_STAMP);
+    printf("BrainTerm 1.0.0 (build %s)\n", BT_BUILD_STAMP);
     fflush(stdout);
     return 0;
   }

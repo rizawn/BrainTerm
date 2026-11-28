@@ -26,6 +26,7 @@ jobs:
         with:
           fetch-depth: 0
       - uses: msys2/setup-msys2@v2
+        id: msys2
         with:
           msystem: UCRT64
           update: true
@@ -56,7 +57,8 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ github.event.inputs.tag || github.ref_name }}"
-          ./scripts/package-win.ps1 -BuildDir build -OutDir dist/brainterm -SmokeTest
+          $msysRoot = "${{ steps.msys2.outputs.msys2-location }}\ucrt64"
+          ./scripts/package-win.ps1 -BuildDir build -OutDir dist/brainterm -MsysRoot $msysRoot -SmokeTest
           Copy-Item -Recurse -Force vault-template dist/brainterm/vault-template
           New-Item -ItemType Directory -Force -Path release-assets | Out-Null
           Compress-Archive -Path dist/brainterm/* -DestinationPath "release-assets/BrainTerm-$tag-windows-x64.zip" -Force

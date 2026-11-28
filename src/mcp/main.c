@@ -259,7 +259,7 @@ int main(int argc, char **argv)
       cJSON_AddItemToObject(res, "capabilities", caps);
       cJSON *info = cJSON_CreateObject();
       cJSON_AddStringToObject(info, "name", "bt-mcp");
-      cJSON_AddStringToObject(info, "version", "0.1.0");
+      cJSON_AddStringToObject(info, "version", "1.0.0");
       cJSON_AddItemToObject(res, "serverInfo", info);
       cJSON_AddBoolToObject(res, "readOnly", 1);
       send_result(id, res);
