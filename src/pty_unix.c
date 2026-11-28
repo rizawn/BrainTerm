@@ -1,12 +1,20 @@
 /* pty_unix.c — POSIX openpty/forkpty PTY implementation (tier-2, §5.2, §5.4). */
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE
+#else
 #define _DEFAULT_SOURCE
 #define _POSIX_C_SOURCE 200809L
+#endif
 
 #include "pty.h"
 
 #include <errno.h>
 #include <fcntl.h>
+#ifdef __APPLE__
+#include <util.h>
+#else
 #include <pty.h>
+#endif
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>

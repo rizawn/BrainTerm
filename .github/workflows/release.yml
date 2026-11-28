@@ -1,0 +1,208 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v1.0.0)'
+        required: true
+        default: 'v1.0.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Build Windows (x64)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-meson
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-gtk4
+            mingw-w64-ucrt-x86_64-libadwaita
+            mingw-w64-ucrt-x86_64-gtksourceview5
+            mingw-w64-ucrt-x86_64-libyaml
+            mingw-w64-ucrt-x86_64-sqlite3
+            mingw-w64-ucrt-x86_64-libgit2
+            mingw-w64-ucrt-x86_64-libvterm
+            mingw-w64-ucrt-x86_64-md4c
+            mingw-w64-ucrt-x86_64-cjson
+            mingw-w64-ucrt-x86_64-cmocka
+            mingw-w64-ucrt-x86_64-libepoxy
+            mingw-w64-ucrt-x86_64-harfbuzz
+            mingw-w64-ucrt-x86_64-freetype
+            mingw-w64-ucrt-x86_64-cairo
+      - name: Configure & Build
+        run: |
+          meson setup build --buildtype=release -Dwerror=true -Dtests=false
+          meson compile -C build
+      - name: Package Portable Windows Bundle & Smoke Test
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.tag || github.ref_name }}"
+          ./scripts/package-win.ps1 -BuildDir build -OutDir dist/brainterm -SmokeTest
+          Copy-Item -Recurse -Force vault-template dist/brainterm/vault-template
+          New-Item -ItemType Directory -Force -Path release-assets | Out-Null
+          Compress-Archive -Path dist/brainterm/* -DestinationPath "release-assets/BrainTerm-$tag-windows-x64.zip" -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: asset-windows-x64
+          path: release-assets/*.zip
+
+  build-linux:
+    name: Build Linux (x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc meson ninja-build pkg-config \
+            libgtk-4-dev libadwaita-1-dev libgtksourceview-5-dev \
+            libyaml-dev libsqlite3-dev libgit2-dev \
+            libvterm-dev libmd4c-dev libcjson-dev \
+            libepoxy-dev libharfbuzz-dev libfreetype-dev libcairo2-dev \
+            libfontconfig1-dev
+      - name: Configure & Build
+        run: |
+          meson setup build --buildtype=release --prefix=/usr/local -Dwerror=true -Dtests=false
+          meson compile -C build
+          DESTDIR="$PWD/stage" meson install -C build
+      - name: Package Linux Tarball
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          PKG="BrainTerm-${TAG}-linux-x86_64"
+          mkdir -p "dist/${PKG}/licenses" release-assets
+          cp -a stage/usr/local/* "dist/${PKG}/"
+          cp -a vault-template "dist/${PKG}/vault-template"
+          cp -a docs/THIRD_PARTY_LICENSES.md data/fonts/LICENSE-Inter.txt data/fonts/LICENSE-STIXTwoMath.txt data/fonts/OFL-JetBrainsMono.txt "dist/${PKG}/licenses/"
+          cat > "dist/${PKG}/INSTALL.txt" <<'EOF'
+          BrainTerm Linux (x86_64) Portable Archive
+          =========================================
+          Install runtime libraries (Ubuntu/Debian):
+            sudo apt-get install libgtk-4-1 libadwaita-1-0 libgtksourceview-5-0 \
+              libyaml-0-2 libsqlite3-0 libgit2-1.7 libvterm0 libmd4c0 libcjson1 \
+              libepoxy0 libharfbuzz0b libfreetype6 libcairo2 libfontconfig1
+
+          Run:
+            ./bin/bt --vault ./vault-template
+          MCP server:
+            ./bin/bt-mcp --vault ./vault-template
+          EOF
+          tar -C dist -czf "release-assets/${PKG}.tar.gz" "${PKG}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: asset-linux-x86_64
+          path: release-assets/*.tar.gz
+
+  build-macos:
+    name: Build macOS (arm64)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install Dependencies (Homebrew)
+        run: |
+          brew update
+          brew install meson ninja pkg-config \
+            gtk4 libadwaita gtksourceview5 \
+            libyaml sqlite libgit2 libvterm md4c cjson \
+            libepoxy harfbuzz freetype cairo fontconfig
+      - name: Configure & Build
+        run: |
+          export PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig:$(brew --prefix sqlite)/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+          meson setup build --buildtype=release --prefix=/usr/local -Dwerror=false -Dtests=false
+          meson compile -C build
+          DESTDIR="$PWD/stage" meson install -C build
+      - name: Package macOS Tarball
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          PKG="BrainTerm-${TAG}-macos-arm64"
+          mkdir -p "dist/${PKG}/licenses" release-assets
+          cp -a stage/usr/local/* "dist/${PKG}/"
+          cp -a vault-template "dist/${PKG}/vault-template"
+          cp -a docs/THIRD_PARTY_LICENSES.md data/fonts/LICENSE-Inter.txt data/fonts/LICENSE-STIXTwoMath.txt data/fonts/OFL-JetBrainsMono.txt "dist/${PKG}/licenses/"
+          cat > "dist/${PKG}/INSTALL.txt" <<'EOF'
+          BrainTerm macOS (Apple Silicon / arm64) Archive
+          ===============================================
+          Install runtime libraries via Homebrew:
+            brew install gtk4 libadwaita gtksourceview5 libyaml sqlite libgit2 \
+              libvterm md4c cjson libepoxy harfbuzz freetype cairo fontconfig
+
+          Run:
+            ./bin/bt --vault ./vault-template
+          MCP server:
+            ./bin/bt-mcp --vault ./vault-template
+          EOF
+          tar -C dist -czf "release-assets/${PKG}.tar.gz" "${PKG}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: asset-macos-arm64
+          path: release-assets/*.tar.gz
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [build-windows, build-linux, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: all-assets
+          merge-multiple: true
+      - name: Generate SHA256SUMS
+        working-directory: all-assets
+        run: |
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - name: Create or Update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          cat > /tmp/release-notes.md <<'EOF'
+          ## BrainTerm v1.0.0
+
+          Local-first, plain-Markdown personal knowledge workspace and embedded terminal cockpit built in C17 + GTK4 + OpenGL 3.3 Core.
+
+          ### Highlights
+          - **Plain-Markdown Vault (`L0`)**: Canonical path containment, atomic writes, external conflict diff/resolve, `F2` rename, and Starter Vault onboarding.
+          - **Editor, Wikilinks & Live LaTeX Math**: `GtkSourceView 5`, `Ctrl+F`/`Ctrl+H` Find & Replace, clickable `[[wikilinks]]` with ambiguity chooser, 100-jump Back/Forward history, and in-place HarfBuzz/STIXTwoMath typesetting.
+          - **Brain Graph (2D Clean/Glow, 3D Cortex, Galaxy, Timeline)**: Deterministic pure-C Obsidian-style 2D layout (`Clean` & `Glow`), drag-to-pin, folder nodes with Andromeda palette, and zero idle redraws on convergence.
+          - **Embedded Multi-Tab Terminal & AI Workflows**: Up to 8 real shell tabs (`ConPTY` on Windows, POSIX PTY on Linux/macOS), `libgit2` auto-checkpoints, `>import chats`, `>review ai tags`, `>sync embeddings`, `Alt+B` Backlinks & Orphans, and `Ctrl+E` Ask Bar (FTS5 + offline Hybrid).
+          - **Read-Only MCP Server (`bt-mcp`)**: Stdio JSON-RPC 2.0 bridge (`search_memory`, `ask_memory`, `recent`, `get_note`, `backlinks`) for Claude Desktop & Cursor.
+
+          ### Downloads
+          - **Windows (x64, Portable)**: `BrainTerm-v1.0.0-windows-x64.zip` — Unzip and run `bt.exe` (includes all runtime DLLs + `bt-mcp.exe` + `licenses/`).
+          - **Linux (x86_64)**: `BrainTerm-v1.0.0-linux-x86_64.tar.gz` — See `INSTALL.txt` inside for Ubuntu/Debian runtime packages.
+          - **macOS (Apple Silicon arm64)**: `BrainTerm-v1.0.0-macos-arm64.tar.gz` — See `INSTALL.txt` inside for Homebrew runtime packages.
+          - **Checksums**: `SHA256SUMS.txt`
+          EOF
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" all-assets/* --clobber
+          else
+            gh release create "$TAG" all-assets/* \
+              --title "BrainTerm $TAG" \
+              --notes-file /tmp/release-notes.md
+          fi
